@@ -38,6 +38,24 @@ export interface AttemptLease {
   readonly expiresAt: string;
 }
 
+export async function reserveAttemptInTransaction(
+  client: PostgresClient,
+  input: ReserveWorkflowAttempt,
+): Promise<void> {
+  required(input.runId, 'runId');
+  required(input.attemptId, 'attemptId');
+  required(input.nodeId, 'nodeId');
+  required(input.instanceId, 'instanceId');
+  required(input.executor, 'executor');
+  positive(input.attemptNumber, 'attemptNumber');
+  await client.query(
+    `INSERT INTO agent_workflow.workflow_attempt
+       (run_id, attempt_id, node_id, instance_id, attempt_number, executor, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
+    [input.runId, input.attemptId, input.nodeId, input.instanceId, input.attemptNumber, input.executor],
+  );
+}
+
 type AttemptRow = { status: AttemptStatus };
 type LeaseRow = {
   fence: string | number;
@@ -75,19 +93,8 @@ export class PostgresWorkflowAttemptStore {
   constructor(private readonly pool: PostgresPool) {}
 
   async reserve(input: ReserveWorkflowAttempt): Promise<void> {
-    required(input.runId, 'runId');
-    required(input.attemptId, 'attemptId');
-    required(input.nodeId, 'nodeId');
-    required(input.instanceId, 'instanceId');
-    required(input.executor, 'executor');
-    positive(input.attemptNumber, 'attemptNumber');
     await withPostgresTransaction(this.pool, async (client) => {
-      await client.query(
-        `INSERT INTO agent_workflow.workflow_attempt
-           (run_id, attempt_id, node_id, instance_id, attempt_number, executor, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
-        [input.runId, input.attemptId, input.nodeId, input.instanceId, input.attemptNumber, input.executor],
-      );
+      await reserveAttemptInTransaction(client, input);
     });
   }
 

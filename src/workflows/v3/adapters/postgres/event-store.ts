@@ -132,7 +132,7 @@ async function allocateSequence(client: PostgresClient, runId: string): Promise<
   return asSequence(row.sequence);
 }
 
-async function appendInTransaction(
+export async function appendWorkflowEventInTransaction(
   client: PostgresClient,
   input: AppendWorkflowEvent,
 ): Promise<number> {
@@ -196,7 +196,7 @@ export class PostgresWorkflowEventStore {
           JSON.stringify(record.authorizationSnapshot),
         ],
       );
-      await appendInTransaction(client, {
+      await appendWorkflowEventInTransaction(client, {
         runId: record.runId,
         eventType: 'runStarted',
         payload: { runId: record.runId },
@@ -207,7 +207,7 @@ export class PostgresWorkflowEventStore {
 
   /** Append one event, projection update and outbox message as one commit. */
   async append(input: AppendWorkflowEvent): Promise<number> {
-    return this.transaction((client) => appendInTransaction(client, input));
+    return this.transaction((client) => appendWorkflowEventInTransaction(client, input));
   }
 
   /** Read the immutable event stream in the only valid replay order. */
