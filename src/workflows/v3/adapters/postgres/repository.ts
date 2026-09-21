@@ -201,8 +201,10 @@ export class PostgresWorkflowRepository {
         runId: input.runId,
         eventType: input.event.type,
         payload: eventPayload(input.event),
-        status: input.resolution === 'approved' ? 'running' : 'failed',
-        terminal: input.resolution === 'rejected',
+        // gateResolved changes the materialized node; the scheduler owns the
+        // subsequent runFailed event for rejection. Do not expose a terminal
+        // run projection before that authoritative terminal event exists.
+        status: 'running',
       });
     });
   }

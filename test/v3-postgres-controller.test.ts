@@ -26,6 +26,8 @@ function memoryRepository(): DurableControllerRepository & {
     },
     async markAttemptDispatched(_lease, sandboxId) { sandboxIds.push(sandboxId); },
     async settleAttempt(input) { return store(input.event); },
+    async openGate(input) { return store(input.event); },
+    async resolveGate(input) { return store(input.event); },
   };
 }
 
@@ -63,6 +65,56 @@ describe('PostgresWorkflowController', () => {
     expect(outcome.snapshot.runStatus).toBe('failed');
     expect(repository.events.map((event) => event.type)).toEqual([
       'runStarted', 'nodeDispatched', 'nodeFailed', 'runFailed',
+    ]);
+  });
+
+  it('suspends on a durable gate and resumes after approval', async () => {
+    const repository = memoryRepository();
+    const controller = new PostgresWorkflowController(repository, async () => ({
+      status: 'succeeded', manifestPath: '/runtime/manifest.json',
+    }), { holderId: 'controller-1', executorId: 'pi-opensandbox' });
+    const dag = {
+      runId: 'run-1',
+      nodes: [{
+        id: 'node-1', type: 'goal' as const, goal: 'Do the work', depends: [],
+        humanGate: { prompt: 'Proceed?' },
+      }],
+    };
+
+    const suspended = await controller.drive(dag);
+    expect(suspended.snapshot.nodes.get('node-1')?.status).toBe('gateWaiting');
+    expect(repository.events.map((event) => event.type)).toEqual(['runStarted', 'gateDispatched']);
+
+    const completed = await controller.resolveWait(dag, {
+      waitId: 'node-1#001-gate', resolution: 'approved', by: 'operator-1', selected: 'approve',
+    });
+    expect(completed.snapshot.runStatus).toBe('succeeded');
+    expect(repository.events.map((event) => event.type)).toEqual([
+      'runStarted', 'gateDispatched', 'gateResolved',
+      'nodeDispatched', 'nodeSucceeded', 'runSucceeded',
+    ]);
+  });
+
+  it('turns a durable gate rejection into the official failed terminal event', async () => {
+    const repository = memoryRepository();
+    const controller = new PostgresWorkflowController(repository, async () => {
+      throw new Error('executor must not run after rejection');
+    }, { holderId: 'controller-1', executorId: 'pi-opensandbox' });
+    const dag = {
+      runId: 'run-1',
+      nodes: [{
+        id: 'node-1', type: 'goal' as const, goal: 'Do the work', depends: [],
+        humanGate: { prompt: 'Proceed?' },
+      }],
+    };
+
+    await controller.drive(dag);
+    const completed = await controller.resolveWait(dag, {
+      waitId: 'node-1#001-gate', resolution: 'rejected', by: 'operator-1', selected: 'reject',
+    });
+    expect(completed.snapshot.runStatus).toBe('failed');
+    expect(repository.events.map((event) => event.type)).toEqual([
+      'runStarted', 'gateDispatched', 'gateResolved', 'runFailed',
     ]);
   });
 });
