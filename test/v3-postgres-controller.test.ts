@@ -1,0 +1,68 @@
+import { describe, expect, it } from 'vitest';
+import { PostgresWorkflowController } from '../src/workflows/v3/adapters/postgres/controller.js';
+import type { DurableControllerRepository } from '../src/workflows/v3/adapters/postgres/controller.js';
+import type { StoredEvent, V3Event } from '../src/workflows/v3/event-contract.js';
+import type { AttemptLease } from '../src/workflows/v3/adapters/postgres/attempt-store.js';
+
+function memoryRepository(): DurableControllerRepository & {
+  events: StoredEvent[];
+  sandboxIds: string[];
+} {
+  let ts = 1;
+  const events: StoredEvent[] = [{ type: 'runStarted', runId: 'run-1', ts: ts++ }];
+  const sandboxIds: string[] = [];
+  const store = (event: V3Event): number => {
+    events.push({ ...event, ts: ts++ } as StoredEvent);
+    return events.length;
+  };
+  return {
+    events,
+    sandboxIds,
+    async readStoredEvents() { return [...events]; },
+    async append(_runId, event) { return store(event); },
+    async dispatch(input) { return store(input.event); },
+    async acquireAttempt(runId, attemptId, holderId): Promise<AttemptLease> {
+      return { runId, attemptId, holderId, fence: 1, expiresAt: '2099-01-01T00:00:00.000Z' };
+    },
+    async markAttemptDispatched(_lease, sandboxId) { sandboxIds.push(sandboxId); },
+    async settleAttempt(input) { return store(input.event); },
+  };
+}
+
+describe('PostgresWorkflowController', () => {
+  it('drives one official dispatch decision through a durable terminal run', async () => {
+    const repository = memoryRepository();
+    const controller = new PostgresWorkflowController(repository, async (request) => {
+      await request.onSandboxCreated('sandbox-1');
+      return { status: 'succeeded', manifestPath: '/runtime/manifest.json' };
+    }, { holderId: 'controller-1', executorId: 'pi-opensandbox' });
+
+    const outcome = await controller.drive({
+      runId: 'run-1',
+      nodes: [{ id: 'node-1', type: 'goal', goal: 'Do the work', depends: [], bot: 'pi' }],
+    });
+
+    expect(outcome.snapshot.runStatus).toBe('succeeded');
+    expect(outcome.actions).toEqual([]);
+    expect(repository.sandboxIds).toEqual(['sandbox-1']);
+    expect(repository.events.map((event) => event.type)).toEqual([
+      'runStarted', 'nodeDispatched', 'nodeSucceeded', 'runSucceeded',
+    ]);
+  });
+
+  it('turns executor exceptions into a durable failed run', async () => {
+    const repository = memoryRepository();
+    const controller = new PostgresWorkflowController(repository, async () => {
+      throw new Error('sandbox unavailable');
+    }, { holderId: 'controller-1', executorId: 'pi-opensandbox' });
+
+    const outcome = await controller.drive({
+      runId: 'run-1',
+      nodes: [{ id: 'node-1', type: 'goal', goal: 'Do the work', depends: [], bot: 'pi' }],
+    });
+    expect(outcome.snapshot.runStatus).toBe('failed');
+    expect(repository.events.map((event) => event.type)).toEqual([
+      'runStarted', 'nodeDispatched', 'nodeFailed', 'runFailed',
+    ]);
+  });
+});

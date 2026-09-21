@@ -60,4 +60,18 @@ describe('PostgresWorkflowScheduler', () => {
     const plan = await scheduler.plan(dag);
     expect(plan.actions).toEqual([{ kind: 'completeRunSucceeded' }]);
   });
+
+  it('does not republish a terminal event already recovered from PostgreSQL', async () => {
+    const scheduler = new PostgresWorkflowScheduler({
+      async readStoredEvents() {
+        return [
+          stored(1, { type: 'runStarted', runId: 'run-1' }),
+          stored(2, { type: 'runSucceeded' }),
+        ];
+      },
+    });
+    const plan = await scheduler.plan(dag);
+    expect(plan.snapshot.runStatus).toBe('succeeded');
+    expect(plan.actions).toEqual([]);
+  });
 });

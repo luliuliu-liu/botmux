@@ -28,13 +28,15 @@ export class PostgresWorkflowScheduler {
     const normalized = validateDag(dag);
     const events = await this.repository.readStoredEvents(normalized.runId);
     const snapshot = materialize(events);
-    const actions = decideNext(
-      normalized,
-      snapshot.nodes,
-      snapshot.loops,
-      snapshot.edges,
-      snapshot.instances,
-    );
+    const actions = ['succeeded', 'failed', 'blocked', 'cancelled'].includes(snapshot.runStatus)
+      ? []
+      : decideNext(
+        normalized,
+        snapshot.nodes,
+        snapshot.loops,
+        snapshot.edges,
+        snapshot.instances,
+      );
     return { events, snapshot, actions };
   }
 }
