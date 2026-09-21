@@ -12,7 +12,7 @@ import type { V3Action } from '../../orchestrator.js';
 import { nextAttemptIdFor } from '../../shared-node-runtime.js';
 import { normalizeGateWaitInput } from '../../gate-policy.js';
 import { v3GateWaitId } from '../../gate-wait-store.js';
-import type { AttemptLease } from './attempt-store.js';
+import type { AttemptLease, RecoveredAttemptLease } from './attempt-store.js';
 import type {
   DurableAttemptSettlement,
   DurableDispatch,
@@ -44,6 +44,9 @@ export interface DurableControllerRepository {
   append(runId: string, event: V3Event): Promise<number>;
   dispatch(input: DurableDispatch): Promise<number>;
   acquireAttempt(runId: string, attemptId: string, holderId: string, ttlMs: number): Promise<AttemptLease>;
+  acquireDispatchedForRecovery(
+    runId: string, attemptId: string, holderId: string, ttlMs: number,
+  ): Promise<RecoveredAttemptLease>;
   markAttemptDispatched(lease: AttemptLease, sandboxId: string): Promise<void>;
   settleAttempt(input: DurableAttemptSettlement): Promise<number>;
   openGate(input: DurableGateOpen): Promise<number>;
@@ -56,6 +59,15 @@ export interface ResolvePostgresWorkflowWait {
   readonly by: string;
   readonly selected?: string;
 }
+
+export type RecoverPostgresWorkflowAttempt = {
+  readonly attemptId: string;
+  readonly sandboxId: string;
+  readonly details?: Record<string, unknown>;
+} & (
+  | { readonly status: 'succeeded'; readonly manifestPath: string }
+  | { readonly status: 'failed'; readonly errorCode: string; readonly message?: string }
+);
 
 export interface PostgresWorkflowControllerOptions {
   readonly holderId: string;
@@ -116,6 +128,49 @@ export class PostgresWorkflowController {
         ...(input.selected ? { selected: input.selected } : {}),
         ...(opened.hostApproval ? { hostApproval: opened.hostApproval } : {}),
       },
+    });
+    return this.drive(dag);
+  }
+
+  /** Commit a terminal observation from the exact previously-dispatched sandbox. */
+  async recoverAttempt(
+    dag: V3Dag,
+    input: RecoverPostgresWorkflowAttempt,
+  ): Promise<DurableWorkflowPlan> {
+    const events = await this.repository.readStoredEvents(dag.runId);
+    const dispatched = [...events].reverse().find((event) =>
+      event.type === 'nodeDispatched' && event.attemptId === input.attemptId);
+    if (!dispatched || dispatched.type !== 'nodeDispatched') {
+      throw new Error(`workflow postgres controller: dispatched attempt not found: ${input.attemptId}`);
+    }
+    const recovered = await this.repository.acquireDispatchedForRecovery(
+      dag.runId,
+      input.attemptId,
+      this.options.holderId,
+      this.options.leaseTtlMs ?? 15 * 60_000,
+    );
+    if (recovered.sandboxId !== input.sandboxId) {
+      throw new Error(`workflow postgres controller: recovery sandbox identity mismatch: ${input.attemptId}`);
+    }
+    const event: Extract<V3Event, { type: 'nodeSucceeded' | 'nodeFailed' }> =
+      input.status === 'succeeded'
+        ? {
+          type: 'nodeSucceeded', nodeId: dispatched.nodeId,
+          ...(dispatched.instanceId ? { instanceId: dispatched.instanceId } : {}),
+          attemptId: input.attemptId, manifestPath: input.manifestPath,
+        }
+        : {
+          type: 'nodeFailed', nodeId: dispatched.nodeId,
+          ...(dispatched.instanceId ? { instanceId: dispatched.instanceId } : {}),
+          attemptId: input.attemptId, errorClass: 'workerError',
+          errorCode: input.errorCode,
+          ...(input.message ? { message: input.message } : {}),
+        };
+    await this.repository.settleAttempt({
+      lease: recovered.lease,
+      status: input.status,
+      details: input.details,
+      event,
     });
     return this.drive(dag);
   }

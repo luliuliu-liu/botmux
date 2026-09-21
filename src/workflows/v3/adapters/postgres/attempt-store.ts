@@ -38,6 +38,11 @@ export interface AttemptLease {
   readonly expiresAt: string;
 }
 
+export interface RecoveredAttemptLease {
+  readonly lease: AttemptLease;
+  readonly sandboxId: string;
+}
+
 export type TerminalAttemptStatus = Extract<
   AttemptStatus,
   'succeeded' | 'failed' | 'cancelled' | 'unknown'
@@ -199,6 +204,74 @@ export class PostgresWorkflowAttemptStore {
         [runId, attemptId],
       );
       return { runId, attemptId, holderId, fence: fence(granted.fence), expiresAt: iso(granted.expires_at) };
+    });
+  }
+
+  /**
+   * Fence an already-dispatched attempt after its former lease expired.
+   * This does not redispatch or change the attempt status. Callers must first
+   * inspect the recorded sandbox and use this lease only to commit a proven
+   * terminal observation (validated result or confirmed sandbox loss).
+   */
+  async acquireDispatchedForRecovery(
+    runId: string,
+    attemptId: string,
+    holderId: string,
+    ttlMs: number,
+  ): Promise<RecoveredAttemptLease> {
+    required(runId, 'runId');
+    required(attemptId, 'attemptId');
+    required(holderId, 'holderId');
+    positive(ttlMs, 'ttlMs');
+    return withPostgresTransaction(this.pool, async (client) => {
+      const attempt = await client.query<AttemptRow & { sandbox_id: string | null }>(
+        `SELECT status, sandbox_id
+           FROM agent_workflow.workflow_attempt
+          WHERE run_id = $1 AND attempt_id = $2
+          FOR UPDATE`,
+        [runId, attemptId],
+      );
+      const current = attempt.rows[0];
+      if (!current) throw new Error(`workflow postgres attempt store: attempt not found: ${attemptId}`);
+      if (current.status !== 'dispatched' || !current.sandbox_id) {
+        throw new Error(`workflow postgres attempt store: attempt is not recoverable: ${attemptId}`);
+      }
+      const existing = await client.query<LeaseRow>(
+        `SELECT fence, holder_id, expires_at, expires_at > now() AS is_live
+           FROM agent_workflow.workflow_lease
+          WHERE run_id = $1 AND attempt_id = $2
+          FOR UPDATE`,
+        [runId, attemptId],
+      );
+      const prior = existing.rows[0];
+      if (prior?.is_live) {
+        throw new Error(`workflow postgres attempt store: recovery lease is held: ${attemptId}`);
+      }
+      const next = prior
+        ? await client.query<FenceRow>(
+          `UPDATE agent_workflow.workflow_lease
+              SET fence = fence + 1, holder_id = $3,
+                  expires_at = now() + ($4 * interval '1 millisecond'), updated_at = now()
+            WHERE run_id = $1 AND attempt_id = $2
+            RETURNING fence, expires_at`,
+          [runId, attemptId, holderId, ttlMs],
+        )
+        : await client.query<FenceRow>(
+          `INSERT INTO agent_workflow.workflow_lease
+             (run_id, attempt_id, fence, holder_id, expires_at)
+           VALUES ($1, $2, 1, $3, now() + ($4 * interval '1 millisecond'))
+           RETURNING fence, expires_at`,
+          [runId, attemptId, holderId, ttlMs],
+        );
+      const granted = next.rows[0];
+      if (!granted) throw new Error(`workflow postgres attempt store: recovery lease failed: ${attemptId}`);
+      return {
+        sandboxId: current.sandbox_id,
+        lease: {
+          runId, attemptId, holderId,
+          fence: fence(granted.fence), expiresAt: iso(granted.expires_at),
+        },
+      };
     });
   }
 

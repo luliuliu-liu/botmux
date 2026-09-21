@@ -13,6 +13,7 @@ import {
   reserveAttemptInTransaction,
   settleAttemptInTransaction,
   type AttemptLease,
+  type RecoveredAttemptLease,
   type ReserveWorkflowAttempt,
   type TerminalAttemptStatus,
 } from './attempt-store.js';
@@ -147,6 +148,15 @@ export class PostgresWorkflowRepository {
 
   markAttemptDispatched(lease: AttemptLease, sandboxId: string): Promise<void> {
     return this.attempts.markDispatched(lease, sandboxId);
+  }
+
+  acquireDispatchedForRecovery(
+    runId: string,
+    attemptId: string,
+    holderId: string,
+    ttlMs: number,
+  ): Promise<RecoveredAttemptLease> {
+    return this.attempts.acquireDispatchedForRecovery(runId, attemptId, holderId, ttlMs);
   }
 
   async settleAttempt(input: DurableAttemptSettlement): Promise<number> {

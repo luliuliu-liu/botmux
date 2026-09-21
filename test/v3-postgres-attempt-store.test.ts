@@ -71,4 +71,46 @@ describe('PostgresWorkflowAttemptStore', () => {
     expect(fake.queries[1]).toContain('fence = $4');
     expect(fake.queries[2]).toContain('DELETE FROM agent_workflow.workflow_lease');
   });
+
+  it('takes over an expired dispatched attempt without redispatching it', async () => {
+    const fake = pool([
+      {},
+      { rows: [{ status: 'dispatched', sandbox_id: 'sandbox-old' }] },
+      { rows: [{
+        fence: 4, holder_id: 'dead-controller',
+        expires_at: new Date('2020-01-01T00:00:00.000Z'), is_live: false,
+      }] },
+      { rows: [{ fence: 5, expires_at: new Date('2099-01-01T00:00:00.000Z') }] },
+      {},
+    ]);
+    const store = new PostgresWorkflowAttemptStore(fake.pool);
+
+    await expect(store.acquireDispatchedForRecovery(
+      'run-1', 'attempt-1', 'reconciler-1', 30_000,
+    )).resolves.toEqual({
+      sandboxId: 'sandbox-old',
+      lease: {
+        runId: 'run-1', attemptId: 'attempt-1', holderId: 'reconciler-1',
+        fence: 5, expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+    });
+    expect(fake.queries.some((sql) => sql.includes("SET status = 'leased'"))).toBe(false);
+  });
+
+  it('refuses recovery while the former dispatched lease is live', async () => {
+    const fake = pool([
+      {},
+      { rows: [{ status: 'dispatched', sandbox_id: 'sandbox-live' }] },
+      { rows: [{
+        fence: 2, holder_id: 'controller-live',
+        expires_at: new Date('2099-01-01T00:00:00.000Z'), is_live: true,
+      }] },
+      {},
+    ]);
+    const store = new PostgresWorkflowAttemptStore(fake.pool);
+
+    await expect(store.acquireDispatchedForRecovery(
+      'run-1', 'attempt-1', 'reconciler-1', 30_000,
+    )).rejects.toThrow('recovery lease is held');
+  });
 });

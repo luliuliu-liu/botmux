@@ -24,6 +24,12 @@ function memoryRepository(): DurableControllerRepository & {
     async acquireAttempt(runId, attemptId, holderId): Promise<AttemptLease> {
       return { runId, attemptId, holderId, fence: 1, expiresAt: '2099-01-01T00:00:00.000Z' };
     },
+    async acquireDispatchedForRecovery(runId, attemptId, holderId) {
+      return {
+        sandboxId: 'sandbox-recovery',
+        lease: { runId, attemptId, holderId, fence: 2, expiresAt: '2099-01-01T00:00:00.000Z' },
+      };
+    },
     async markAttemptDispatched(_lease, sandboxId) { sandboxIds.push(sandboxId); },
     async settleAttempt(input) { return store(input.event); },
     async openGate(input) { return store(input.event); },
@@ -115,6 +121,33 @@ describe('PostgresWorkflowController', () => {
     expect(completed.snapshot.runStatus).toBe('failed');
     expect(repository.events.map((event) => event.type)).toEqual([
       'runStarted', 'gateDispatched', 'gateResolved', 'runFailed',
+    ]);
+  });
+
+  it('settles a proven terminal result from the exact fenced recovery sandbox', async () => {
+    const repository = memoryRepository();
+    repository.events.push({
+      type: 'nodeDispatched', nodeId: 'node-1', instanceId: 'node-1#001',
+      attemptId: 'node-1#001/attempts/001', ts: 2,
+    });
+    const controller = new PostgresWorkflowController(repository, async () => {
+      throw new Error('recovery must not redispatch');
+    }, { holderId: 'reconciler-1', executorId: 'pi-opensandbox' });
+
+    const completed = await controller.recoverAttempt({
+      runId: 'run-1',
+      nodes: [{ id: 'node-1', type: 'goal', goal: 'Do the work', depends: [] }],
+    }, {
+      attemptId: 'node-1#001/attempts/001',
+      sandboxId: 'sandbox-recovery',
+      status: 'succeeded',
+      manifestPath: '/runtime/manifest.json',
+      details: { recovered: true },
+    });
+
+    expect(completed.snapshot.runStatus).toBe('succeeded');
+    expect(repository.events.map((event) => event.type)).toEqual([
+      'runStarted', 'nodeDispatched', 'nodeSucceeded', 'runSucceeded',
     ]);
   });
 });
