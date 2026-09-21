@@ -38,6 +38,11 @@ export interface AttemptLease {
   readonly expiresAt: string;
 }
 
+export type TerminalAttemptStatus = Extract<
+  AttemptStatus,
+  'succeeded' | 'failed' | 'cancelled' | 'unknown'
+>;
+
 export async function reserveAttemptInTransaction(
   client: PostgresClient,
   input: ReserveWorkflowAttempt,
@@ -53,6 +58,37 @@ export async function reserveAttemptInTransaction(
        (run_id, attempt_id, node_id, instance_id, attempt_number, executor, status)
      VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
     [input.runId, input.attemptId, input.nodeId, input.instanceId, input.attemptNumber, input.executor],
+  );
+}
+
+export async function settleAttemptInTransaction(
+  client: PostgresClient,
+  lease: AttemptLease,
+  status: TerminalAttemptStatus,
+  details: Record<string, unknown> = {},
+): Promise<void> {
+  const updated = await client.query(
+    `UPDATE agent_workflow.workflow_attempt
+        SET status = $5,
+            result_manifest = CASE WHEN $5 = 'succeeded' THEN $6::jsonb ELSE result_manifest END,
+            failure = CASE WHEN $5 <> 'succeeded' THEN $6::jsonb ELSE failure END,
+            settled_at = now()
+      WHERE run_id = $1 AND attempt_id = $2
+        AND status IN ('leased', 'dispatched')
+        AND EXISTS (
+          SELECT 1 FROM agent_workflow.workflow_lease
+           WHERE run_id = $1 AND attempt_id = $2 AND holder_id = $3
+             AND fence = $4 AND expires_at > now()
+        )`,
+    [lease.runId, lease.attemptId, lease.holderId, lease.fence, status, JSON.stringify(details)],
+  );
+  if ((updated.rowCount ?? 0) !== 1) {
+    throw new Error(`workflow postgres attempt store: stale lease cannot settle: ${lease.attemptId}`);
+  }
+  await client.query(
+    `DELETE FROM agent_workflow.workflow_lease
+      WHERE run_id = $1 AND attempt_id = $2 AND holder_id = $3 AND fence = $4`,
+    [lease.runId, lease.attemptId, lease.holderId, lease.fence],
   );
 }
 
@@ -186,33 +222,11 @@ export class PostgresWorkflowAttemptStore {
   /** Settle exactly once and retire the matching lease in one transaction. */
   async settle(
     lease: AttemptLease,
-    status: Extract<AttemptStatus, 'succeeded' | 'failed' | 'cancelled' | 'unknown'>,
+    status: TerminalAttemptStatus,
     details: Record<string, unknown> = {},
   ): Promise<void> {
     await withPostgresTransaction(this.pool, async (client) => {
-      const updated = await client.query(
-        `UPDATE agent_workflow.workflow_attempt
-            SET status = $5,
-                result_manifest = CASE WHEN $5 = 'succeeded' THEN $6::jsonb ELSE result_manifest END,
-                failure = CASE WHEN $5 <> 'succeeded' THEN $6::jsonb ELSE failure END,
-                settled_at = now()
-          WHERE run_id = $1 AND attempt_id = $2
-            AND status IN ('leased', 'dispatched')
-            AND EXISTS (
-              SELECT 1 FROM agent_workflow.workflow_lease
-               WHERE run_id = $1 AND attempt_id = $2 AND holder_id = $3
-                 AND fence = $4 AND expires_at > now()
-            )`,
-        [lease.runId, lease.attemptId, lease.holderId, lease.fence, status, JSON.stringify(details)],
-      );
-      if ((updated.rowCount ?? 0) !== 1) {
-        throw new Error(`workflow postgres attempt store: stale lease cannot settle: ${lease.attemptId}`);
-      }
-      await client.query(
-        `DELETE FROM agent_workflow.workflow_lease
-          WHERE run_id = $1 AND attempt_id = $2 AND holder_id = $3 AND fence = $4`,
-        [lease.runId, lease.attemptId, lease.holderId, lease.fence],
-      );
+      await settleAttemptInTransaction(client, lease, status, details);
     });
   }
 

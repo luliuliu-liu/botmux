@@ -11,8 +11,10 @@ import type { StoredEvent } from '../../event-contract.js';
 import {
   PostgresWorkflowAttemptStore,
   reserveAttemptInTransaction,
+  settleAttemptInTransaction,
   type AttemptLease,
   type ReserveWorkflowAttempt,
+  type TerminalAttemptStatus,
 } from './attempt-store.js';
 import {
   appendWorkflowEventInTransaction,
@@ -41,6 +43,18 @@ export interface DurableGateOpen extends OpenWorkflowWait {
 
 export interface DurableGateResolution extends ResolveWorkflowWait {
   readonly event: Extract<V3Event, { type: 'gateResolved' }>;
+}
+
+type TerminalWorkerEvent = Extract<
+  V3Event,
+  { type: 'nodeSucceeded' | 'nodeFailed' | 'nodeBlocked' | 'nodeCancelled' }
+>;
+
+export interface DurableAttemptSettlement {
+  readonly lease: AttemptLease;
+  readonly status: TerminalAttemptStatus;
+  readonly details?: Record<string, unknown>;
+  readonly event: TerminalWorkerEvent;
 }
 
 function runProjection(event: V3Event): {
@@ -129,6 +143,33 @@ export class PostgresWorkflowRepository {
     ttlMs: number,
   ): Promise<AttemptLease> {
     return this.attempts.acquire(runId, attemptId, holderId, ttlMs);
+  }
+
+  markAttemptDispatched(lease: AttemptLease, sandboxId: string): Promise<void> {
+    return this.attempts.markDispatched(lease, sandboxId);
+  }
+
+  async settleAttempt(input: DurableAttemptSettlement): Promise<number> {
+    const eventAttemptId = input.event.attemptId;
+    if (eventAttemptId !== input.lease.attemptId) {
+      throw new Error('workflow postgres repository: settlement attempt identity mismatch');
+    }
+    const expectedStatus: TerminalAttemptStatus = input.event.type === 'nodeSucceeded'
+      ? 'succeeded'
+      : input.event.type === 'nodeCancelled'
+        ? 'cancelled'
+        : 'failed';
+    if (input.status !== expectedStatus) {
+      throw new Error('workflow postgres repository: settlement status does not match event');
+    }
+    return withPostgresTransaction(this.pool, async (client) => {
+      await settleAttemptInTransaction(client, input.lease, input.status, input.details);
+      return appendWorkflowEventInTransaction(client, {
+        runId: input.lease.runId,
+        eventType: input.event.type,
+        payload: eventPayload(input.event),
+      });
+    });
   }
 
   async openGate(input: DurableGateOpen): Promise<number> {

@@ -55,4 +55,28 @@ describe('PostgresWorkflowRepository', () => {
     })).rejects.toThrow('attempt identity mismatch');
     expect(fake.calls).toHaveLength(0);
   });
+
+  it('settles an attempt, retires its fence and appends the result event atomically', async () => {
+    const fake = fakePool();
+    const repository = new PostgresWorkflowRepository(fake.pool);
+    await expect(repository.settleAttempt({
+      lease: {
+        runId: 'run-1', attemptId: 'attempt-1', holderId: 'controller-1',
+        fence: 1, expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+      status: 'succeeded',
+      details: { manifest: 'sha256:abc' },
+      event: {
+        type: 'nodeSucceeded', nodeId: 'node-1', instanceId: 'node-1#1',
+        attemptId: 'attempt-1', manifestPath: '/runtime/manifest.json',
+      },
+    })).resolves.toBe(1);
+    expect(fake.calls[0]?.sql).toBe('BEGIN');
+    expect(fake.calls[1]?.sql).toContain("SET status = $5");
+    expect(fake.calls[2]?.sql).toContain('DELETE FROM agent_workflow.workflow_lease');
+    expect(fake.calls[3]?.sql).toContain('UPDATE agent_workflow.workflow_run');
+    expect(fake.calls[4]?.sql).toContain('INSERT INTO agent_workflow.workflow_event');
+    expect(fake.calls[5]?.sql).toContain('INSERT INTO agent_workflow.workflow_outbox');
+    expect(fake.calls[6]?.sql).toBe('COMMIT');
+  });
 });
