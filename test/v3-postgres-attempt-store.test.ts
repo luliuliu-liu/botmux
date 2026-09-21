@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   PostgresWorkflowAttemptStore,
   type AttemptLease,
-} from '../src/workflows/v3/postgres-attempt-store.js';
+} from '../src/workflows/v3/adapters/postgres/attempt-store.js';
 import type {
   PostgresClient,
   PostgresPool,
-} from '../src/workflows/v3/postgres-event-store.js';
+} from '../src/workflows/v3/adapters/postgres/event-store.js';
 
 type Response = { rows?: Record<string, unknown>[]; rowCount?: number | null; fail?: Error };
 

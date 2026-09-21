@@ -3,7 +3,7 @@ import {
   PostgresWorkflowEventStore,
   type PostgresClient,
   type PostgresPool,
-} from '../src/workflows/v3/postgres-event-store.js';
+} from '../src/workflows/v3/adapters/postgres/event-store.js';
 
 type SeenQuery = { sql: string; values?: readonly unknown[] };
 

@@ -10,7 +10,7 @@ import {
   type PostgresClient,
   type PostgresPool,
   withPostgresTransaction,
-} from './postgres-event-store.js';
+} from './event-store.js';
 
 export type AttemptStatus =
   | 'pending'
