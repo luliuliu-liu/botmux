@@ -38,6 +38,30 @@ export interface PostgresPool {
   connect(): Promise<PostgresClient>;
 }
 
+/** Run a caller-defined mutation with pg-compatible transaction semantics. */
+export async function withPostgresTransaction<T>(
+  pool: PostgresPool,
+  work: (client: PostgresClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await work(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Preserve the original error; a failed rollback means the pool should
+      // discard/recover the connection before the next checkout.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export interface WorkflowRunRecord {
   readonly runId: string;
   readonly definition: JsonObject;
@@ -153,23 +177,7 @@ export class PostgresWorkflowEventStore {
   constructor(private readonly pool: PostgresPool) {}
 
   private async transaction<T>(work: (client: PostgresClient) => Promise<T>): Promise<T> {
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const result = await work(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (error) {
-      try {
-        await client.query('ROLLBACK');
-      } catch {
-        // The original failure is more actionable; a failed rollback only
-        // means this connection will be discarded/recovered by its pool.
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
+    return withPostgresTransaction(this.pool, work);
   }
 
   /** Create an immutable run envelope and its first audit event atomically. */
