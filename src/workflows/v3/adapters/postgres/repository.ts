@@ -7,6 +7,7 @@
  */
 
 import type { V3Event } from '../../event-contract.js';
+import type { StoredEvent } from '../../event-contract.js';
 import {
   PostgresWorkflowAttemptStore,
   reserveAttemptInTransaction,
@@ -22,6 +23,7 @@ import {
   type WorkflowRunStatus,
   withPostgresTransaction,
 } from './event-store.js';
+import { decodeStoredEvents } from './event-codec.js';
 
 export interface DurableDispatch extends ReserveWorkflowAttempt {
   readonly event: Extract<V3Event, { type: 'nodeDispatched' }>;
@@ -64,6 +66,10 @@ export class PostgresWorkflowRepository {
 
   readEvents(runId: string): Promise<WorkflowEventRecord[]> {
     return this.events.readEvents(runId);
+  }
+
+  async readStoredEvents(runId: string): Promise<StoredEvent[]> {
+    return decodeStoredEvents(await this.readEvents(runId));
   }
 
   append(runId: string, event: V3Event): Promise<number> {
