@@ -24,9 +24,23 @@ import {
   withPostgresTransaction,
 } from './event-store.js';
 import { decodeStoredEvents } from './event-codec.js';
+import {
+  openWaitInTransaction,
+  resolveWaitInTransaction,
+  type OpenWorkflowWait,
+  type ResolveWorkflowWait,
+} from './wait-store.js';
 
 export interface DurableDispatch extends ReserveWorkflowAttempt {
   readonly event: Extract<V3Event, { type: 'nodeDispatched' }>;
+}
+
+export interface DurableGateOpen extends OpenWorkflowWait {
+  readonly event: Extract<V3Event, { type: 'gateDispatched' }>;
+}
+
+export interface DurableGateResolution extends ResolveWorkflowWait {
+  readonly event: Extract<V3Event, { type: 'gateResolved' }>;
 }
 
 function runProjection(event: V3Event): {
@@ -115,5 +129,40 @@ export class PostgresWorkflowRepository {
     ttlMs: number,
   ): Promise<AttemptLease> {
     return this.attempts.acquire(runId, attemptId, holderId, ttlMs);
+  }
+
+  async openGate(input: DurableGateOpen): Promise<number> {
+    if (input.event.waitId !== input.waitId || input.event.nodeId !== input.nodeId) {
+      throw new Error('workflow postgres repository: gate-open identity mismatch');
+    }
+    return withPostgresTransaction(this.pool, async (client) => {
+      await openWaitInTransaction(client, input);
+      return appendWorkflowEventInTransaction(client, {
+        runId: input.runId,
+        eventType: input.event.type,
+        payload: eventPayload(input.event),
+        status: 'waiting',
+      });
+    });
+  }
+
+  async resolveGate(input: DurableGateResolution): Promise<number> {
+    if (
+      input.event.waitId !== input.waitId ||
+      input.event.resolution !== input.resolution ||
+      input.event.by !== input.by
+    ) {
+      throw new Error('workflow postgres repository: gate-resolution identity mismatch');
+    }
+    return withPostgresTransaction(this.pool, async (client) => {
+      await resolveWaitInTransaction(client, input);
+      return appendWorkflowEventInTransaction(client, {
+        runId: input.runId,
+        eventType: input.event.type,
+        payload: eventPayload(input.event),
+        status: input.resolution === 'approved' ? 'running' : 'failed',
+        terminal: input.resolution === 'rejected',
+      });
+    });
   }
 }
