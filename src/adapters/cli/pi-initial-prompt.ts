@@ -37,11 +37,29 @@ export function piInitialPromptFilePath(sessionDataDir: string, sessionId: strin
   return join(piInitialPromptDir(sessionDataDir, sessionId), 'initial.prompt.md');
 }
 
-function piInitialPromptExtensionPath(): string {
+/** Resolve the helper extension from a real filesystem path.
+ *
+ * The normal TypeScript/Node runtime can use the source file next to this
+ * module. A compiled Bun binary, however, reports a virtual `/$bunfs/` module
+ * location that another process (Pi) cannot read. Container images therefore
+ * provide a real copy and point to it with BOTMUX_PI_INITIAL_PROMPT_EXTENSION.
+ * If neither path exists, omit the deferred command rather than handing Pi a
+ * fatal `--extension` path; the worker falls back to its regular input queue.
+ */
+export function piInitialPromptExtensionPath(): string | undefined {
+  const configured = process.env.BOTMUX_PI_INITIAL_PROMPT_EXTENSION?.trim();
+  // An explicit runtime path is authoritative. If it is stale, fail open and
+  // do not fall through to a compiled Bun virtual path that Pi cannot read.
+  if (configured) return existsSync(configured) ? configured : undefined;
+
   const here = dirname(fileURLToPath(import.meta.url));
-  const compiled = resolve(here, 'pi-initial-prompt-extension.js');
-  if (existsSync(compiled)) return compiled;
-  return resolve(here, 'pi-initial-prompt-extension.ts');
+  for (const candidate of [
+    resolve(here, 'pi-initial-prompt-extension.js'),
+    resolve(here, 'pi-initial-prompt-extension.ts'),
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 export function preparePiInitialPromptArg(opts: {
@@ -72,15 +90,18 @@ export function preparePiInitialPromptArg(opts: {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const filePath = piInitialPromptFilePath(sessionDataDir, opts.sessionId);
   writeFileSync(filePath, opts.prompt, { encoding: 'utf8', mode: 0o600 });
+  const extensionPath = piInitialPromptExtensionPath();
   return {
     initialPromptArg: `@${filePath}`,
     filePath,
     readonlyRoot: dir,
     cleanupDir: dir,
-    deferredInput: {
-      content: PI_INITIAL_PROMPT_COMMAND,
-      additionalArgs: ['--extension', piInitialPromptExtensionPath()],
-      env: { [PI_INITIAL_PROMPT_FILE_ENV]: filePath },
-    },
+    ...(extensionPath ? {
+      deferredInput: {
+        content: PI_INITIAL_PROMPT_COMMAND,
+        additionalArgs: ['--extension', extensionPath],
+        env: { [PI_INITIAL_PROMPT_FILE_ENV]: filePath },
+      },
+    } : {}),
   };
 }

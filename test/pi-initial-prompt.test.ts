@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -6,6 +6,7 @@ import { shouldQueueInitialPrompt } from '../src/codex-rpc-lifecycle.js';
 import { createPiAdapter } from '../src/adapters/cli/pi.js';
 import {
   PI_INITIAL_PROMPT_ARG_BYTE_LIMIT,
+  piInitialPromptExtensionPath,
   preparePiInitialPromptArg,
 } from '../src/adapters/cli/pi-initial-prompt.js';
 import registerBotmuxInitialPromptExtension, {
@@ -38,6 +39,45 @@ function longBotmuxPrompt(): string {
 }
 
 describe('Pi initial prompt @file delivery', () => {
+  it('uses the real container extension override when provided', () => {
+    const extension = join(mkdtempSync(join(tmpdir(), 'botmux-pi-extension-')), 'extension.ts');
+    try {
+      writeFileSync(extension, 'export default () => {};', 'utf8');
+      const previous = process.env.BOTMUX_PI_INITIAL_PROMPT_EXTENSION;
+      process.env.BOTMUX_PI_INITIAL_PROMPT_EXTENSION = extension;
+      try {
+        expect(piInitialPromptExtensionPath()).toBe(extension);
+      } finally {
+        if (previous === undefined) delete process.env.BOTMUX_PI_INITIAL_PROMPT_EXTENSION;
+        else process.env.BOTMUX_PI_INITIAL_PROMPT_EXTENSION = previous;
+      }
+    } finally {
+      rmSync(dirname(extension), { recursive: true, force: true });
+    }
+  });
+
+  it('does not emit a fatal extension argument when no real extension exists', () => {
+    const previous = process.env.BOTMUX_PI_INITIAL_PROMPT_EXTENSION;
+    process.env.BOTMUX_PI_INITIAL_PROMPT_EXTENSION = '/definitely/missing/pi-initial-prompt.ts';
+    try {
+      const dataDir = mkdtempSync(join(tmpdir(), 'botmux-pi-no-extension-'));
+      try {
+        const result = preparePiInitialPromptArg({
+          prompt: 'x'.repeat(PI_INITIAL_PROMPT_ARG_BYTE_LIMIT + 1),
+          sessionId: 'sess-no-extension',
+          sessionDataDir: dataDir,
+        });
+        expect(result.deferredInput).toBeUndefined();
+        expect(existsSync(result.filePath!)).toBe(true);
+      } finally {
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    } finally {
+      if (previous === undefined) delete process.env.BOTMUX_PI_INITIAL_PROMPT_EXTENSION;
+      else process.env.BOTMUX_PI_INITIAL_PROMPT_EXTENSION = previous;
+    }
+  });
+
   it('keeps short first prompts as the positional message', () => {
     const result = preparePiInitialPromptArg({
       prompt: '<user_message>hello Pi</user_message>',
