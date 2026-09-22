@@ -32,6 +32,8 @@ export interface RunArchitectInput {
   specPath: string;
   specJsonPath: string;
   botSnapshot: BotSnapshot;
+  /** Live per-bot CLI env; kept in memory and never written to the run. */
+  workerEnv?: Record<string, string>;
   timeoutMs?: number;
   cancelSignal?: AbortSignal;
   /**
@@ -176,6 +178,7 @@ export async function runArchitect(input: RunArchitectInput): Promise<RunArchite
       humanGate: null,
     },
     botSnapshot: input.botSnapshot,
+    ...(input.workerEnv ? { workerEnv: input.workerEnv } : {}),
     runDir: input.runDir,
     attemptDir,
     inputsPath,

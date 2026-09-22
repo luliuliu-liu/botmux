@@ -516,6 +516,9 @@ export interface V3RuntimeDeps {
    *  undefined → the run's default bot), returns the snapshot persisted in the
    *  runDir and threaded through `runNode` (never re-resolved mid-run). */
   resolveBotSnapshot: (botId: string | undefined) => BotSnapshot;
+  /** Resolve live per-bot CLI env for an ephemeral worker. This stays separate
+   * from BotSnapshot so provider credentials never enter durable run artifacts. */
+  resolveBotEnv?: (botId: string | undefined) => Record<string, string> | undefined;
   /** Host-specific execution profile validation. Botmux defaults this in its
    * facade; portable hosts may validate arbitrary executor ids. */
   validateExecutionSnapshot?: (snapshot: BotSnapshot, selector: string) => void;
@@ -677,15 +680,22 @@ export async function runWorkflow(
   const botSnapshots = opts.frozenBotSnapshots
     ? new Map(opts.frozenBotSnapshots)
     : new Map<string, BotSnapshot>();
+  // Provider credentials are spawn-time inputs only. Keep them in memory and
+  // thread them through the worker IPC init; never persist them with snapshots.
+  const botEnvs = new Map<string, Record<string, string> | undefined>();
   const freezeBot = (bot: string | undefined): void => {
     const key = bot ?? '';
-    if (botSnapshots.has(key)) return;
+    if (botSnapshots.has(key)) {
+      if (!botEnvs.has(key)) botEnvs.set(key, deps.resolveBotEnv?.(bot));
+      return;
+    }
     if (opts.frozenBotSnapshots) {
       throw new Error(
         `v3 runtime: authorized bots.snapshot.json is missing selector "${key || '<default>'}"`,
       );
     }
     botSnapshots.set(key, deps.resolveBotSnapshot(bot));
+    botEnvs.set(key, deps.resolveBotEnv?.(bot));
   };
   for (const node of dag.nodes) {
     if (isGoalNode(node)) freezeBot(node.bot);
@@ -2587,6 +2597,7 @@ export async function runWorkflow(
       inputsPath,
       outputDir,
       env,
+      ...(botEnvs.get(botKey) ? { workerEnv: botEnvs.get(botKey) } : {}),
       ...(opts.chatBinding ? { chatBinding: opts.chatBinding } : {}),
       workerFence: leaseAcquisition.hostToken as RunNodeRequest['workerFence'],
       timeoutMs: (node.timeoutSec ?? DEFAULT_NODE_TIMEOUT_SEC) * 1000,

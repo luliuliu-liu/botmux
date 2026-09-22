@@ -254,6 +254,7 @@ async function runNodeImpl(
     backendType: v3WorkerBackendType(),
     prompt: '',
     resume: false,
+    ...(req.workerEnv ? { env: req.workerEnv } : {}),
     larkAppId: req.botSnapshot.larkAppId,
     larkAppSecret: secret,
     botName: req.node.bot,

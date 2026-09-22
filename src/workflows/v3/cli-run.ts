@@ -349,6 +349,8 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
     const bot = resolveBotConfig(botId ?? args.botSelector, bots);
     return botToSnapshot(bot, args.workingDir);
   };
+  const resolveBotEnv = (botId: string | undefined): Record<string, string> | undefined =>
+    resolveBotConfig(botId ?? args.botSelector, bots).env;
 
   const { runNode } = createEphemeralPool({ resolveLarkAppSecret });
   const resolveGate = createFileGate({ awaitDecision: makeAwaitDecision(args.autoApproveGates) });
@@ -382,6 +384,7 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
     runNode,
     validateManifest,
     resolveBotSnapshot,
+    resolveBotEnv,
     resolveGate,
     hostExecutors: createDefaultHostExecutorRegistry(),
     hostReconcilers: createDefaultProviderReconcilers(),

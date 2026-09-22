@@ -865,6 +865,10 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
   });
 
   const resolveBotSnapshot = (botId: string | undefined) => botToSnapshot(resolveBotConfig(botId, bots));
+  // Provider credentials are live spawn inputs, not part of the frozen
+  // BotSnapshot/run envelope. Resolve them by the same selector only when a
+  // worker is about to launch; the ephemeral pool keeps them in memory.
+  const resolveBotEnv = (botId: string | undefined) => resolveBotConfig(botId, bots).env;
 
   const runNode = (deps.makeRunNode ?? defaultMakeRunNode)(resolveLarkAppSecret);
   const dag = context.dag;
@@ -874,6 +878,7 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
     runNode,
     validateManifest,
     resolveBotSnapshot,
+    resolveBotEnv,
     hostExecutors: createDefaultHostExecutorRegistry(),
     hostReconcilers: createDefaultProviderReconcilers(),
   };

@@ -205,6 +205,12 @@ export interface RunNodeRequest {
   outputDir: string;
   /** Already includes the GOAL_ENV keys; pool merges into the worker env. */
   env: Record<string, string>;
+  /**
+   * Live per-bot CLI environment from bots.json (for example a model API key).
+   * This is an in-memory spawn input only: it must never be persisted in the
+   * run envelope, bot snapshot, journal, or attempt files.
+   */
+  workerEnv?: Record<string, string>;
   /** The run's authenticated chat binding (recorded by the daemon at run
    *  birth).  The pool threads it into the worker init so the CLI child sees
    *  the standard BOTMUX_* identity env (real chatId / ownerOpenId / …)
