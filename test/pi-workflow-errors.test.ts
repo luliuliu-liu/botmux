@@ -19,6 +19,10 @@ describe('classifyPiWorkflowFailure', () => {
     expect(classifyPiWorkflowFailure('The test endpoint returned HTTP 401 for the fixture')).toBeUndefined();
   });
 
+  it('ignores a task that discusses the error wording without provider context', () => {
+    expect(classifyPiWorkflowFailure('Explain why the API key format is incorrect')).toBeUndefined();
+  });
+
   it('does not leak provider response text', () => {
     const result = classifyPiWorkflowFailure('Error: 401: request-id=secret AuthenticationError API key format is incorrect');
     expect(result).not.toContain('secret');

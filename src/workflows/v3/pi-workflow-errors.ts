@@ -17,7 +17,8 @@ const ANSI_ESCAPE_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 export function classifyPiWorkflowFailure(transcript: string): string | undefined {
   const plain = transcript.replace(ANSI_ESCAPE_RE, '');
   const apiKeyFormatError = /API key format is incorrect/i.test(plain);
-  const authentication401 = /\bError:\s*401\b/i.test(plain) && /AuthenticationError/i.test(plain);
-  if (!apiKeyFormatError && !authentication401) return undefined;
+  const authenticationContext = /AuthenticationError|Unauthorized/i.test(plain);
+  const authentication401 = /\bError:\s*401\b/i.test(plain) && authenticationContext;
+  if (!authentication401 && !(apiKeyFormatError && authenticationContext)) return undefined;
   return 'Pi workflow worker failed: provider rejected model authentication (HTTP 401; API key format is incorrect)';
 }
