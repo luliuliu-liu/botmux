@@ -18,6 +18,7 @@ import type {
   DurableDispatch,
   DurableGateOpen,
   DurableGateResolution,
+  DurableRunCancellation,
 } from './repository.js';
 import {
   PostgresWorkflowScheduler,
@@ -51,6 +52,7 @@ export interface DurableControllerRepository {
   settleAttempt(input: DurableAttemptSettlement): Promise<number>;
   openGate(input: DurableGateOpen): Promise<number>;
   resolveGate(input: DurableGateResolution): Promise<number>;
+  cancelRun(input: DurableRunCancellation): Promise<number>;
 }
 
 export interface ResolvePostgresWorkflowWait {
@@ -58,6 +60,13 @@ export interface ResolvePostgresWorkflowWait {
   readonly resolution: 'approved' | 'rejected';
   readonly by: string;
   readonly selected?: string;
+}
+
+export interface CancelPostgresWorkflowRun {
+  readonly cancelRequestId: string;
+  readonly by: string;
+  readonly reason?: string;
+  readonly activeAttempt?: { readonly attemptId: string; readonly sandboxId: string };
 }
 
 export type RecoverPostgresWorkflowAttempt = {
@@ -130,6 +139,38 @@ export class PostgresWorkflowController {
       },
     });
     return this.drive(dag);
+  }
+
+  async cancel(
+    dag: V3Dag,
+    input: CancelPostgresWorkflowRun,
+  ): Promise<DurableWorkflowPlan> {
+    const plan = await this.scheduler.plan(dag);
+    if (plan.snapshot.runStatus === 'cancelled') return plan;
+    if (['succeeded', 'failed'].includes(plan.snapshot.runStatus)) {
+      throw new Error(`workflow postgres controller: terminal run cannot be cancelled: ${dag.runId}`);
+    }
+    const nodes: Array<Extract<V3Event, { type: 'nodeCancelled' }>> = [];
+    for (const node of dag.nodes) {
+      const state = plan.snapshot.nodes.get(node.id);
+      if (state && ['done', 'failed', 'cancelled', 'skipped'].includes(state.status)) continue;
+      const instanceId = state?.effectiveInstanceId;
+      const attemptId = instanceId
+        ? plan.snapshot.attempts.get(instanceId)
+        : plan.snapshot.attempts.get(node.id);
+      nodes.push({
+        type: 'nodeCancelled', nodeId: node.id,
+        ...(instanceId ? { instanceId } : {}),
+        ...(attemptId ? { attemptId } : {}),
+        reason: 'runCancelled', cancelRequestId: input.cancelRequestId,
+      });
+    }
+    await this.repository.cancelRun({
+      runId: dag.runId, cancelRequestId: input.cancelRequestId,
+      by: input.by, ...(input.reason ? { reason: input.reason } : {}),
+      nodes, ...(input.activeAttempt ? { activeAttempt: input.activeAttempt } : {}),
+    });
+    return this.scheduler.plan(dag);
   }
 
   /** Commit a terminal observation from the exact previously-dispatched sandbox. */
@@ -281,14 +322,22 @@ export class PostgresWorkflowController {
       };
     }
     const event = this.resultEvent(node.id, action.instanceId, attemptId, result);
-    await this.repository.settleAttempt({
-      lease,
-      status: result.status === 'succeeded'
-        ? 'succeeded'
-        : 'failed',
-      details: result.details,
-      event,
-    });
+    try {
+      await this.repository.settleAttempt({
+        lease,
+        status: result.status === 'succeeded'
+          ? 'succeeded'
+          : 'failed',
+        details: result.details,
+        event,
+      });
+    } catch (error) {
+      // An authenticated cancellation may have destroyed the sandbox and
+      // retired this exact fence while the executor was unwinding. Replay is
+      // authoritative: suppress only that proven terminal cancellation race.
+      const current = await this.scheduler.plan(dag);
+      if (current.snapshot.runStatus !== 'cancelled') throw error;
+    }
   }
 
   private resultEvent(

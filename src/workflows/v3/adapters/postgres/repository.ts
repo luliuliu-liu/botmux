@@ -58,6 +58,18 @@ export interface DurableAttemptSettlement {
   readonly event: TerminalWorkerEvent;
 }
 
+export interface DurableRunCancellation {
+  readonly runId: string;
+  readonly cancelRequestId: string;
+  readonly by: string;
+  readonly reason?: string;
+  readonly nodes: ReadonlyArray<Extract<V3Event, { type: 'nodeCancelled' }>>;
+  readonly activeAttempt?: {
+    readonly attemptId: string;
+    readonly sandboxId: string;
+  };
+}
+
 function runProjection(event: V3Event): {
   status?: WorkflowRunStatus;
   terminal?: boolean;
@@ -215,6 +227,85 @@ export class PostgresWorkflowRepository {
         // subsequent runFailed event for rejection. Do not expose a terminal
         // run projection before that authoritative terminal event exists.
         status: 'running',
+      });
+    });
+  }
+
+  /**
+   * Linearize cancellation against a late worker settlement. The active
+   * attempt row is locked and moved to cancelled before its lease is removed;
+   * a concurrent old holder therefore either settles first or loses its fence.
+   */
+  async cancelRun(input: DurableRunCancellation): Promise<number> {
+    return withPostgresTransaction(this.pool, async (client) => {
+      const run = await client.query<{ status: WorkflowRunStatus }>(
+        `SELECT status FROM agent_workflow.workflow_run WHERE run_id = $1 FOR UPDATE`,
+        [input.runId],
+      );
+      const status = run.rows[0]?.status;
+      if (!status) throw new Error(`workflow postgres repository: run not found: ${input.runId}`);
+      if (['succeeded', 'failed', 'cancelled'].includes(status)) {
+        throw new Error(`workflow postgres repository: terminal run cannot be cancelled: ${input.runId}`);
+      }
+      const active = await client.query<{ attempt_id: string; sandbox_id: string | null }>(
+        `SELECT attempt_id, sandbox_id
+           FROM agent_workflow.workflow_attempt
+          WHERE run_id = $1 AND status IN ('pending', 'leased', 'dispatched', 'unknown')
+          ORDER BY created_at FOR UPDATE`,
+        [input.runId],
+      );
+      if (active.rows.length > 1) {
+        throw new Error('workflow postgres repository: serial controller found multiple active attempts');
+      }
+      const current = active.rows[0];
+      if (current) {
+        if (!input.activeAttempt || current.attempt_id !== input.activeAttempt.attemptId ||
+            current.sandbox_id !== input.activeAttempt.sandboxId) {
+          throw new Error('workflow postgres repository: active cancellation identity mismatch');
+        }
+        await client.query(
+          `UPDATE agent_workflow.workflow_attempt
+              SET status = 'cancelled', failure = $3::jsonb, settled_at = now()
+            WHERE run_id = $1 AND attempt_id = $2`,
+          [input.runId, current.attempt_id, JSON.stringify({
+            errorCode: 'RUN_CANCELLED', cancelRequestId: input.cancelRequestId,
+          })],
+        );
+        await client.query(
+          `DELETE FROM agent_workflow.workflow_lease WHERE run_id = $1 AND attempt_id = $2`,
+          [input.runId, current.attempt_id],
+        );
+      } else if (input.activeAttempt) {
+        throw new Error('workflow postgres repository: cancellation attempt already settled');
+      }
+      await client.query(
+        `UPDATE agent_workflow.workflow_wait
+            SET status = 'cancelled', resolution = $2::jsonb, resolved_at = now()
+          WHERE run_id = $1 AND status = 'pending'`,
+        [input.runId, JSON.stringify({
+          cancelRequestId: input.cancelRequestId, by: input.by,
+          ...(input.reason ? { reason: input.reason } : {}),
+        })],
+      );
+      await appendWorkflowEventInTransaction(client, {
+        runId: input.runId, eventType: 'runCancelRequested',
+        payload: eventPayload({
+          type: 'runCancelRequested', cancelRequestId: input.cancelRequestId,
+          by: input.by, ...(input.reason ? { reason: input.reason } : {}),
+        }),
+        status: 'running',
+      });
+      for (const event of input.nodes) {
+        await appendWorkflowEventInTransaction(client, {
+          runId: input.runId, eventType: event.type, payload: eventPayload(event),
+        });
+      }
+      return appendWorkflowEventInTransaction(client, {
+        runId: input.runId, eventType: 'runCancelled',
+        payload: eventPayload({
+          type: 'runCancelled', cancelRequestId: input.cancelRequestId, by: input.by,
+        }),
+        status: 'cancelled', terminal: true,
       });
     });
   }

@@ -34,6 +34,14 @@ function memoryRepository(): DurableControllerRepository & {
     async settleAttempt(input) { return store(input.event); },
     async openGate(input) { return store(input.event); },
     async resolveGate(input) { return store(input.event); },
+    async cancelRun(input) {
+      store({
+        type: 'runCancelRequested', cancelRequestId: input.cancelRequestId,
+        by: input.by, ...(input.reason ? { reason: input.reason } : {}),
+      });
+      for (const event of input.nodes) store(event);
+      return store({ type: 'runCancelled', cancelRequestId: input.cancelRequestId, by: input.by });
+    },
   };
 }
 
@@ -148,6 +156,53 @@ describe('PostgresWorkflowController', () => {
     expect(completed.snapshot.runStatus).toBe('succeeded');
     expect(repository.events.map((event) => event.type)).toEqual([
       'runStarted', 'nodeDispatched', 'nodeSucceeded', 'runSucceeded',
+    ]);
+  });
+
+  it('cancels a waiting run without dispatching a worker', async () => {
+    const repository = memoryRepository();
+    const controller = new PostgresWorkflowController(repository, async () => {
+      throw new Error('cancelled gate must not execute');
+    }, { holderId: 'controller-1', executorId: 'pi-opensandbox' });
+    const dag = {
+      runId: 'run-1',
+      nodes: [{
+        id: 'node-1', type: 'goal' as const, goal: 'Do work', depends: [],
+        humanGate: { prompt: 'Proceed?' },
+      }],
+    };
+    await controller.drive(dag);
+    const outcome = await controller.cancel(dag, {
+      cancelRequestId: 'cancel-1', by: 'operator-1', reason: 'no longer needed',
+    });
+    expect(outcome.snapshot.runStatus).toBe('cancelled');
+    expect(repository.events.map((event) => event.type)).toEqual([
+      'runStarted', 'gateDispatched', 'runCancelRequested', 'nodeCancelled', 'runCancelled',
+    ]);
+  });
+
+  it('treats a stale settlement as benign only after durable cancellation wins', async () => {
+    const repository = memoryRepository();
+    repository.settleAttempt = async () => { throw new Error('stale lease cannot settle'); };
+    const controller = new PostgresWorkflowController(repository, async (request) => {
+      await repository.cancelRun({
+        runId: request.runId, cancelRequestId: 'cancel-race', by: 'operator-1',
+        activeAttempt: { attemptId: request.attemptId, sandboxId: 'sandbox-1' },
+        nodes: [{
+          type: 'nodeCancelled', nodeId: request.node.id, instanceId: request.instanceId,
+          attemptId: request.attemptId, reason: 'runCancelled', cancelRequestId: 'cancel-race',
+        }],
+      });
+      return { status: 'failed', errorCode: 'SANDBOX_TERMINATED' };
+    }, { holderId: 'controller-1', executorId: 'pi-opensandbox' });
+
+    const outcome = await controller.drive({
+      runId: 'run-1',
+      nodes: [{ id: 'node-1', type: 'goal', goal: 'Do the work', depends: [], bot: 'pi' }],
+    });
+    expect(outcome.snapshot.runStatus).toBe('cancelled');
+    expect(repository.events.map((event) => event.type)).toEqual([
+      'runStarted', 'nodeDispatched', 'runCancelRequested', 'nodeCancelled', 'runCancelled',
     ]);
   });
 });
