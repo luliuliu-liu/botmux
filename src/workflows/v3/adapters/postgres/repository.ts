@@ -66,7 +66,7 @@ export interface DurableRunCancellation {
   readonly nodes: ReadonlyArray<Extract<V3Event, { type: 'nodeCancelled' }>>;
   readonly activeAttempt?: {
     readonly attemptId: string;
-    readonly sandboxId: string;
+    readonly sandboxId: string | null;
   };
 }
 

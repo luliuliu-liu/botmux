@@ -68,7 +68,7 @@ export interface CancelPostgresWorkflowRun {
   readonly cancelRequestId: string;
   readonly by: string;
   readonly reason?: string;
-  readonly activeAttempt?: { readonly attemptId: string; readonly sandboxId: string };
+  readonly activeAttempt?: { readonly attemptId: string; readonly sandboxId: string | null };
 }
 
 export interface RetryPostgresWorkflowNode {
