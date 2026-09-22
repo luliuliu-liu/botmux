@@ -629,6 +629,19 @@ describe('v3 ephemeral pool', () => {
     expect(Buffer.byteLength(cmd, 'utf-8')).toBeLessThanOrEqual(180);
   });
 
+  it('buildGoalCommand uses a normal file-backed prompt for Pi because Pi has no native /goal command', () => {
+    const req = request();
+    req.botSnapshot = { ...req.botSnapshot, cliId: 'pi' };
+    const cmd = buildGoalCommand(req);
+    expect(cmd.startsWith(`${GOAL_COMMAND} `)).toBe(false);
+    expect(cmd).toContain(req.env[GOAL_ENV.GOAL_PATH]!);
+    expect(cmd).toContain(req.env[GOAL_ENV.OUTPUT_DIR]!);
+    expect(cmd).toContain(req.env[GOAL_ENV.MANIFEST_PATH]!);
+    expect(cmd).toContain('manifest paths are relative to output dir');
+    expect(cmd).not.toContain(`$${GOAL_ENV.GOAL_PATH}`);
+    expect(cmd).not.toContain('\n');
+  });
+
   it('claims success when the manifest appears but waits for the outer worker exit fence', async () => {
     const worker = new ScriptedWorker({ autoReadyAfterInit: true });
     const factory = factoryFor(worker);

@@ -697,9 +697,9 @@ export async function runWorkflow(
     }
   }
 
-  // CLI-scope guard: goal-mode rides the native `/goal` command.  Fail the
+  // CLI-scope guard: goal-mode uses the adapter-specific prompt path. Fail the
   // whole run up front — clearly — rather than spawning a worker on a CLI that
-  // has not been verified to understand `/goal`.
+  // has not been verified to honor the goal contract.
   for (const [key, snap] of botSnapshots) {
     if (deps.validateExecutionSnapshot) {
       deps.validateExecutionSnapshot(snap, key);
