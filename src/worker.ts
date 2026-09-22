@@ -277,6 +277,7 @@ import {
   resolveRenderDimensions,
 } from './utils/render-dimensions.js';
 import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
+import { classifyPiWorkflowFailure } from './workflows/v3/pi-workflow-errors.js';
 import { resolveCodexUpgradeCommand } from './services/codex-upgrade-target.js';
 import {
   CodexSessionUpgradeMonitor, hasCodexAutonomousGoal, isCodexProcess, isRestartableCodexHelper,
@@ -8408,6 +8409,7 @@ const CRASH_DIAGNOSTIC_RAW_MAX = 200_000; // enough scrollback for the web termi
 const CRASH_LOG_TAIL_MAX = 2_500; // bounded Feishu text payload
 let workflowTranscript = '';
 let workflowFinalOutputSent = false;
+let workflowFatalErrorSent = false;
 /** Tracks whether the CLI is currently in the alt screen buffer. Updated by
  *  scanning PTY output for DECSET 1049/47/1047 toggles. Used when trimming
  *  scrollback at cap so replay always starts with the correct buffer mode —
@@ -9038,6 +9040,18 @@ function captureWorkflowTranscript(data: string): void {
   workflowTranscript += data;
   if (workflowTranscript.length > WORKFLOW_TRANSCRIPT_MAX) {
     workflowTranscript = workflowTranscript.slice(-WORKFLOW_TRANSCRIPT_MAX);
+  }
+  // Pi displays provider/API failures in the terminal and then returns to an
+  // idle prompt.  A workflow worker must surface that as a terminal failure;
+  // otherwise the v3 pool waits until the generous hard deadline and looks
+  // like Architect is hung.  This is scoped to Pi + workflow workers only.
+  if (!workflowFatalErrorSent && lastInitConfig?.cliId === 'pi') {
+    const message = classifyPiWorkflowFailure(workflowTranscript);
+    if (message) {
+      workflowFatalErrorSent = true;
+      send({ type: 'error', message });
+      log('Workflow Pi provider failure reported to parent worker');
+    }
   }
 }
 
@@ -20243,6 +20257,7 @@ process.on('message', async (raw: unknown) => {
         }
       }
       lastInitConfig = msg;
+      workflowFatalErrorSent = false;
       if (msg.cliInstanceBinding && (msg.cliId !== 'codex' || msg.adoptMode || msg.existingAppServerEndpoint)) {
         throw new Error('Codex instance binding is incompatible with this worker init');
       }
