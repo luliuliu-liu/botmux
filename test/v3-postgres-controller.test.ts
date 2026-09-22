@@ -42,6 +42,7 @@ function memoryRepository(): DurableControllerRepository & {
       for (const event of input.nodes) store(event);
       return store({ type: 'runCancelled', cancelRequestId: input.cancelRequestId, by: input.by });
     },
+    async retryNode(input) { return store(input.event); },
   };
 }
 
@@ -204,5 +205,58 @@ describe('PostgresWorkflowController', () => {
     expect(repository.events.map((event) => event.type)).toEqual([
       'runStarted', 'nodeDispatched', 'runCancelRequested', 'nodeCancelled', 'runCancelled',
     ]);
+  });
+
+  it('retries a blocked node in the same instance with a bounded next attempt', async () => {
+    const repository = memoryRepository();
+    repository.events.push(
+      {
+        type: 'nodeDispatched', nodeId: 'node-1', instanceId: 'node-1#001',
+        attemptId: 'node-1#001/attempts/001', ts: 2,
+      },
+      {
+        type: 'nodeBlocked', nodeId: 'node-1', instanceId: 'node-1#001',
+        attemptId: 'node-1#001/attempts/001', errorClass: 'workerError',
+        errorCode: 'RETRYABLE', ts: 3,
+      },
+      { type: 'runBlocked', blockedNodeId: 'node-1', ts: 4 },
+    );
+    const attempts: string[] = [];
+    const controller = new PostgresWorkflowController(repository, async (request) => {
+      attempts.push(request.attemptId);
+      return { status: 'succeeded', manifestPath: '/runtime/manifest.json' };
+    }, { holderId: 'controller-1', executorId: 'pi-opensandbox' });
+    const outcome = await controller.retry({
+      runId: 'run-1',
+      nodes: [{ id: 'node-1', type: 'goal', goal: 'Do the work', depends: [] }],
+    }, { expectedAttemptId: 'node-1#001/attempts/001', maxAttempts: 3 });
+    expect(outcome.snapshot.runStatus).toBe('succeeded');
+    expect(attempts).toEqual(['node-1#001/attempts/002']);
+    expect(repository.events.map((event) => event.type)).toEqual([
+      'runStarted', 'nodeDispatched', 'nodeBlocked', 'runBlocked',
+      'nodeRetryRequested', 'nodeDispatched', 'nodeSucceeded', 'runSucceeded',
+    ]);
+  });
+
+  it('refuses retry after the bounded attempt budget is exhausted', async () => {
+    const repository = memoryRepository();
+    repository.events.push(
+      {
+        type: 'nodeDispatched', nodeId: 'node-1', instanceId: 'node-1#001',
+        attemptId: 'node-1#001/attempts/003', ts: 2,
+      },
+      {
+        type: 'nodeBlocked', nodeId: 'node-1', instanceId: 'node-1#001',
+        attemptId: 'node-1#001/attempts/003', errorClass: 'workerError', ts: 3,
+      },
+      { type: 'runBlocked', blockedNodeId: 'node-1', ts: 4 },
+    );
+    const controller = new PostgresWorkflowController(repository, async () => {
+      throw new Error('executor must not run');
+    }, { holderId: 'controller-1', executorId: 'pi-opensandbox' });
+    await expect(controller.retry({
+      runId: 'run-1',
+      nodes: [{ id: 'node-1', type: 'goal', goal: 'Do the work', depends: [] }],
+    }, { maxAttempts: 3 })).rejects.toThrow('retry budget exhausted');
   });
 });

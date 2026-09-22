@@ -112,4 +112,35 @@ describe('PostgresWorkflowRepository', () => {
       .toHaveLength(3);
     expect(calls.at(-1)?.sql).toBe('COMMIT');
   });
+
+  it('records a blocked retry reservation with the run reopening atomically', async () => {
+    const calls: Array<{ sql: string; values?: readonly unknown[] }> = [];
+    const client: PostgresClient = {
+      async query(sql, values) {
+        calls.push({ sql, values });
+        if (sql.includes('SELECT status FROM agent_workflow.workflow_run')) {
+          return { rows: [{ status: 'blocked' }] };
+        }
+        if (sql.includes('SELECT status FROM agent_workflow.workflow_attempt')) {
+          return { rows: [{ status: 'failed' }] };
+        }
+        if (sql.includes('RETURNING next_event_sequence')) return { rows: [{ sequence: 5 }] };
+        return { rows: [], rowCount: 1 };
+      },
+      release() {},
+    };
+    const repository = new PostgresWorkflowRepository({ async connect() { return client; } });
+    await expect(repository.retryNode({
+      runId: 'run-1',
+      event: {
+        type: 'nodeRetryRequested', nodeId: 'node-1', instanceId: 'node-1#001',
+        previousAttemptId: 'node-1#001/attempts/001',
+        nextAttemptId: 'node-1#001/attempts/002', reason: 'blockedRetry',
+      },
+    })).resolves.toBe(5);
+    expect(calls[0]?.sql).toBe('BEGIN');
+    expect(calls.some((call) => call.sql.includes('INSERT INTO agent_workflow.workflow_event'))).toBe(true);
+    expect(calls.some((call) => call.sql.includes("status = $2"))).toBe(true);
+    expect(calls.at(-1)?.sql).toBe('COMMIT');
+  });
 });

@@ -19,6 +19,7 @@ import type {
   DurableGateOpen,
   DurableGateResolution,
   DurableRunCancellation,
+  DurableNodeRetry,
 } from './repository.js';
 import {
   PostgresWorkflowScheduler,
@@ -53,6 +54,7 @@ export interface DurableControllerRepository {
   openGate(input: DurableGateOpen): Promise<number>;
   resolveGate(input: DurableGateResolution): Promise<number>;
   cancelRun(input: DurableRunCancellation): Promise<number>;
+  retryNode(input: DurableNodeRetry): Promise<number>;
 }
 
 export interface ResolvePostgresWorkflowWait {
@@ -67,6 +69,12 @@ export interface CancelPostgresWorkflowRun {
   readonly by: string;
   readonly reason?: string;
   readonly activeAttempt?: { readonly attemptId: string; readonly sandboxId: string };
+}
+
+export interface RetryPostgresWorkflowNode {
+  readonly nodeId?: string;
+  readonly expectedAttemptId?: string;
+  readonly maxAttempts?: number;
 }
 
 export type RecoverPostgresWorkflowAttempt = {
@@ -171,6 +179,55 @@ export class PostgresWorkflowController {
       nodes, ...(input.activeAttempt ? { activeAttempt: input.activeAttempt } : {}),
     });
     return this.scheduler.plan(dag);
+  }
+
+  async retry(
+    dag: V3Dag,
+    input: RetryPostgresWorkflowNode = {},
+  ): Promise<DurableWorkflowPlan> {
+    const plan = await this.scheduler.plan(dag);
+    const nodeId = input.nodeId ?? plan.snapshot.blockedNodeId;
+    if (!nodeId || plan.snapshot.runStatus !== 'blocked' ||
+        plan.snapshot.nodes.get(nodeId)?.status !== 'blocked') {
+      throw new Error(`workflow postgres controller: run/node is not blocked: ${dag.runId}`);
+    }
+    const node = dag.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node || !isGoalNode(node)) {
+      throw new Error(`workflow postgres controller: blocked goal node not found: ${nodeId}`);
+    }
+    const instanceId = plan.snapshot.nodes.get(nodeId)?.effectiveInstanceId;
+    const attemptKey = instanceId ?? nodeId;
+    const previousAttemptId = plan.snapshot.attempts.get(attemptKey);
+    if (!previousAttemptId) throw new Error(`workflow postgres controller: blocked attempt not found: ${nodeId}`);
+    if (input.expectedAttemptId && input.expectedAttemptId !== previousAttemptId) {
+      throw new Error(`workflow postgres controller: stale blocked attempt: ${input.expectedAttemptId}`);
+    }
+    const match = /\/attempts\/(\d{3})$/.exec(previousAttemptId);
+    const attemptNumber = match ? Number(match[1]) : Number.NaN;
+    const maxAttempts = input.maxAttempts ?? 3;
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 10) {
+      throw new Error('workflow postgres controller: maxAttempts must be between 1 and 10');
+    }
+    if (!Number.isSafeInteger(attemptNumber) || attemptNumber >= maxAttempts) {
+      throw new Error(`workflow postgres controller: retry budget exhausted: ${previousAttemptId}`);
+    }
+    const blocked = [...plan.events].reverse().find((event) =>
+      event.type === 'nodeBlocked' && event.nodeId === nodeId && event.attemptId === previousAttemptId);
+    if (!blocked || blocked.type !== 'nodeBlocked') {
+      throw new Error(`workflow postgres controller: blocked event not found: ${previousAttemptId}`);
+    }
+    const nextAttemptId = nextAttemptIdFor([...plan.events], attemptKey);
+    await this.repository.retryNode({
+      runId: dag.runId,
+      event: {
+        type: 'nodeRetryRequested', nodeId,
+        ...(instanceId ? { instanceId } : {}),
+        previousAttemptId, nextAttemptId, reason: 'blockedRetry',
+        previousErrorClass: blocked.errorClass,
+        ...(blocked.errorCode ? { previousErrorCode: blocked.errorCode } : {}),
+      },
+    });
+    return this.drive(dag);
   }
 
   /** Commit a terminal observation from the exact previously-dispatched sandbox. */

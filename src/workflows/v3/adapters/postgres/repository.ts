@@ -70,6 +70,11 @@ export interface DurableRunCancellation {
   };
 }
 
+export interface DurableNodeRetry {
+  readonly runId: string;
+  readonly event: Extract<V3Event, { type: 'nodeRetryRequested' }>;
+}
+
 function runProjection(event: V3Event): {
   status?: WorkflowRunStatus;
   terminal?: boolean;
@@ -306,6 +311,30 @@ export class PostgresWorkflowRepository {
           type: 'runCancelled', cancelRequestId: input.cancelRequestId, by: input.by,
         }),
         status: 'cancelled', terminal: true,
+      });
+    });
+  }
+
+  async retryNode(input: DurableNodeRetry): Promise<number> {
+    return withPostgresTransaction(this.pool, async (client) => {
+      const run = await client.query<{ status: WorkflowRunStatus }>(
+        `SELECT status FROM agent_workflow.workflow_run WHERE run_id = $1 FOR UPDATE`,
+        [input.runId],
+      );
+      if (run.rows[0]?.status !== 'blocked') {
+        throw new Error(`workflow postgres repository: run is not blocked: ${input.runId}`);
+      }
+      const previous = await client.query<{ status: string }>(
+        `SELECT status FROM agent_workflow.workflow_attempt
+          WHERE run_id = $1 AND attempt_id = $2 FOR UPDATE`,
+        [input.runId, input.event.previousAttemptId],
+      );
+      if (previous.rows[0]?.status !== 'failed') {
+        throw new Error('workflow postgres repository: retry attempt is not durably blocked');
+      }
+      return appendWorkflowEventInTransaction(client, {
+        runId: input.runId, eventType: input.event.type,
+        payload: eventPayload(input.event), status: 'running',
       });
     });
   }
