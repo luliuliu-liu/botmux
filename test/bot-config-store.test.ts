@@ -89,6 +89,7 @@ describe('bot-config store', () => {
     expect(keys).toContain('silentTurnReactions');
     expect(keys).toContain('codexAppCleanInput');
     expect(keys).toContain('feedback');
+    expect(keys).toContain('showReplyTiming');
     expect(keys).toContain('cardActionAckTimeoutMs');
   });
 
@@ -445,6 +446,13 @@ describe('bot-config store', () => {
     await store.applyConfigField('app_default', spec, false);
     expect(readConfig().disableStreamingCard).toBeUndefined();
     expect(registry.getBot('app_default').config.disableStreamingCard).toBeUndefined();
+
+    const timing = store.findConfigField('showReplyTiming')!;
+    await store.applyConfigField('app_default', timing, true);
+    expect(registry.getBot('app_default').config.showReplyTiming).toBe(true);
+    expect(registry.loadBotConfigs()[0].showReplyTiming).toBe(true);
+    await store.applyConfigField('app_default', timing, false);
+    expect(readConfig().showReplyTiming).toBeUndefined();
   });
 
   it('sets and unsets hidden streaming-card buttons through /botconfig', async () => {
@@ -467,9 +475,9 @@ describe('bot-config store', () => {
     expect(registry.getBot('app_default').config.hiddenStreamingCardButtons).toBeUndefined();
   });
 
-  it('defaultOn boolean (thinkingCard): inverted persistence — only explicit false is written', async () => {
+  it('defaultOn boolean (cotEnabled): inverted persistence — only explicit false is written', async () => {
     const { registry, store } = await loaded();
-    const spec = store.findConfigField('thinkingCard')!;
+    const spec = store.findConfigField('cotEnabled')!;
     expect(spec.defaultOn).toBe(true);
 
     // off → explicit false on disk and in memory. oldText 'on' proves the
@@ -477,47 +485,22 @@ describe('bot-config store', () => {
     const r1 = await store.applyConfigField('app_default', spec, false);
     expect(r1.ok).toBe(true);
     if (r1.ok) { expect(r1.oldText).toBe('on'); expect(r1.newText).toBe('off'); }
-    expect(readConfig().thinkingCard).toBe(false);
-    expect(registry.getBot('app_default').config.thinkingCard).toBe(false);
+    expect(readConfig().cotEnabled).toBe(false);
+    expect(registry.getBot('app_default').config.cotEnabled).toBe(false);
 
     // on → key deleted (back to default), in-memory undefined (= on).
     const r2 = await store.applyConfigField('app_default', spec, true);
     expect(r2.ok).toBe(true);
     if (r2.ok) { expect(r2.oldText).toBe('off'); expect(r2.newText).toBe('on'); }
-    expect(readConfig().thinkingCard).toBeUndefined();
-    expect(registry.getBot('app_default').config.thinkingCard).toBeUndefined();
+    expect(readConfig().cotEnabled).toBeUndefined();
+    expect(registry.getBot('app_default').config.cotEnabled).toBeUndefined();
 
     // unset (null) from an explicit-false state also restores the default.
     await store.applyConfigField('app_default', spec, false);
     const r3 = await store.applyConfigField('app_default', spec, null);
     expect(r3.ok).toBe(true);
     if (r3.ok) expect(r3.newText).toBe('on');
-    expect(readConfig().thinkingCard).toBeUndefined();
-  });
-
-  it('defaultOn boolean (thinkingCardToolResult): inverted persistence — only explicit false is written', async () => {
-    const { registry, store } = await loaded();
-    const spec = store.findConfigField('thinkingCardToolResult')!;
-    expect(spec.defaultOn).toBe(true);
-    expect(spec.effect).toBe('immediate');
-
-    const r1 = await store.applyConfigField('app_default', spec, false);
-    expect(r1.ok).toBe(true);
-    if (r1.ok) { expect(r1.oldText).toBe('on'); expect(r1.newText).toBe('off'); }
-    expect(readConfig().thinkingCardToolResult).toBe(false);
-    expect(registry.getBot('app_default').config.thinkingCardToolResult).toBe(false);
-
-    const r2 = await store.applyConfigField('app_default', spec, true);
-    expect(r2.ok).toBe(true);
-    if (r2.ok) { expect(r2.oldText).toBe('off'); expect(r2.newText).toBe('on'); }
-    expect(readConfig().thinkingCardToolResult).toBeUndefined();
-    expect(registry.getBot('app_default').config.thinkingCardToolResult).toBeUndefined();
-
-    await store.applyConfigField('app_default', spec, false);
-    const r3 = await store.applyConfigField('app_default', spec, null);
-    expect(r3.ok).toBe(true);
-    if (r3.ok) expect(r3.newText).toBe('on');
-    expect(readConfig().thinkingCardToolResult).toBeUndefined();
+    expect(readConfig().cotEnabled).toBeUndefined();
   });
 
   it('usageDisplay is an immediate three-state enum persisted verbatim, cleared via unset', async () => {
@@ -708,6 +691,30 @@ describe('bot-config store', () => {
     expect(r2.ok).toBe(true);
     expect(readConfig().maxLiveWorkers).toBeUndefined();
     expect(registry.getBot('app_default').config.maxLiveWorkers).toBeUndefined();
+  });
+
+  it('idleSuspendMinutes is an immediate clearable number field that round-trips', async () => {
+    const { registry, store } = await loaded();
+    const spec = store.findConfigField('idleSuspendMinutes')!;
+    expect(spec).toMatchObject({ kind: 'number', effect: 'immediate', clearable: true });
+
+    // Coerce layer: positive integers only (0/negative/fraction/garbage rejected).
+    expect(store.coerceConfigValue(spec, 30)).toEqual({ ok: true, value: 30 });
+    expect(store.coerceConfigValue(spec, '45')).toEqual({ ok: true, value: 45 });
+    expect(store.coerceConfigValue(spec, 0)).toEqual({ ok: false, reason: 'invalid_number' });
+    expect(store.coerceConfigValue(spec, -1)).toEqual({ ok: false, reason: 'invalid_number' });
+    expect(store.coerceConfigValue(spec, 1.5)).toEqual({ ok: false, reason: 'invalid_number' });
+    expect(store.coerceConfigValue(spec, 'abc')).toEqual({ ok: false, reason: 'invalid_number' });
+
+    const set = await store.applyConfigField('app_default', spec, 20);
+    expect(set).toMatchObject({ ok: true, effect: 'immediate' });
+    expect(readConfig().idleSuspendMinutes).toBe(20);
+    expect(registry.getBot('app_default').config.idleSuspendMinutes).toBe(20);
+
+    const clear = await store.applyConfigField('app_default', spec, null);
+    expect(clear.ok).toBe(true);
+    expect(readConfig().idleSuspendMinutes).toBeUndefined();
+    expect(registry.getBot('app_default').config.idleSuspendMinutes).toBeUndefined();
   });
 
   it('cardActionAckTimeoutMs enforces its range and hot-updates the registered Bot', async () => {

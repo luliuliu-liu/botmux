@@ -503,6 +503,12 @@ export interface CliAdapter {
    * It survives per-turn resets and is retired once per IdleDetector/spawn. */
   readonly startupPendingPattern?: RegExp;
   readonly startupReadyPattern?: RegExp;
+  /** Resume can replace the loading banner with restored history. After this
+   * marker, a quiet authoritative viewport may prove initialization instead. */
+  readonly startupResume?: {
+    historyPattern: RegExp;
+    isReady: (screen: string) => boolean;
+  };
   /** Optional positive initialization evidence from a complete backend history
    * snapshot. Must reject stale prompts, loading, dialogs, and unsent drafts.
    * This only releases startup type-ahead; it never proves an idle/turn boundary. */
@@ -772,4 +778,4 @@ export interface CliAdapter {
   buildSessionRenameCommand?(title: string): string;
 }
 
-export type CliId = 'claude-code' | 'seed' | 'relay' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'genius' | 'opencode' | 'opencode2' | 'antigravity' | 'mtr' | 'hermes' | 'mira' | 'mir' | 'traex' | 'pi' | 'copilot' | 'oh-my-pi' | 'ebsd' | 'kimi' | 'grok' | 'kiro-cli' | 'riff' | 'reasonix' | 'dsh' | 'dsh-tui' | 'mojo' | 'minimax';
+export type CliId = 'claude-code' | 'seed' | 'relay' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'genius' | 'opencode' | 'opencode2' | 'mimocode' | 'antigravity' | 'mtr' | 'hermes' | 'mira' | 'mir' | 'traex' | 'pi' | 'copilot' | 'oh-my-pi' | 'ebsd' | 'kimi' | 'grok' | 'kiro-cli' | 'riff' | 'reasonix' | 'dsh' | 'dsh-tui' | 'mojo' | 'minimax';

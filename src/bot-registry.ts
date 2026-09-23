@@ -1681,6 +1681,17 @@ export interface BotConfig {
    * sessions are never suspended. See core/idle-worker-sweeper.ts.
    */
   maxLiveWorkers?: number;
+  /**
+   * Per-bot idle session time-to-live, in MINUTES. A live session whose screen
+   * status has stayed continuously `idle` for this long is suspended
+   * automatically (worker + CLI killed to reclaim memory; the next message
+   * cold-resumes from transcript), independently of the {@link maxLiveWorkers}
+   * count cap. Unset / 0 / non-positive = TTL disabled (the default — idle
+   * sessions are never timed out, only the count cap can suspend them).
+   * Positive integer only. Adopted sessions and non-resumable backends
+   * (pty/riff/mojo) are never TTL-suspended. See core/idle-worker-sweeper.ts.
+   */
+  idleSuspendMinutes?: number;
   /** Periodically @ the persisted Session owner while selected actionable
    * runtime states remain unchanged. Missing means disabled. */
   sessionOwnerReminder?: SessionOwnerReminderConfig;
@@ -1943,6 +1954,8 @@ export interface BotConfig {
    * `usageDisplay` set is read as `'off'` (see {@link resolveUsageDisplay}).
    */
   usageDisplay?: UsageDisplayMode;
+  /** Show per-turn waiting and native execution time on final reply cards. Default off. */
+  showReplyTiming?: boolean;
   tuiSlashAllow?: string[];
   /**
    * When true, suppress the live streaming session card entirely. The web
@@ -1971,15 +1984,10 @@ export interface BotConfig {
    * Requires a transcript-backed CLI (claude-code and codex today); other
    * CLIs simply never emit the thinking channel. Per-chat opt-out via
    * {@link noCotChats} (`/cot off`).
-   */
-  thinkingCard?: boolean;
-  /** 思考气泡是否附带工具输出（TOOL_CALL_RESULT 代码块）。默认 ON（缺省 =
-   *  开；只有显式 false 持久化）。off 时气泡只保留思考段落与工具节点标题
-   *  （工具名 · 命令/路径），与 Claude Code 自身界面一致。子开关：
-   *  {@link thinkingCard} 关闭时无意义。 */
-  thinkingCardToolResult?: boolean;
+  */
+  cotEnabled?: boolean;
   /** chat_id list: chats where the CoT (thinking process) message is suppressed
-   *  even when {@link thinkingCard} is on. Written by `/cot off|on`. */
+   *  even when {@link cotEnabled} is on. Written by `/cot off|on`. */
   noCotChats?: string[];
   /**
    * When true, suppress the lightweight GoGoGo → DONE message reactions used as
@@ -2099,7 +2107,8 @@ export interface BotConfig {
    * 进群自动拉 owner。Default (undefined) = ON：本 bot 被加进任何群时，自动把
    * 自己的 owner（resolvedAllowedUsers 首个 ou_ 用户）拉进群——bot 应始终处于
    *  owner 可见的群里（不打黑工）。显式 false 关闭（如告警/oncall 类 bot 被
-   * 平台批量拉进大量事件群、不想打扰 owner 的场景）。仅 bots.json 文件配置。
+   * 平台批量拉进大量事件群、不想打扰 owner 的场景）。可在 Dashboard Bot
+   * Defaults 或飞书 /botconfig 配置；仅作用于被动入群，团队建群/federation 不读此开关。
    */
   autoInviteOwnerOnGroupAdd?: boolean;
   /**
@@ -3722,6 +3731,12 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         && Number.isInteger(entry.maxLiveWorkers) && entry.maxLiveWorkers > 0
         ? entry.maxLiveWorkers
         : undefined,
+      // Positive integer minutes only; 0 / negative / fractional / absent →
+      // undefined (= idle TTL disabled).
+      idleSuspendMinutes: typeof entry.idleSuspendMinutes === 'number'
+        && Number.isInteger(entry.idleSuspendMinutes) && entry.idleSuspendMinutes > 0
+        ? entry.idleSuspendMinutes
+        : undefined,
       sessionOwnerReminder: normalizeSessionOwnerReminderConfig(entry.sessionOwnerReminder),
       quotaFallbackBot: normalizedQuotaFallback.config,
       // Only explicit true persisted (undefined = off), same as restrictGrantCommands.
@@ -3788,16 +3803,15 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       usageDisplay: normalizeUsageDisplay(entry) === DEFAULT_USAGE_DISPLAY
         ? undefined
         : normalizeUsageDisplay(entry),
+      showReplyTiming: entry.showReplyTiming === true || undefined,
       // Retired final-only preference must not opt into an extra terminal card.
       disableStreamingCard: entry.disableStreamingCard === true || entry.replyCardMode === 'final-only' || undefined,
       replyCardMode: entry.replyCardMode === 'unified' || entry.replyCardMode === 'final-only' ? 'unified' : undefined,
       hiddenStreamingCardButtons: normalizeHiddenStreamingCardButtons(entry.hiddenStreamingCardButtons),
       pinStreamingCard: entry.pinStreamingCard === true || undefined,
       // Default ON: only an explicit false is meaningful/persisted (undefined = on).
-      thinkingCard: entry.thinkingCard === false ? false : undefined,
-      // 同 thinkingCard 约定：缺省 = 开，只有显式 false 有意义。
-      thinkingCardToolResult: entry.thinkingCardToolResult === false ? false : undefined,
-      // Default ON, same convention as thinkingCard: an absent key means the
+      cotEnabled: entry.cotEnabled === false ? false : undefined,
+      // Default ON, same convention as cotEnabled: an absent key means the
       // <sender> tag is injected, so existing prompts are unchanged.
       senderTag: entry.senderTag === false ? false : undefined,
       noPinStreamingCardChats: Array.isArray(entry.noPinStreamingCardChats)
