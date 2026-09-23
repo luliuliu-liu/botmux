@@ -737,12 +737,6 @@ export function resolveArchitectBotConfig(
       `没有同时满足 bypass + v3 CLI allowlist 的 bot（supported: ${V3_SUPPORTED_CLIS.join(', ')}）`,
     );
   }
-  if (bot.disableCliBypass === true || !isV3SupportedCli(bot.cliId)) {
-    throw new Error(
-      `v3 architect bot "${bot.name ?? bot.larkAppId}" uses unsupported or restricted CLI "${bot.cliId}" ` +
-      `(supported: ${V3_SUPPORTED_CLIS.join(', ')})`,
-    );
-  }
   return bot;
 }
 

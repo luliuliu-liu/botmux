@@ -42,7 +42,10 @@ export function readLinuxBootIdentity(): string | undefined {
  * Stable process-birth identity used to reject stale locks after PID reuse.
  */
 export function readProcessStartIdentity(pid: number): string | undefined {
-  if (!Number.isInteger(pid) || pid <= 1) return undefined;
+  // A containerized supervisor commonly runs as PID 1. Keep rejecting an
+  // arbitrary external PID 1 (the host init process), but allow the current
+  // process to attest itself when it is the container entrypoint.
+  if (!Number.isInteger(pid) || pid <= 0 || (pid === 1 && pid !== process.pid)) return undefined;
   if (process.platform === 'linux') {
     try {
       const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
