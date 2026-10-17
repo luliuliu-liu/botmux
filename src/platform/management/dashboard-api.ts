@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dirname, join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { BotOnboardingManager } from '../../dashboard/bot-onboarding.js';
 import { readBotsJsonOrEmpty } from '../../setup/bots-store.js';
 import { jsonRes } from '../../dashboard/http.js';
@@ -28,6 +29,9 @@ export function createPlatformDashboardApi(deps:{
   const readFeishuSession = deps.readFeishuSession ?? createFeishuSessionReader();
   const onboardingSession=createOnboardingSessionConfirmation(()=>deps.localOnboarding.sessionStatus());
   const path=join(dirname(deps.botsJsonPath),'platform','pool-bots.json');
+  // Native atomic config/pending-job writers deliberately do not create their
+  // parent. Prepare private storage BEFORE allowing any external App creation.
+  mkdirSync(dirname(path),{recursive:true,mode:0o700});
   const names = new Map<string,string>();
   const register=async(appId:string)=>{
     const bot=readBotsJsonOrEmpty(path).find((bot:any)=>bot.larkAppId===appId);

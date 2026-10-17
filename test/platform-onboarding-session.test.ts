@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOnboardingSessionConfirmation } from '../src/platform/management/onboarding-session.js';
 import { createPlatformDashboardApi } from '../src/platform/management/dashboard-api.js';
 import { BotOnboardingManager, type BotOnboardingSessionStatus } from '../src/dashboard/bot-onboarding.js';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const ready:BotOnboardingSessionStatus={status:'ready',source:'botmux_cache',identity:{userId:'private-user',tenantId:'private-tenant',userName:'Account',tenantName:'Org',email:'user@example.com'}};
@@ -43,8 +43,12 @@ describe('platform onboarding account confirmation',()=>{
       let status=0,raw='';await api({method,async *[Symbol.asyncIterator](){yield JSON.stringify(body||{});}} as any,
         {writeHead:(s:number)=>{status=s;},end:(b:string)=>{raw=b;}} as any,new URL(`http://localhost/api/platform${path}`),auth);
       return {status,data:JSON.parse(raw)};
-    };return {call,start,local,fetcher};
+    };return {call,start,local,fetcher,dir};
   }
+  it('prepares a private pool directory before any native App creation',async()=>{
+    const {dir,start}=await fixture();expect(existsSync(join(dir,'platform'))).toBe(true);
+    expect(statSync(join(dir,'platform')).mode&0o777).toBe(0o700);expect(start).not.toHaveBeenCalled();
+  });
   it.each(['pool','local'])('passes confirmed identity to native %s creation, never forced QR',async target=>{
     const {call,start,local}=await fixture();const view=await call('/onboarding/session');
     expect(view.status).toBe(200);expect(JSON.stringify(view.data)).not.toMatch(/private-user|private-tenant|userId|tenantId/);
