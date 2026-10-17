@@ -6,12 +6,13 @@ import { FeishuSessionPanel } from './feishu-session-panel.js';
 import { PlatformBotCreate } from './bot-create.js';
 import { syncAgentConfiguration } from './agent-configuration.js';
 
-type Bot={botId:string;displayName:string;appId:string;usage:'local'|'free'|'sandbox';containerName?:string;secretConfigured:boolean};
+type Bot={botId:string;displayName:string;appId:string;usage:'local'|'free'|'sandbox';containerId?:string;containerName?:string;containerRevision?:number;containerStatus?:string;detachPending?:boolean;secretConfigured:boolean};
 type Model={profileId:string;displayName:string;provider:string;baseUrl:string;modelId:string;apiKeyConfigured:boolean;enabled:boolean};
 type Container={containerId:string;displayName:string;agentType:string;image:string;sandboxId:string|null;modelProfileId:string;modelName:string;modelId:string;
-  status:string;revision:number;appliedRevision:number;egressHosts:string[];botId:string|null;botName:string|null;workspaceClaim:string;stateClaim:string;lastError:string|null};
+  status:string;revision:number;appliedRevision:number;egressHosts:string[];botId:string|null;botName:string|null;workspaceClaim:string;workspaceKind?:string;workspaceReadOnly?:boolean;detachPending?:boolean;stateClaim:string;lastError:string|null};
 type Agent={id:string;name:string;supported:boolean;version:string|null;images:Array<{id:string;image:string;label:string}>};
-type Data={bots:Bot[];models:Model[];containers:Container[];agents:Agent[]};
+type WorkspaceOptions={hostPathEnabled:boolean;tenantHome?:string|null;hostRoots:string[];workspaces:Array<{kind:'volume'|'hostpath';source:string;readOnly:boolean;useCount:number}>};
+type Data={bots:Bot[];models:Model[];containers:Container[];agents:Agent[];workspaceOptions?:WorkspaceOptions};
 const initial:Data={bots:[],models:[],containers:[],agents:[]};
 const labels:Record<string,string>={creating:'配置中',ready:'就绪',error:'异常',deleting:'删除待确认',deleted:'已删除'};
 export async function platformApi(path:string,method='GET',body?:unknown){
@@ -25,12 +26,12 @@ function Modal({title,children,onClose,busy=false}:{title:string;children:ReactN
 }
 export function ManagementPage({page}:{page:'bots'|'models'|'agents'}){
   const [data,setData]=useState<Data>(initial),[error,setError]=useState(''),[notice,setNotice]=useState(''),[loading,setLoading]=useState(true);
-  const [modal,setModal]=useState<'bot'|'container'|'model'|'delete'|null>(null),[selected,setSelected]=useState<Container|null>(null),[model,setModel]=useState<Model|null>(null);
+  const [modal,setModal]=useState<'bot'|'container'|'model'|'delete'|'unbind'|null>(null),[selected,setSelected]=useState<Container|null>(null),[model,setModel]=useState<Model|null>(null),[selectedBot,setSelectedBot]=useState<Bot|null>(null);
   const mounted=useRef(true);
   const syncing=useRef(false),[syncingId,setSyncingId]=useState<string|null>(null);
   const refresh=async()=>{
-    try{const [bots,models,containers,catalog]=await Promise.all(['/bots','/models','/containers','/catalog'].map(p=>platformApi(p)));
-      if(mounted.current){setData({bots:bots.bots,models:models.models,containers:containers.containers,agents:catalog.agents});setError('');}}
+    try{const [bots,models,containers,catalog,workspaces]=await Promise.all(['/bots','/models','/containers','/catalog','/workspaces'].map(p=>platformApi(p)));
+      if(mounted.current){setData({bots:bots.bots,models:models.models,containers:containers.containers,agents:catalog.agents,workspaceOptions:workspaces});setError('');}}
     catch(error){if(mounted.current)setError(String(error instanceof Error?error.message:error));}
     finally{if(mounted.current)setLoading(false);}
   };
@@ -55,7 +56,7 @@ export function ManagementPage({page}:{page:'bots'|'models'|'agents'}){
   {error?<p className="hint-warn" role="alert">{error}</p>:null}{notice?<p className="hint" role="status">{notice}</p>:null}
   {loading?<p>正在加载…</p>:page==='bots'?<>
     <div className="pm-bot-list-heading"><h2>机器人</h2><span>{data.bots.length} 个机器人</span></div>
-    <div className="pm-table-wrap"><table><thead><tr><th>名称</th><th>App ID</th><th>凭证</th><th>使用情况</th></tr></thead><tbody>{data.bots.map(bot=><tr key={bot.botId}><td>{bot.displayName}</td><td><code>{bot.appId}</code></td><td>{bot.secretConfigured?'已配置':'未配置'}</td><td>{bot.usage==='free'?<span className="pm-state">空闲</span>:bot.usage==='local'?'本地 Botmux':`Agent / ${bot.containerName}`}</td></tr>)}</tbody></table>{!data.bots.length?<p className="empty">暂无机器人</p>:null}</div>
+    <div className="pm-table-wrap"><table><thead><tr><th>名称</th><th>App ID</th><th>凭证</th><th>使用情况</th><th>操作</th></tr></thead><tbody>{data.bots.map(bot=><tr key={bot.botId}><td>{bot.displayName}</td><td><code>{bot.appId}</code></td><td>{bot.secretConfigured?'已配置':'未配置'}</td><td>{bot.usage==='free'?<span className="pm-state">空闲</span>:bot.usage==='local'?'本地 Botmux':`Agent / ${bot.containerName}`}{bot.detachPending?<small className="hint-warn">摘除待同步，保留占用</small>:null}</td><td>{bot.usage==='sandbox'?<><button disabled={bot.containerStatus!=='ready'||!bot.containerId} onClick={()=>{setSelectedBot(bot);setModal('unbind');}}>摘除绑定</button>{bot.detachPending?<a href="#/platform-agents">重试同步</a>:null}</>:<span className="hint">—</span>}</td></tr>)}</tbody></table>{!data.bots.length?<p className="empty">暂无机器人</p>:null}</div>
   </>:page==='models'?<>
     <p className="hint">集中维护模型、服务地址和 API Key。保存连接不会自动修改已运行的 Agent；请到 <a href="#/platform-agents">Agent 管理</a> 切换模型或同步最新配置。</p>
     <h2>模型连接</h2><div className="pm-table-wrap"><table><thead><tr><th>名称</th><th>Provider / 模型</th><th>认证</th><th>操作</th></tr></thead><tbody>{data.models.map(m=><tr key={m.profileId}><td>{m.displayName}<small>{m.enabled?'已启用':'已停用'}</small></td><td>{m.provider}<small>{m.modelId}</small></td><td>{m.apiKeyConfigured?'Key 已配置':'未配置'}</td><td><button onClick={()=>{setModel(m);setModal('model');}}>编辑连接</button></td></tr>)}</tbody></table>{!data.models.length?<p className="empty">暂无模型连接</p>:null}</div><p className="hint">当前支持 API Key · OpenAI Chat Completions；官方账号登录尚未适配。</p>
@@ -68,7 +69,18 @@ export function ManagementPage({page}:{page:'bots'|'models'|'agents'}){
   {modal==='container'?<ContainerForm data={data} container={selected} onClose={()=>setModal(null)} onDone={finish}/>:null}
   {modal==='model'?<ModelForm model={model} onClose={()=>setModal(null)} onDone={finish}/>:null}
   {modal==='delete'&&selected?<DeleteContainer container={selected} onClose={()=>setModal(null)} onDone={finish}/>:null}
+  {modal==='unbind'&&selectedBot?<UnbindBot bot={selectedBot} onClose={()=>setModal(null)} onDone={finish}/>:null}
   </section>;
+}
+export function UnbindBot({bot,onClose,onDone}:{bot:Bot;onClose:()=>void;onDone:(m:string)=>void}){
+  const [busy,setBusy]=useState(false),[error,setError]=useState('');const submitting=useRef(false);
+  return <Modal title="摘除机器人绑定" onClose={onClose} busy={busy}><form onSubmit={async e=>{
+    e.preventDefault();if(submitting.current)return;submitting.current=true;setBusy(true);setError('');
+    try{const result=await platformApi(`/bots/${encodeURIComponent(bot.botId)}/unbind`,'POST',{containerId:bot.containerId,revision:bot.containerRevision});const c=result.container;
+      if(!c||c.containerId!==bot.containerId||c.botId!==null||c.status!=='ready'||c.revision!==c.appliedRevision||c.revision<=Number(bot.containerRevision))throw new Error('摘除未确认生效，请刷新状态；机器人暂不释放');
+      onDone('机器人已摘除，容器解绑配置已同步；机器人返回空闲池。');
+    }catch(error){setError(error instanceof Error?error.message:String(error));}finally{submitting.current=false;setBusy(false);}
+  }}><p>将 {bot.displayName} 从 Agent「{bot.containerName}」摘除，并同步到对应容器。</p><p className="hint">容器确认无绑定后才返回空闲池。不会删除飞书应用、容器或数据；忙碌时请等待任务结束。</p>{error?<p role="alert" className="hint-warn">{error}</p>:null}<footer><button type="button" onClick={onClose} disabled={busy}>取消</button><button className="primary" disabled={busy}>{busy?'同步解绑中…':'确认摘除并同步'}</button></footer></form></Modal>;
 }
 function DeleteContainer({container,onClose,onDone}:{container:Container;onClose:()=>void;onDone:(m:string)=>void}){
   const [name,setName]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState('');
@@ -86,9 +98,11 @@ function DeleteContainer({container,onClose,onDone}:{container:Container;onClose
 }
 export function ContainerForm({data,container,onClose,onDone}:{data:Data;container:Container|null;onClose:()=>void;onDone:(m:string)=>void}){
   const [error,setError]=useState(''),[busy,setBusy]=useState(false);const requestId=useRef(crypto.randomUUID());
+  const [workspace,setWorkspace]=useState('new'),[readOnly,setReadOnly]=useState(false);
+  const workspaceOptions=data.workspaceOptions;
   const submit=async(event:FormEvent<HTMLFormElement>)=>{event.preventDefault();setBusy(true);setError('');const values=Object.fromEntries(new FormData(event.currentTarget));
     try{if(container){const observed=await syncAgentConfiguration(platformApi,container,String(values.modelProfileId),String(values.botId||'')||null);onDone(`Agent 模型与配置已同步（版本 ${observed.appliedRevision}），后续任务使用新配置。`);}
-      else {await platformApi('/containers','POST',{...values,requestId:requestId.current,agentType:'pi'});onDone('Agent 已创建并完成运行握手');}}
+      else {await platformApi('/containers','POST',{...values,workspaceReadOnly:readOnly,hostPathConfirmed:values.hostPathConfirmed==='on',requestId:requestId.current,agentType:'pi'});onDone('Agent 已创建并完成运行握手');}}
     catch(error){setError(error instanceof Error?error.message:String(error));}finally{setBusy(false);}
   };
   return <Modal title={container?'Agent 配置':'创建 Agent'} onClose={onClose} busy={busy}><form onSubmit={submit}>
@@ -97,7 +111,12 @@ export function ContainerForm({data,container,onClose,onDone}:{data:Data;contain
     <label>镜像{container?<input value={container.image} disabled/>:<select name="imageProfile" defaultValue="runtime">{data.agents.find(a=>a.id==='pi')?.images.map(i=><option key={i.id} value={i.id}>{i.label} · {i.image}</option>)}</select>}</label>
     <label>模型<select name="modelProfileId" defaultValue={container?.modelProfileId||''} required><option value="" disabled>选择兼容的模型连接</option>{data.models.filter(m=>m.enabled&&(!container||container.egressHosts.includes(new URL(m.baseUrl).hostname))).map(m=><option key={m.profileId} value={m.profileId}>{m.displayName} / {m.modelId}</option>)}</select></label>
     <label>飞书机器人<select name="botId" defaultValue={container?.botId||''}><option value="">不绑定机器人</option>{data.bots.filter(b=>b.usage==='free'||b.botId===container?.botId).map(b=><option key={b.botId} value={b.botId}>{b.displayName} · {b.appId}</option>)}</select></label>
-    {container?<><label>工作区<input disabled value={container.workspaceClaim}/></label><p className="hint">Agent / 镜像不可修改。解绑只需选择“不绑定机器人”，容器会保留。</p></>:<label>工作区<select name="workspace" defaultValue="new"><option value="new">创建独立持久化工作区</option><option value="shared">使用平台共享 /workspace</option></select></label>}
+    {container?<><label>工作区<input disabled value={`${container.workspaceKind||'volume'} · ${container.workspaceClaim}${container.workspaceReadOnly?'（只读）':''}`}/></label><p className="hint">Agent / 镜像与挂载不可修改；更换挂载需新建 Agent，历史目录/卷可复用。解绑选择“不绑定机器人”，容器会保留。</p></>:<>
+      <label>工作区<select name="workspace" value={workspace} onChange={e=>{setWorkspace(e.target.value);setReadOnly(e.target.value==='hostpath');}}><option value="new">新建独立 volume</option><option value="shared">使用平台共享 volume</option><option value="volume">选择历史 volume</option><option value="hostpath" disabled={!workspaceOptions?.hostPathEnabled}>挂载 hostPath</option></select></label>
+      {workspace==='volume'?<label>历史 volume<select name="workspaceSource" required defaultValue=""><option value="" disabled>选择历史工作区卷</option>{workspaceOptions?.workspaces?.filter(w=>w.kind==='volume').map(w=><option key={w.source} value={w.source}>{w.source} · 使用 {w.useCount} 次</option>)}</select></label>:null}
+      {workspace==='hostpath'?<><label>hostPath（可选历史目录）<input name="workspaceSource" required list="pm-hostpath-history" defaultValue={workspaceOptions?.tenantHome||''}/><datalist id="pm-hostpath-history">{workspaceOptions?.workspaces?.filter(w=>w.kind==='hostpath').map(w=><option key={w.source} value={w.source}/>)}</datalist></label><p className="hint">当前部署的租户工作区 home：{workspaceOptions?.tenantHome||'未配置'}。允许根目录：{workspaceOptions?.hostRoots.join('、')}。目录需预先存在，禁止越界及符号链接逃逸。</p><label className="pm-check"><input type="checkbox" name="hostPathConfirmed" required/><span>确认此目录将暴露给 Agent；读写模式下 Agent 可修改、删除该目录内容。</span></label></>:null}
+      <label className="pm-check"><input type="checkbox" checked={readOnly} onChange={e=>setReadOnly(e.target.checked)}/><span>只读挂载 /workspace</span></label><p className="hint">历史选项包括已删除 Agent 保留的工作区，不包含凭据 state 卷。复用工作区会共享文件，请留意并发写入。</p>
+    </>}
     <p className="hint">模型来自 <a href="#/platform-models">模型管理</a>；只可选择容器网络范围内已启用的模型。新增端点主机需要新建 Agent。</p>
     <p className="hint">{busy?'正在同步到 Agent，等待运行时确认。失败时保留记录，可在列表重试同步。':'保存会同步模型、地址与 API Key 到 Agent；同一连接的更新也可重新同步。不会删除容器或打断运行中的任务。'}</p>
     {error?<p role="alert" className="hint-warn">{error}</p>:null}<footer><button type="button" onClick={onClose} disabled={busy}>关闭</button><button type="submit" className="primary" disabled={busy||!!container&&container.status!=='ready'}>{busy?'同步中…':container?'保存并同步':'创建 Agent'}</button></footer>

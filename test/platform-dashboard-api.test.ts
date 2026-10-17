@@ -40,6 +40,8 @@ describe('v2 platform boundaries',()=>{
     expect(entry).toContain('ui.platformManaged');expect(entry).toContain('href="#/platform-bots"');
     expect(native).toContain('status && !(ui.platformManaged && loginVisible)');
     expect(native).toContain('export function FeishuLoginModal');
+    const server=readFileSync(new URL('../src/dashboard.ts',import.meta.url),'utf8');
+    expect(server).toContain('displayName:bot.displayName||online.get(bot.larkAppId)||persisted.get(bot.larkAppId)||bot.name');
   });
   it('rejects unauthenticated access and never proxies secret dispatch or raw bot registration to browsers',async()=>{
     const old=process.env.BOTMUX_PLATFORM_MANAGED;

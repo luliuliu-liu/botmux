@@ -1005,7 +1005,11 @@ const botOnboarding = new BotOnboardingManager({
 const platformDashboardApi = createPlatformDashboardApi({
   botsJsonPath: BOTS_JSON_PATH,
   localOnboarding: botOnboarding,
-  listLocalBots: () => loadBotConfigs(),
+  listLocalBots: () => {
+    const online=new Map(registry.list().map(bot=>[bot.larkAppId,bot.botName]));
+    const persisted=readPersistedBotNames();
+    return loadBotConfigs().map(bot=>({...bot,displayName:bot.displayName||online.get(bot.larkAppId)||persisted.get(bot.larkAppId)||bot.name}));
+  },
 });
 const platformRemoteFleet = new PlatformRemoteFleet(() => loadBotConfigs());
 platformRemoteFleet.start();

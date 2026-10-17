@@ -107,12 +107,12 @@ export function createPlatformDashboardApi(deps:{
         }
         if(req.method==='GET'&&!jobMatch[3]){jsonRes(res,200,{job});return true;}
       }
-      if(!/^\/(catalog|bots|containers(?:\/[0-9a-f-]+(?:\/reconcile)?)?|models(?:\/[A-Za-z0-9._-]+)?)$/.test(suffix)||
+      if(!/^\/(catalog|workspaces|bots(?:\/[A-Za-z0-9._-]+\/unbind)?|containers(?:\/[0-9a-f-]+(?:\/reconcile)?)?|models(?:\/[A-Za-z0-9._-]+)?)$/.test(suffix)||
         !['GET','POST','PUT','DELETE'].includes(req.method||'')){
         jsonRes(res,404,{error:'not_found'});return true;
       }
-      const allowed = req.method === 'GET' && ['/catalog','/bots','/containers','/models'].includes(suffix)
-        || req.method === 'POST' && (suffix === '/containers' || /^\/containers\/[0-9a-f-]+\/reconcile$/.test(suffix))
+      const allowed = req.method === 'GET' && ['/catalog','/workspaces','/bots','/containers','/models'].includes(suffix)
+        || req.method === 'POST' && (suffix === '/containers' || /^\/containers\/[0-9a-f-]+\/reconcile$/.test(suffix)||/^\/bots\/[A-Za-z0-9._-]+\/unbind$/.test(suffix))
         || req.method === 'PUT' && /^\/(containers\/[0-9a-f-]+|models\/[A-Za-z0-9._-]+)$/.test(suffix)
         || req.method === 'DELETE' && /^\/containers\/[0-9a-f-]+$/.test(suffix);
       if (!allowed) { jsonRes(res,405,{error:'method_not_allowed'});return true; }
@@ -122,9 +122,10 @@ export function createPlatformDashboardApi(deps:{
       const result=await platformRequest(suffix,req.method,req.method==='GET'?undefined:await read());
       if(suffix==='/bots'&&req.method==='GET'&&result.status===200){
         const rows=result.data.bots as Array<{appId:string}>;
-        for(const bot of local)if(!rows.some(row=>row.appId===bot.appId))rows.push({
-          ...bot,botId:bot.appId,usage:'local',secretConfigured:true,
-        } as any);
+        for(const bot of local){const existing=rows.find(row=>row.appId===bot.appId) as any;
+          if(!existing)rows.push({...bot,botId:bot.appId,usage:'local',secretConfigured:true} as any);
+          else if(existing.usage==='local'&&bot.displayName!==bot.appId)existing.displayName=bot.displayName;
+        }
       }
       jsonRes(res,result.status,result.data);return true;
     }catch{
