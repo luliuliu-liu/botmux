@@ -89,7 +89,7 @@ type PluginDashboardNavEntry = {
 };
 
 const MANAGE_ROUTES = [
-  'platform-bots', 'platform-agents', 'opensandbox',
+  'platform-bots', 'platform-models', 'platform-agents', 'opensandbox',
   'roles',
   'role-profiles',
   'bot-defaults',
@@ -106,8 +106,8 @@ const MANAGE_ROUTES = [
 
 const NAV_ITEMS: NavItem[] = [
   { id: 'platform-bots', href: '#/platform-bots', label: 'Bot 管理', manage: true, icon: <><rect x="2" y="4" width="12" height="9" rx="2"/><path d="M8 1v3M5 8h1M10 8h1"/></> },
-  { id: 'platform-agents', href: '#/platform-agents', label: 'Agent 管理', manage: true, icon: <><rect x="2" y="2" width="12" height="12" rx="2"/><path d="m4 6 2 2-2 2M8 10h3"/></> },
-  { id: 'opensandbox', href: '#/opensandbox', label: 'OpenSandbox', manage: true, icon: <><path d="m8 1 6 3v8l-6 3-6-3V4zm0 6v8M2 4l6 3 6-3"/></> },
+  { id: 'platform-models', href: '#/platform-models', label: '模型管理', manage: true, icon: <><rect x="2" y="2" width="12" height="12" rx="2"/><path d="m4 6 2 2-2 2M8 10h3"/></> },
+  { id: 'platform-agents', href: '#/platform-agents', label: 'Agent 管理', manage: true, icon: <><path d="m8 1 6 3v8l-6 3-6-3V4zm0 6v8M2 4l6 3 6-3"/></> },
   {
     id: 'overview',
     href: '#/',
@@ -193,7 +193,7 @@ const NAV_GROUPS: Array<{ id: string; labelKey: string; items: string[] }> = [
   { id: 'collab', labelKey: 'nav.group.collab', items: ['sessions', 'agent-workbench', 'groups', 'schedules', 'workflows', 'office'] },
   { id: 'workforce', labelKey: 'nav.group.workforce', items: ['roles', 'skills', 'customization', 'message-listeners', 'bot-defaults'] },
   { id: 'analytics', labelKey: 'nav.group.analytics', items: ['monitoring', 'insights', 'feedback'] },
-  { id: 'manage', labelKey: 'nav.group.manage', items: ['platform-bots', 'platform-agents', 'opensandbox', 'connectors', 'team', 'plugins', 'whiteboards', 'settings'] },
+  { id: 'manage', labelKey: 'nav.group.manage', items: ['platform-bots', 'platform-models', 'platform-agents', 'connectors', 'team', 'plugins', 'whiteboards', 'settings'] },
 ];
 
 let pinnedPluginNavItems: NavItem[] = [];
@@ -248,7 +248,7 @@ function sidebarNavItems(): NavItem[] {
   const nativeItems = readDashboardClientShell()
     ? NAV_ITEMS.filter(item => item.id !== 'workflows')
     : NAV_ITEMS;
-  const builtInItems = nativeItems.filter(item => ui.platformManaged || !['platform-bots','platform-agents','opensandbox'].includes(item.id));
+  const builtInItems = nativeItems.filter(item => ui.platformManaged || !['platform-bots','platform-models','platform-agents','opensandbox'].includes(item.id));
   if (pinnedPluginNavItems.length === 0) return builtInItems;
   const pluginIndex = builtInItems.findIndex(item => item.id === 'plugins');
   if (pluginIndex < 0) return [...builtInItems, ...pinnedPluginNavItems];

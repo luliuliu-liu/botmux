@@ -31,8 +31,10 @@ function pageRoute<T extends Record<K, DashboardRouteRenderer>, K extends keyof 
 
 export const dashboardRoutes: DashboardRoute[] = [
   pageRoute('platform-bots', '#/platform-bots', () => import('./platform/management-page.js'), 'renderBotsPage'),
+  pageRoute('platform-models', '#/platform-models', () => import('./platform/management-page.js'), 'renderModelsPage'),
   pageRoute('platform-agents', '#/platform-agents', () => import('./platform/management-page.js'), 'renderAgentsPage'),
-  pageRoute('opensandbox', '#/opensandbox', () => import('./platform/management-page.js'), 'renderSandboxPage'),
+  // Legacy bookmarks retain the same Agent-instance page, without a second menu.
+  pageRoute('opensandbox', '#/opensandbox', () => import('./platform/management-page.js'), 'renderAgentsPage'),
   pageRoute(
     'agent-workbench-dock',
     '#/agent-workbench-dock',
