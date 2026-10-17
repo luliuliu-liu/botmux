@@ -18,15 +18,26 @@ describe('platform Feishu shared session health',()=>{
     writeFileSync(file,'{"cookies":[]}');expect((await read()).status).toBe('expired');
     expect(inspect).not.toHaveBeenCalled();
   });
-  it('projects health only, caches checks, and revalidates when the native login file changes',async()=>{
+  it('allowlists administrator account display fields, caches checks, and revalidates on file changes',async()=>{
     const file=fixture();save(file);
     const inspect=vi.fn(async()=>({ok:true as const,source:'botmux_cache' as const,sessionFile:file,
-      identity:{userId:'private-user',userName:'private-name',tenantId:'private-tenant',tenantName:'private-org'}}));
+      identity:{userId:'private-user',userName:'Test Account',tenantId:'private-tenant',tenantName:'Test Org',email:'test@example.com',unexpected:'private-secret'}}));
     const read=createFeishuSessionReader({sessionFile:file,inspect,now:()=>1000});
-    expect(await read()).toEqual({status:'ready',checkedAt:1000});await read();expect(inspect).toHaveBeenCalledTimes(1);
+    expect(await read()).toEqual({status:'ready',checkedAt:1000,identity:{userName:'Test Account',tenantName:'Test Org',email:'test@example.com'}});await read();expect(inspect).toHaveBeenCalledTimes(1);
     save(file,'new-private-cookie-with-new-length');await read();expect(inspect).toHaveBeenCalledTimes(2);
     await read(true);expect(inspect).toHaveBeenCalledTimes(3);
-    expect(JSON.stringify(await read())).not.toMatch(/private|sessionFile|identity|cookies/);
+    expect(JSON.stringify(await read())).not.toMatch(/private|sessionFile|userId|tenantId|cookies|unexpected/);
+    inspect.mockResolvedValueOnce({ok:false,reason:'invalid_session',message:'expired'} as any);
+    expect(await read(true)).toEqual({status:'expired',checkedAt:1000});
+  });
+  it('omits absent email and clears the previous account after an inconclusive check',async()=>{
+    const file=fixture();save(file);
+    const inspect=vi.fn(async()=>({ok:true as const,source:'botmux_cache' as const,sessionFile:file,
+      identity:{userId:'internal-user',userName:'Account',tenantId:'internal-tenant',tenantName:'Org',email:' '}}));
+    const read=createFeishuSessionReader({sessionFile:file,inspect,now:()=>1000});
+    expect((await read()).identity).toEqual({userName:'Account',tenantName:'Org'});
+    inspect.mockRejectedValueOnce(new Error('network failure'));
+    expect(await read(true)).toEqual({status:'unknown',checkedAt:1000});
   });
   it('separates rejected credentials from inconclusive network errors',async()=>{
     const file=fixture();save(file);

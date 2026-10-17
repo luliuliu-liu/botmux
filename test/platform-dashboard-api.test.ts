@@ -35,6 +35,8 @@ describe('v2 platform boundaries',()=>{
     const entry=readFileSync(new URL('../src/dashboard/web/platform/feishu-login-entry.tsx',import.meta.url),'utf8');
     expect(page).toContain("page==='bots'?<FeishuSessionPanel/>");
     expect(panel).toContain('FeishuLoginModal');expect(panel).toContain('refresh(true)');
+    expect(panel).toContain('aria-label="当前飞书账号"');
+    expect(panel).toContain('identity.userName');expect(panel).toContain('identity.tenantName');expect(panel).toContain('identity.email');
     expect(entry).toContain('ui.platformManaged');expect(entry).toContain('href="#/platform-bots"');
     expect(native).toContain('status && !(ui.platformManaged && loginVisible)');
     expect(native).toContain('export function FeishuLoginModal');

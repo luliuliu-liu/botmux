@@ -46,7 +46,7 @@ function ManagementPage({page}:{page:'bots'|'agents'|'sandbox'}){
   {page==='bots'?<FeishuSessionPanel/>:null}
   {error?<p className="hint-warn" role="alert">{error}</p>:null}{notice?<p className="hint" role="status">{notice}</p>:null}
   {loading?<p>正在加载…</p>:page==='bots'?<>
-    <p className="hint">统一创建飞书机器人。空闲身份可分配给 OpenSandbox，本地机器人继续在原生 Bot 配置页管理。</p>
+    <div className="pm-bot-list-heading"><h2>机器人</h2><span>{data.bots.length} 个机器人</span></div>
     <div className="pm-table-wrap"><table><thead><tr><th>名称</th><th>App ID</th><th>凭证</th><th>使用情况</th></tr></thead><tbody>{data.bots.map(bot=><tr key={bot.botId}><td>{bot.displayName}</td><td><code>{bot.appId}</code></td><td>{bot.secretConfigured?'已配置':'未配置'}</td><td>{bot.usage==='free'?<span className="pm-state">空闲</span>:bot.usage==='local'?'本地 Botmux':`OpenSandbox / ${bot.containerName}`}</td></tr>)}</tbody></table>{!data.bots.length?<p className="empty">暂无机器人</p>:null}</div>
   </>:page==='agents'?<>
     <div className="pm-agent-list">{data.agents.map(agent=><article key={agent.id}><h2>{agent.name} <small>{agent.supported?agent.version:'待适配'}</small></h2><p>{agent.supported?'API Key · OpenAI Chat Completions · 下一轮生效':'镜像、模型和认证能力验证完成后开放'}</p>{agent.images.map(image=><code key={image.id}>{image.image} </code>)}</article>)}</div>

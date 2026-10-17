@@ -7,10 +7,12 @@ import {
 export interface FeishuSessionStatus {
   status: 'ready' | 'missing' | 'expired' | 'unknown';
   checkedAt: number;
+  /** Administrator display projection, never credentials or app-scoped IDs. */
+  identity?: { userName: string; tenantName: string; email?: string };
 }
 
 /** Read-only, machine-wide health projection. Never start QR login, fall back
- * to another account, or return cookies/account identity to the browser. */
+ * to another account, or return cookies/internal identity IDs to the browser. */
 export function createFeishuSessionReader(options: {
   sessionFile?: string;
   inspect?: typeof inspectCachedFeishuOpenPlatformSession;
@@ -28,6 +30,7 @@ export function createFeishuSessionReader(options: {
     if (pending?.stamp === stamp) return pending.value;
     const check = async (): Promise<FeishuSessionStatus> => {
       let status: FeishuSessionStatus['status'];
+      let identity: FeishuSessionStatus['identity'];
       if (stamp === 'missing') status = 'missing';
       else if (!readStoredCookiesFromSessionFile(file)?.length) status = 'expired';
       else {
@@ -41,9 +44,14 @@ export function createFeishuSessionReader(options: {
             } catch(error) { networkFailed = true; throw error; }
           }) as typeof fetch});
           status = networkFailed ? 'unknown' : result.ok ? 'ready' : ['invalid_session','missing_csrf'].includes(result.reason) ? 'expired' : 'unknown';
+          if(status === 'ready' && result.ok){
+            // Explicit allowlist: do not spread the upstream identity/session.
+            identity = {userName:result.identity.userName, tenantName:result.identity.tenantName,
+              ...(result.identity.email?.trim() ? {email:result.identity.email.trim()} : {})};
+          }
         } catch { status = 'unknown'; }
       }
-      const value = {status, checkedAt:now()};
+      const value: FeishuSessionStatus = {status, checkedAt:now(), ...(identity ? {identity} : {})};
       cached = {stamp, value};
       return value;
     };
