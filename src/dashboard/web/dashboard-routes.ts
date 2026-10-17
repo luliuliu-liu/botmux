@@ -30,6 +30,9 @@ function pageRoute<T extends Record<K, DashboardRouteRenderer>, K extends keyof 
 }
 
 export const dashboardRoutes: DashboardRoute[] = [
+  pageRoute('platform-bots', '#/platform-bots', () => import('./platform/management-page.js'), 'renderBotsPage'),
+  pageRoute('platform-agents', '#/platform-agents', () => import('./platform/management-page.js'), 'renderAgentsPage'),
+  pageRoute('opensandbox', '#/opensandbox', () => import('./platform/management-page.js'), 'renderSandboxPage'),
   pageRoute(
     'agent-workbench-dock',
     '#/agent-workbench-dock',

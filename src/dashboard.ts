@@ -122,6 +122,8 @@ import { resolveLiveBotTransport } from './services/team-roster.js';
 import { handleFederationSpokeApi, syncAllMemberships, autoBindOwnerIfUnambiguous, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
 import type { TeamGroupCreateResult, TeamGroupOwnerTransferResult } from './dashboard/federated-group-core.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
+import { createPlatformDashboardApi } from './platform/management/dashboard-api.js';
+import { PlatformRemoteFleet } from './platform/management/remote-fleet.js';
 import { FeishuLoginManager } from './dashboard/feishu-login.js';
 import {
   createDashboardH5AuthController,
@@ -1000,6 +1002,14 @@ const botOnboarding = new BotOnboardingManager({
   stopBotLive: spawnStopBotLive,
   startBotLive: spawnStartBotLive,
 });
+const platformDashboardApi = createPlatformDashboardApi({
+  botsJsonPath: BOTS_JSON_PATH,
+  localOnboarding: botOnboarding,
+  listLocalBots: () => loadBotConfigs(),
+});
+const platformRemoteFleet = new PlatformRemoteFleet(() => loadBotConfigs());
+platformRemoteFleet.start();
+process.once('exit', () => platformRemoteFleet.stop());
 // 飞书 Web 登录态刷新（机器人改名缺登录态时的 dashboard 扫码入口）。机器级单例，
 // 写 ~/.botmux/feishu-session.json，与 setup / onboarding 复用同一份登录态。
 const feishuLogin = new FeishuLoginManager();
@@ -3977,6 +3987,8 @@ const server = createServer(async (req, res) => {
     })) {
       return;
     }
+
+    if (await platformDashboardApi(req, res, url, authed)) return;
 
     if (url.pathname === '/api/workflows' || url.pathname.startsWith('/api/workflows/')) {
       return jsonRes(res, 410, {

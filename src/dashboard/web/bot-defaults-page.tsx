@@ -924,7 +924,7 @@ export function BotDefaultsPage() {
             <DropdownMenu<string>
               className="clone-bot-menu"
               ariaLabel={tr('botOnboarding.clone')}
-              disabled={onboardingBusy}
+              disabled={onboardingBusy || ui.platformManaged}
               label={tr('botOnboarding.clone')}
               value=""
               options={bots.map(bot => ({
@@ -946,7 +946,7 @@ export function BotDefaultsPage() {
           {ui.authed ? (
             <CreateActionButton
               className="page-primary-action add-bot-btn"
-              disabled={onboardingBusy}
+              disabled={onboardingBusy || ui.platformManaged}
               onClick={() => {
                 setOnboardingBusy(true);
                 void openBotOnboarding().finally(() => setOnboardingBusy(false));
@@ -957,6 +957,7 @@ export function BotDefaultsPage() {
           ) : null}
         </div>
       </div>
+      {ui.platformManaged ? <p className="hint">此页管理本地机器人配置。新建机器人请前往 <a href="#/platform-bots">管理 → Bot 管理</a>。</p> : null}
       <div className="bd-layout">
         <aside id="bd-roster" className="bd-roster">
           <form id="bd-filters" className="filters dashboard-toolbar" onSubmit={event => event.preventDefault()}>

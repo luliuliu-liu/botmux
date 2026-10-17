@@ -32,6 +32,7 @@ async function copyStatic() {
   await Promise.all([
     cp(join(webSrc, 'index.html'), join(outDir, 'index.html')),
     cp(join(webSrc, 'style.css'), join(outDir, 'style.css')),
+    cp(join(webSrc, 'platform/management.css'), join(outDir, 'platform-management.css')),
     cp(join(webSrc, 'design-tokens.css'), join(outDir, 'design-tokens.css')),
     cp(join(webSrc, 'brand-logo.png'), join(outDir, 'brand-logo.png')),
     cp(join(webSrc, 'favicon.png'), join(outDir, 'favicon.png')),
