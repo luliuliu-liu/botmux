@@ -4,6 +4,7 @@ import { BotOnboardingManager } from '../../dashboard/bot-onboarding.js';
 import { readBotsJsonOrEmpty } from '../../setup/bots-store.js';
 import { jsonRes } from '../../dashboard/http.js';
 import { createFeishuSessionReader, type FeishuSessionStatus } from './feishu-session.js';
+import { createOnboardingSessionConfirmation } from './onboarding-session.js';
 
 export function platformManagementEnabled(): boolean { return process.env.BOTMUX_PLATFORM_MANAGED === 'true'; }
 
@@ -25,6 +26,7 @@ export function createPlatformDashboardApi(deps:{
   readFeishuSession?:(force?:boolean)=>Promise<FeishuSessionStatus>;
 }) {
   const readFeishuSession = deps.readFeishuSession ?? createFeishuSessionReader();
+  const onboardingSession=createOnboardingSessionConfirmation(()=>deps.localOnboarding.sessionStatus());
   const path=join(dirname(deps.botsJsonPath),'platform','pool-bots.json');
   const names = new Map<string,string>();
   const register=async(appId:string)=>{
@@ -62,14 +64,24 @@ export function createPlatformDashboardApi(deps:{
       if(suffix==='/feishu-session'&&req.method==='GET'){
         jsonRes(res,200,{session:await readFeishuSession(url.searchParams.get('refresh')==='1')});return true;
       }
+      if(suffix==='/onboarding/session'&&req.method==='GET'){
+        jsonRes(res,200,{session:await onboardingSession.inspect()});return true;
+      }
       if(suffix==='/onboarding'&&req.method==='POST'){
         const input=await read();
         if(typeof input.name!=='string'||!input.name.trim()||[...input.name].length>64||!['pool','local'].includes(input.target)){
           jsonRes(res,400,{error:'invalid_request',message:'请填写名称并选择用途'});return true;
         }
+        if(!['reuse','qr'].includes(input.sessionMode)){
+          jsonRes(res,400,{error:'invalid_session_mode',message:'请确认使用当前账号，或明确选择扫码登录'});return true;
+        }
         await inventory(); // fail before creating an external Feishu app if storage is unavailable.
+        const expectedIdentity=input.sessionMode==='reuse'?await onboardingSession.consume(input.confirmationToken):undefined;
+        if(input.sessionMode==='reuse'&&!expectedIdentity){
+          jsonRes(res,409,{error:'session_confirmation_required',message:'登录态已失效、账号/企业已变化或确认已过期，请重新确认后创建；未创建应用'});return true;
+        }
         const manager=input.target==='local'?deps.localOnboarding:poolOnboarding;
-        const job=manager.start({appName:input.name.trim(),registrationMode:'web',sessionMode:'qr',cliId:'pi',workingDir:'/workspace',dirMode:'fixed'});
+        const job=manager.start({appName:input.name.trim(),registrationMode:'web',sessionMode:input.sessionMode,...(expectedIdentity?{expectedIdentity}:{}),cliId:'pi',workingDir:'/workspace',dirMode:'fixed'});
         names.set(job.id,input.name.trim());
         jsonRes(res,202,{job:manager.get(job.id),target:input.target});return true;
       }

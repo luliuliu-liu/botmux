@@ -3,6 +3,7 @@ import { mountReactPage } from '../react-mount.js';
 import { ui } from '../ui.js';
 import { CreateActionButton, RefreshIconButton } from '../dashboard-components.js';
 import { FeishuSessionPanel } from './feishu-session-panel.js';
+import { PlatformBotCreate } from './bot-create.js';
 
 type Bot={botId:string;displayName:string;appId:string;usage:'local'|'free'|'sandbox';containerName?:string;secretConfigured:boolean};
 type Model={profileId:string;displayName:string;provider:string;baseUrl:string;modelId:string;apiKeyConfigured:boolean;enabled:boolean};
@@ -10,7 +11,6 @@ type Container={containerId:string;displayName:string;agentType:string;image:str
   status:string;revision:number;appliedRevision:number;egressHosts:string[];botId:string|null;botName:string|null;workspaceClaim:string;stateClaim:string;lastError:string|null};
 type Agent={id:string;name:string;supported:boolean;version:string|null;images:Array<{id:string;image:string;label:string}>};
 type Data={bots:Bot[];models:Model[];containers:Container[];agents:Agent[]};
-type Job={id:string;status:string;appId?:string;appName?:string;qrDataUrl?:string;platformQrDataUrl?:string;message?:string;permissionStatusMsg?:string;error?:string;liveStarted?:boolean;liveStartMessage?:string};
 const initial:Data={bots:[],models:[],containers:[],agents:[]};
 const labels:Record<string,string>={creating:'配置中',ready:'就绪',error:'异常',deleting:'删除待确认',deleted:'已删除'};
 export async function platformApi(path:string,method='GET',body?:unknown){
@@ -55,7 +55,7 @@ function ManagementPage({page}:{page:'bots'|'agents'|'sandbox'}){
     <p className="hint">一个容器运行一种 Agent。创建后 Agent 与镜像固定，可更换模型及绑定机器人。</p>
     <div className="pm-table-wrap"><table><thead><tr><th>容器 / Agent</th><th>模型</th><th>机器人</th><th>状态</th><th>操作</th></tr></thead><tbody>{data.containers.map(c=><tr key={c.containerId}><td>{c.displayName}<small>{c.agentType} · {c.image}</small></td><td>{c.modelName}<small>{c.modelId}</small></td><td>{c.botName||'未绑定'}</td><td>{labels[c.status]||c.status}<small>配置 {c.appliedRevision}/{c.revision}</small>{c.lastError?<small className="hint-warn">{c.lastError}</small>:null}</td><td><div className="pm-actions"><button onClick={()=>{setSelected(c);setModal('container');}}>详情</button>{c.status!=='ready'?<button onClick={()=>void mutate(`/containers/${c.containerId}/reconcile`,'POST',{})}>重试</button>:null}<button onClick={()=>{setSelected(c);setModal('delete');}}>删除</button></div></td></tr>)}</tbody></table>{!data.containers.length?<p className="empty">暂无 Agent 容器</p>:null}</div>
   </>}
-  {modal==='bot'?<BotCreate onClose={()=>setModal(null)} onDone={finish}/>:null}
+  {modal==='bot'?<PlatformBotCreate api={platformApi} onClose={()=>setModal(null)} onDone={finish}/>:null}
   {modal==='container'?<ContainerForm data={data} container={selected} onClose={()=>setModal(null)} onDone={finish}/>:null}
   {modal==='model'?<ModelForm model={model} onClose={()=>setModal(null)} onDone={finish}/>:null}
   {modal==='delete'&&selected?<DeleteContainer container={selected} onClose={()=>setModal(null)} onDone={finish}/>:null}
@@ -100,23 +100,6 @@ function ModelForm({model,onClose,onDone}:{model:Model|null;onClose:()=>void;onD
     try{await platformApi(`/models/${encodeURIComponent(String(value.profileId))}`,'PUT',{displayName:value.displayName,provider:value.provider,baseUrl:value.baseUrl,modelId:value.modelId,...(value.apiKey?{apiKey:value.apiKey}:{})});onDone('模型连接已保存；已有容器需在详情中应用新配置');}
     catch(error){setError(error instanceof Error?error.message:String(error));}finally{setBusy(false);}
   }}><label>配置 ID<input name="profileId" defaultValue={model?.profileId||''} required readOnly={!!model} pattern="[A-Za-z0-9._-]+"/></label><label>名称<input name="displayName" defaultValue={model?.displayName||''} required/></label><label>Provider<input name="provider" defaultValue={model?.provider||''} required pattern="[A-Za-z0-9._-]+"/></label><label>协议<input value="OpenAI Chat Completions" disabled/></label><label>Base URL<input name="baseUrl" type="url" defaultValue={model?.baseUrl||''} required/></label><label>模型 ID<input name="modelId" defaultValue={model?.modelId||''} required/></label><label>API Key<input name="apiKey" type="password" autoComplete="new-password" placeholder={model?'留空保留现有 Key':''} required={!model}/></label>{error?<p className="hint-warn" role="alert">{error}</p>:null}<footer><button type="button" onClick={onClose} disabled={busy}>取消</button><button className="primary" disabled={busy}>保存连接</button></footer></form></Modal>;
-}
-function BotCreate({onClose,onDone}:{onClose:()=>void;onDone:(m:string)=>void}){
-  const [job,setJob]=useState<Job|null>(null),[target,setTarget]=useState('pool'),[error,setError]=useState(''),[busy,setBusy]=useState(false);
-  useEffect(()=>{if(!job||['completed','failed','needs_owner'].includes(job.status))return;
-    let cancelled=false;const timer=setInterval(()=>{void platformApi(`/onboarding/${target}/${job.id}`).then(data=>{if(!cancelled)setJob(data.job);}).catch(error=>{if(!cancelled)setError(error.message);});},1500);
-    return()=>{cancelled=true;clearInterval(timer);};},[job?.id,job?.status,target]);
-  return <Modal title="新建飞书机器人" onClose={onClose}>{!job?<form onSubmit={async event=>{
-    event.preventDefault();const input=Object.fromEntries(new FormData(event.currentTarget));setBusy(true);setError('');
-    try{const result=await platformApi('/onboarding','POST',{name:input.name,target});setJob(result.job);}catch(error){setError(error instanceof Error?error.message:String(error));}finally{setBusy(false);}
-  }}><label>机器人名称<input name="name" required maxLength={64}/></label><label>用途<select value={target} onChange={event=>setTarget(event.target.value)}><option value="pool">加入空闲池，供 OpenSandbox 分配</option><option value="local">用于本地 Botmux</option></select></label><p className="hint">扫码后按统一模板创建、配置并发布飞书应用。此操作会创建真实应用。</p>{error?<p role="alert" className="hint-warn">{error}</p>:null}<footer><button type="button" onClick={onClose}>取消</button><button className="primary" disabled={busy}>{busy?'提交中…':'创建并扫码授权'}</button></footer></form>:<>
-    <p>{job.permissionStatusMsg||job.message||job.status}</p>{job.qrDataUrl?<img className="pm-qr" src={job.qrDataUrl} alt="飞书创建授权二维码"/>:null}{job.platformQrDataUrl?<img className="pm-qr" src={job.platformQrDataUrl} alt="飞书开放平台授权二维码"/>:null}
-    {job.appId?<p>App ID：<code>{job.appId}</code></p>:null}
-    {job.status==='needs_owner'?<form onSubmit={async event=>{event.preventDefault();const entries=String(new FormData(event.currentTarget).get('owner')).split(/[\s,]+/).filter(Boolean);try{const result=await platformApi(`/onboarding/${target}/${job.id}/owner`,'POST',{entries});setJob(result.job);}catch(error){setError(error instanceof Error?error.message:String(error));}}}><label>确认应用所有者<input name="owner" required placeholder="企业邮箱、手机号或此应用可验证的身份"/></label><button>验证并完成</button></form>:null}
-    {job.status==='completed'?<><p>{target==='pool'?'应用创建已完成。机器人入池后不会启动本地 Agent。':'本地机器人配置已创建，可在数字员工 → Bot 配置查看。'}</p>{target==='pool'?<button onClick={async()=>{try{await platformApi(`/onboarding/pool/${job.id}/register`,'POST',{});onDone('机器人已进入空闲池');}catch(error){setError(error instanceof Error?error.message:String(error));}}}>确认入池并关闭</button>:<button onClick={()=>onDone('本地机器人已创建')}>完成</button>}</>:null}
-    {job.status==='failed'?<p className="hint-warn">{job.error}。{job.appId?'应用已创建，请保留 App ID，先排查权限配置；不要重复新建。':''}</p>:null}
-    {error?<p role="alert" className="hint-warn">{error}</p>:null}<footer><button onClick={onClose}>关闭</button></footer>
-  </>}</Modal>;
 }
 export function renderBotsPage(root:HTMLElement){return mountReactPage(root,<ManagementPage page="bots"/>);}
 export function renderAgentsPage(root:HTMLElement){return mountReactPage(root,<ManagementPage page="agents"/>);}
