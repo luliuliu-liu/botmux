@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { BotOnboardingManager } from '../../dashboard/bot-onboarding.js';
 import { readBotsJsonOrEmpty } from '../../setup/bots-store.js';
 import { jsonRes } from '../../dashboard/http.js';
+import { createFeishuSessionReader, type FeishuSessionStatus } from './feishu-session.js';
 
 export function platformManagementEnabled(): boolean { return process.env.BOTMUX_PLATFORM_MANAGED === 'true'; }
 
@@ -21,7 +22,9 @@ export function createPlatformDashboardApi(deps:{
   botsJsonPath:string;
   localOnboarding:BotOnboardingManager;
   listLocalBots:()=>Array<{larkAppId:string;displayName?:string;name?:string}>;
+  readFeishuSession?:(force?:boolean)=>Promise<FeishuSessionStatus>;
 }) {
+  const readFeishuSession = deps.readFeishuSession ?? createFeishuSessionReader();
   const path=join(dirname(deps.botsJsonPath),'platform','pool-bots.json');
   const names = new Map<string,string>();
   const register=async(appId:string)=>{
@@ -56,6 +59,9 @@ export function createPlatformDashboardApi(deps:{
     };
     try {
       const suffix=url.pathname.slice('/api/platform'.length);
+      if(suffix==='/feishu-session'&&req.method==='GET'){
+        jsonRes(res,200,{session:await readFeishuSession(url.searchParams.get('refresh')==='1')});return true;
+      }
       if(suffix==='/onboarding'&&req.method==='POST'){
         const input=await read();
         if(typeof input.name!=='string'||!input.name.trim()||[...input.name].length>64||!['pool','local'].includes(input.target)){

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { FeishuLoginEntry } from './platform/feishu-login-entry.js';
 import { cloneSourceDefaultsFrom, openBotOnboarding } from './bot-onboarding.js';
 import { StreamingCardPinToggle } from './streaming-card-pin-toggle.js';
 import { BlockedUsersEditor } from './blocked-users-editor.js';
@@ -1799,7 +1800,7 @@ function BotAvatarControl(props: { bot: BotDefaultsRow; name: string; patchBot: 
       <small className={statusClass(status, 'bd-avatar-status')} data-avatar-status>
         {status.text}
         {loginVisible ? (
-          <button type="button" className="bd-feishu-login" data-action="feishu-login-avatar" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</button>
+          <FeishuLoginEntry action="feishu-login-avatar" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</FeishuLoginEntry>
         ) : null}
       </small>
     ) : null}
@@ -1941,7 +1942,7 @@ function BotProfileIdentity(props: { bot: BotDefaultsRow; cli: string; patchBot:
         ) : null}
       </div>
       <small className={statusClass(status, 'bd-name-status')} data-name-status>{status?.text ?? ''}</small>
-      <button type="button" className="bd-feishu-login" data-action="feishu-login" hidden={!loginVisible} onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</button>
+      <FeishuLoginEntry action="feishu-login" hidden={!loginVisible} onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</FeishuLoginEntry>
       {loginOpen ? (
         <FeishuLoginModal
           onClose={() => setLoginOpen(false)}
@@ -2117,11 +2118,11 @@ function BotDescriptionControl(props: { bot: BotDefaultsRow }) {
           </svg>
         </button>
       </div>
-      {status ? (
+      {status && !(ui.platformManaged && loginVisible) ? (
         <small className={statusClass(status, 'bd-description-status')} data-description-status>
           {status.text}
           {loginVisible ? (
-            <button type="button" className="bd-feishu-login" data-action="feishu-login-description" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</button>
+            <FeishuLoginEntry action="feishu-login-description" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</FeishuLoginEntry>
           ) : null}
         </small>
       ) : null}
@@ -2141,7 +2142,7 @@ function BotDescriptionControl(props: { bot: BotDefaultsRow }) {
               <small className={statusClass(status, 'bd-description-modal-status')} data-description-modal-status>
                 {status.text}
                 {loginVisible ? (
-                  <button type="button" className="bd-feishu-login" data-action="feishu-login-description-modal" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</button>
+                  <FeishuLoginEntry action="feishu-login-description-modal" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</FeishuLoginEntry>
                 ) : null}
               </small>
             ) : null}
@@ -2201,7 +2202,7 @@ function BotDescriptionControl(props: { bot: BotDefaultsRow }) {
   );
 }
 
-function FeishuLoginModal(props: { onClose(): void; onSuccess(): void }) {
+export function FeishuLoginModal(props: { onClose(): void; onSuccess(): void }) {
   const tr = useT();
   const { onClose, onSuccess } = props;
   const timerRef = useRef<number | null>(null);
@@ -6437,14 +6438,13 @@ export function SessionGroupTagRow(props: { bot: BotDefaultsRow }) {
             {repairFeedback.kind === 'login_required' ? (
               // 「不阻塞」的落点：授权照常开，这里只提示还差一次扫码。点它 → 弹现成
               // 的 FeishuLoginModal，扫完自动重跑修复。
-              <button
-                type="button"
+              <FeishuLoginEntry
                 className="bd-sg-repair-link"
-                data-action="session-group-tag-repair-login"
+                action="session-group-tag-repair-login"
                 onClick={() => setLoginOpen(true)}
               >
                 {tr('botDefaults.sgTagRepairNeedLogin')}
-              </button>
+              </FeishuLoginEntry>
             ) : repairFeedback.kind === 'error' ? (
               <span>{tr('botDefaults.sgTagRepairFailed', { reason: repairFeedback.message })}</span>
             ) : (

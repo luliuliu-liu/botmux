@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'rea
 import { mountReactPage } from '../react-mount.js';
 import { ui } from '../ui.js';
 import { CreateActionButton, RefreshIconButton } from '../dashboard-components.js';
+import { FeishuSessionPanel } from './feishu-session-panel.js';
 
 type Bot={botId:string;displayName:string;appId:string;usage:'local'|'free'|'sandbox';containerName?:string;secretConfigured:boolean};
 type Model={profileId:string;displayName:string;provider:string;baseUrl:string;modelId:string;apiKeyConfigured:boolean;enabled:boolean};
@@ -42,6 +43,7 @@ function ManagementPage({page}:{page:'bots'|'agents'|'sandbox'}){
     <RefreshIconButton label="刷新" busy={loading} onClick={()=>void refresh()}/>
     {page==='bots'?<CreateActionButton onClick={()=>setModal('bot')}>新建 Bot</CreateActionButton>:page==='sandbox'?<CreateActionButton onClick={()=>{setSelected(null);setModal('container');}}>创建容器</CreateActionButton>:<CreateActionButton onClick={()=>{setModel(null);setModal('model');}}>添加模型连接</CreateActionButton>}
   </div></div>
+  {page==='bots'?<FeishuSessionPanel/>:null}
   {error?<p className="hint-warn" role="alert">{error}</p>:null}{notice?<p className="hint" role="status">{notice}</p>:null}
   {loading?<p>正在加载…</p>:page==='bots'?<>
     <p className="hint">统一创建飞书机器人。空闲身份可分配给 OpenSandbox，本地机器人继续在原生 Bot 配置页管理。</p>

@@ -4,6 +4,10 @@
 .pm-page th { font-weight: 500; color: var(--muted); background: var(--surface-muted); }
 .pm-page small { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; max-width: 260px; }
 .pm-page .pm-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.pm-feishu-session { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 16px; margin: 18px 0; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); }
+.pm-feishu-session h2 { margin: 0 0 8px; font-size: 16px; }
+.pm-feishu-session p { margin: 6px 0; }
+.pm-feishu-session > div:first-child { flex: 1 1 320px; }
 .pm-page .pm-state { background: var(--success-soft); color: var(--success); padding: 3px 8px; border-radius: var(--radius-sm); }
 .pm-agent-list { display: grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap: 12px; margin: 18px 0 25px; }
 .pm-agent-list article { padding: 16px; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); }
