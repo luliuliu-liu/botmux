@@ -245,6 +245,7 @@ async function runNodeImpl(
     cliRuntime: req.botSnapshot.cliRuntime,
     cliPathOverride: req.botSnapshot.cliPathOverride,
     model: req.botSnapshot.model,
+    codexAuthSync: req.botSnapshot.codexAuthSync,
     // Workflow workers require CLI bypass permissions by product contract.
     // Restricted bots are rejected before a BotSnapshot is created.
     disableCliBypass: false,
@@ -497,7 +498,7 @@ export function buildGoalCommand(req: RunNodeRequest): string {
   // Pi does not implement Botmux's `/goal` slash command.  Keep the same
   // file-backed contract, but send a normal user turn with concrete paths so
   // Pi can read the generated goal file and write the declared products.
-  if (req.botSnapshot.cliId === 'pi') {
+  if (req.botSnapshot.cliId === 'pi' || req.botSnapshot.cliId === 'zcode' || req.botSnapshot.cliId === 'dsh') {
     const goalPath = req.env[env.GOAL_PATH];
     const outputDir = req.env[env.OUTPUT_DIR];
     const manifestPath = req.env[env.MANIFEST_PATH];

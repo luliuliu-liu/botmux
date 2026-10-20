@@ -36,6 +36,7 @@ import { createDshAdapter } from './dsh.js';
 import { createDshTuiAdapter } from './dsh-tui.js';
 import { createMojoAdapter } from './mojo.js';
 import { createMinimaxAdapter } from './minimax.js';
+import {createZcodeAdapter} from '../../platform/management/zcode-tui-adapter.js';
 
 /**
  * The first CLI executable (or nested runner dependency) before shell
@@ -91,6 +92,7 @@ const RAW_CLI_EXECUTABLES: Readonly<Record<CliId, string | undefined>> = {
   mojo: 'mojo',
   // MiniMax CLI — `mmx text repl` is the interactive chat surface.
   minimax: 'mmx',
+  zcode:'zcode',
 };
 
 /**
@@ -266,6 +268,7 @@ export function createCliAdapterSync(id: CliId, pathOverride?: string): CliAdapt
     case 'dsh-tui': return createDshTuiAdapter(pathOverride);
     case 'mojo': return createMojoAdapter(pathOverride);
     case 'minimax': return createMinimaxAdapter(pathOverride);
+    case 'zcode': return createZcodeAdapter(pathOverride);
     default: throw new Error(`Unknown CLI adapter: ${id}`);
   }
 }

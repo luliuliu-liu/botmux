@@ -10,6 +10,7 @@ export interface ModelOnlyAssessment {
 /** A closed Record forces every newly registered CLI to get an explicit
  * assessment. Unverified means pending work, not an upstream impossibility. */
 export const modelOnlyAssessments: Readonly<Record<CliId, ModelOnlyAssessment>> = {
+  zcode:{group:'native-tui',status:'verification_required',reason:'native_model_only_unverified',detail:'平台接入原生 ZCode TUI；模型-only 的工具隔离协议尚未验证。'},
   'claude-code': { group: 'claude-print', status: 'implemented', reason: null, detail: '原生 print/stream-json、空 tools、安全模式；原生合成服务测试通过，真实订阅认证待验证。' },
   seed: { group: 'claude-print', status: 'verification_required', reason: 'fork_auth_and_protocol_unverified', detail: '使用独立的 byted-cloud-auth.json；缺少可运行的 Seed，未验证空 tools、安全模式和隔离登录，不能直接继承 Claude 支持。' },
   relay: { group: 'claude-print', status: 'verification_required', reason: 'fork_auth_and_protocol_unverified', detail: 'Relay 的登录目录和迁移行为不同于 Claude；缺少可运行的 Relay，未验证原生工具关闭及独立身份。' },

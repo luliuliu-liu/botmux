@@ -27,6 +27,7 @@ import { logger } from '../utils/logger.js';
 import { parseCustomPassthroughInput, parseCanTalkDaemonCommandsInput } from '../core/passthrough-commands.js';
 import { parseStartupCommandsInput } from '../core/startup-commands.js';
 import { isReservedPerBotEnvKey, sanitizePerBotEnv } from '../core/per-bot-env.js';
+import {containerGlobalAgentMode,splitContainerAgentEnvironment} from '../platform/management/container-agent-policy.js';
 import { normalizeFeedbackPolicy } from './feedback-policy.js';
 import { normalizeOncallGroupPolicy } from './oncall-group-policy.js';
 import { normalizeFeedbackPolicyLayer, type FeedbackPolicyLayer } from './feedback-policy-resolver.js';
@@ -285,6 +286,12 @@ async function applyConfigFieldInternal(
   if (spec.kind === 'allowedUsers') return { ok: false, reason: 'use_setBotAllowedUsers' };
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
+  if(spec.configKey==='env'&&containerGlobalAgentMode()){
+    const normalized=sanitizePerBotEnv(value);
+    if(Object.keys(splitContainerAgentEnvironment(bot.config.cliId,normalized).global).length){
+      return {ok:false,reason:'container_agent_environment_managed'};
+    }
+  }
   const previousPinStreamingCard = spec.configKey === 'pinStreamingCard'
     ? bot.config.pinStreamingCard === true
     : undefined;

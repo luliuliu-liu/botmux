@@ -52,6 +52,7 @@ export const CLI_ID_CHOICES: Record<string, CliId> = {
   // 新增 CLI 一律追加到尾部：序号是脚本化 setup（非 TTY 管道喂数字）的稳定接口，
   // 插位会让老脚本静默选错 CLI。
   '31': 'mimocode',
+  '32': 'zcode',
 };
 
 const VALID_CLI_IDS: ReadonlySet<string> = new Set(Object.values(CLI_ID_CHOICES));
@@ -62,6 +63,7 @@ const VALID_CLI_IDS: ReadonlySet<string> = new Set(Object.values(CLI_ID_CHOICES)
  * "添加新 CLI 适配器" 清单), 新增 CLI 时一并更新.
  */
 const CLI_DISPLAY_LABELS: Record<CliId, string> = {
+  zcode:'ZCode',
   'claude-code': 'Claude',
   'aiden': 'Aiden',
   'coco': 'CoCo',

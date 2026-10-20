@@ -39,6 +39,7 @@ class DashboardUiState {
   // transient probe failure never hides it from a real token holder.
   authed = true;
   platformManaged = false;
+  platformWorker = false;
   // A legacy owner, H5 session, or platform-dashboard identity may operate the
   // narrow Workbench capability set. Keep this separate from `authed`: the
   // latter alone controls host-management affordances across the rest of the

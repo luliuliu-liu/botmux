@@ -34,6 +34,8 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import { RunnerControlWriter } from './adapters/cli/runner-control-channel.js';
+import {containerGlobalAgentMode} from './platform/management/container-agent-policy.js';
+import {dshModelPatchPath,readDshPlatformModel} from './platform/management/dsh-model-patch.js';
 
 const DSH_MARKER = '::botmux-dsh:';
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60 * 1000;
@@ -84,6 +86,7 @@ interface PendingTurn {
   /** Notifications buffered until the spliced receipt for messageId arrives. */
   pending: Array<{ method: string; params: Record<string, unknown> }>;
   receiptReceived: boolean;
+  streamedCharacters?: number;
   /** Set from a turn/end event whose reason is an error, so a failed turn
    *  surfaces in the reply instead of completing with an empty final. */
   turnError?: string;
@@ -426,6 +429,8 @@ function resolveNativeDshConfig(): NativeDshConfig {
     settingsModel = typeof defaultModel.model === 'string' ? defaultModel.model : '';
   }
 
+  const platformModel=containerGlobalAgentMode()?readDshPlatformModel(homedir()):null;
+  if(platformModel){provider=platformModel.provider;settingsModel=platformModel.model;}
   return {
     profileName,
     provider,
@@ -489,8 +494,10 @@ class DshJsonRpcClient {
   start(): void {
     const dshArgs = ['--profile', this.profileName];
     if (args.bridgePatch) dshArgs.push(`--patch=${args.bridgePatch}`);
+    const platformPatch=dshModelPatchPath(homedir());
+    if(containerGlobalAgentMode()&&existsSync(platformPatch))dshArgs.push(`--patch=${platformPatch}`);
     this.child = spawn(this.dshBin, dshArgs, {
-      env: this.env,
+      env: {...this.env,...(containerGlobalAgentMode()?{BOTMUX_DSH_PROGRESS:'1'}:{})},
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -605,6 +612,14 @@ let firstTurn = true;
 const queue: string[] = [];
 let inputBuffer = '';
 let processing = false;
+// The native SDK otherwise emits only durable assistant messages, making a
+// slow provider look hung. This is elapsed-time information, not model output.
+const progressPulse=setInterval(()=>{
+ if(!activeTurn||!containerGlobalAgentMode())return;
+ const seconds=Math.floor((Date.now()-activeTurn.startedAtMs)/1000);
+ writeLine(`[dsh] ${activeTurn.streamedCharacters?'模型响应中':'等待模型响应'}（已等待 ${seconds} 秒）`);
+},30000);
+progressPulse.unref();
 
 function buildPreamble(): string {
   const name = args.botName?.trim() || 'bot';
@@ -695,6 +710,10 @@ function handleSessionEvent(turn: PendingTurn, event: unknown): void {
 }
 
 function processTurnNotification(turn: PendingTurn, method: string, p: Record<string, unknown>): void {
+  if(method==='session.progress'){
+    if(p.type==='text'&&typeof p.text==='string'){turn.streamedCharacters=(turn.streamedCharacters??0)+p.text.length;output.display(p.text);}
+    return;
+  }
   if (method === 'session.event') {
     handleSessionEvent(turn, p.event);
     return;
@@ -712,7 +731,7 @@ function processTurnNotification(turn: PendingTurn, method: string, p: Record<st
 function handleNotification(method: string, params: unknown): void {
   if (!params || typeof params !== 'object') return;
   const p = params as Record<string, unknown>;
-  if (method === 'session.event' || method === 'session.status') {
+  if (method === 'session.event' || method === 'session.status' || method==='session.progress') {
     if (p.sessionId !== dshSessionId) return;
     const turn = activeTurn;
     if (!turn) return;

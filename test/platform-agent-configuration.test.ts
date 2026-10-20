@@ -3,6 +3,19 @@ import { readFileSync } from 'node:fs';
 import { syncAgentConfiguration } from '../src/dashboard/web/platform/agent-configuration.js';
 const current={containerId:'agent-1',status:'ready',revision:1,appliedRevision:1,modelProfileId:'old',botId:'bot-1'};
 describe('platform Agent model sync',()=>{
+  it('switches to native OAuth without a model record and validates the authentication ACK',async()=>{
+    const oauth={...current,authMethod:'oauth',modelProfileId:null,modelId:null,revision:2,appliedRevision:2};
+    const api=vi.fn(async()=>({container:oauth}));
+    await syncAgentConfiguration(api,current,null,current.botId,null);
+    expect(api).toHaveBeenCalledWith('/containers/agent-1','PUT',{revision:1,modelProfileId:null,authMethod:'oauth',modelId:null});
+    await expect(syncAgentConfiguration(async()=>({container:{...oauth,authMethod:'api-key'}}),current,null,current.botId,null)).rejects.toThrow('尚未确认');
+  });
+  it('selects a non-default model in the same connection and rejects an ACK with another ID',async()=>{
+    const api=vi.fn(async()=>({container:{...current,modelId:'second',revision:2,appliedRevision:2}}));
+    await syncAgentConfiguration(api,{...current,modelId:'first'},'old',current.botId,'second');
+    expect(api).toHaveBeenCalledWith('/containers/agent-1','PUT',{revision:1,modelProfileId:'old',modelId:'second'});
+    await expect(syncAgentConfiguration(api,{...current,modelId:'first'},'old',current.botId,'first')).rejects.toThrow('尚未确认');
+  });
   it('switches model and requires the exact runtime-applied revision without rebinding the Bot',async()=>{
     const api=vi.fn(async()=>({container:{...current,revision:2,appliedRevision:2,modelProfileId:'new'}}));
     expect(await syncAgentConfiguration(api,current,'new')).toMatchObject({revision:2});

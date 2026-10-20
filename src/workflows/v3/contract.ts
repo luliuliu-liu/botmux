@@ -134,6 +134,8 @@ export const V3_SUPPORTED_CLIS: readonly CliId[] = [
   'traex',
   'relay',
   'pi',
+  'zcode',
+  'dsh',
 ];
 
 export function isV3SupportedCli(cliId: CliId): boolean {
@@ -160,6 +162,9 @@ export interface BotSnapshot {
   larkAppId: string;
   cliId: CliId;
   cliPathOverride?: string;
+  /** Native Codex data/auth ownership policy. Kept separate from arbitrary
+   * per-bot env because CODEX_HOME is intentionally a reserved key. */
+  codexAuthSync?: import('../../services/codex-auth-sync.js').CodexAuthSyncMode;
   model?: string;
   /** Frozen per-bot sandbox policy. Workflow workers must not silently lose
    *  these fields when spawning outside the main forkWorker path. */

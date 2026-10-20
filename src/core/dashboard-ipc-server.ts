@@ -5,6 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import {containerGlobalAgentMode,splitContainerAgentEnvironment} from '../platform/management/container-agent-policy.js';
+import {readContainerAgentModel} from '../platform/management/container-agent-files.mjs';
 import { logger } from '../utils/logger.js';
 import { cliAuthBind, loadDashboardSecret, verifyHmac } from '../dashboard/auth.js';
 import { UnsafeHostAuthorityFileError } from '../platform/secure-host-file.js';
@@ -6022,8 +6024,9 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     replyDeliveryDefault = defaultReplyDeliveryFor(cfg.cliId);
     replyDeliverySupported = supportsTranscriptReplyDelivery(cfg.cliId);
   } catch { /* default send */ }
+  const containerAgentGlobalMode=containerGlobalAgentMode();
   let codexAuthSync: 'shared' | 'isolated' = 'shared';
-  try { if (getBot(cachedLarkAppId).config.codexAuthSync === 'isolated') codexAuthSync = 'isolated'; } catch { /* default shared */ }
+  try { if (!containerAgentGlobalMode&&getBot(cachedLarkAppId).config.codexAuthSync === 'isolated') codexAuthSync = 'isolated'; } catch { /* default shared */ }
   // Trigger-user CLI auth policy. Absent → null ("feature off"), which is what
   // the dashboard toggle renders as unchecked. It has to be echoed here or the
   // Bot Defaults page loses the setting on every refresh: the PUT persists it,
@@ -6075,7 +6078,9 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
       : null;
     wrapperCli = typeof cfg.wrapperCli === 'string' && cfg.wrapperCli.trim() ? cfg.wrapperCli : null;
     cliLaunchMode = cfg.cliLaunchMode ?? null;
-    model = typeof cfg.model === 'string' && cfg.model.trim() ? cfg.model : null;
+    model = containerGlobalAgentMode()
+      ? readContainerAgentModel(homedir(),cfg.cliId)
+      : typeof cfg.model === 'string' && cfg.model.trim() ? cfg.model : null;
     modelBackendVariant = isBackendVariantCliId(cfg.cliId)
       && (cfg.modelBackendVariant === 'standard' || cfg.modelBackendVariant === 'max')
       ? cfg.modelBackendVariant
@@ -6138,7 +6143,8 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
   // as editing bots.json directly); the chat-facing /config get masks them.
   let env = '';
   try {
-    const e = getBot(cachedLarkAppId).config.env;
+    const cfg=getBot(cachedLarkAppId).config;
+    const e=cfg.env;
     if (e && typeof e === 'object' && Object.keys(e).length) env = JSON.stringify(e, null, 2);
   } catch { /* none */ }
   // defaultWorkingDir — the "仅默认目录" mode source. Mutually exclusive with
@@ -6191,6 +6197,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     replyStyle,
     sandbox: sandboxStore.getBotSandbox(cachedLarkAppId),
     codexAuthSync,
+    containerAgentGlobalMode,
     sandboxPaths: sandboxStore.getBotSandboxPaths(cachedLarkAppId) ?? null,
     readIsolation: sandboxStore.getBotReadIsolation(cachedLarkAppId),
     // Full enforceability (adapter support + no wrapperCli + macOS) — the UI
@@ -6817,7 +6824,9 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
   } catch (err: any) {
     return jsonRes(res, 400, { ok: false, error: 'invalid_cli', message: err?.message ?? String(err) });
   }
-  const model = typeof body.model === 'string' ? body.model.trim() : '';
+  const requestedModel = typeof body.model === 'string' ? body.model.trim() : '';
+  const globalAgentMode=containerGlobalAgentMode();
+  const model = globalAgentMode ? readContainerAgentModel(homedir(),selected.cliId)??'' : requestedModel;
   const modelBackendVariantFieldPresent = Object.prototype.hasOwnProperty.call(body, 'modelBackendVariant');
   let modelBackendVariant: 'standard' | 'max' | undefined;
   const supportsModelBackendVariant = isBackendVariantCliId(selected.cliId);
@@ -7042,7 +7051,7 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
         delete entry.cliRuntime;
         delete entry.cliPathOverride;
       }
-      if (model) entry.model = model;
+      if (!globalAgentMode&&model) entry.model = model;
       else delete entry.model;
       if (!supportsModelBackendVariant) delete entry.modelBackendVariant;
       else if (modelBackendVariantFieldPresent) {
@@ -7588,7 +7597,12 @@ ipcRoute('PUT', '/api/bot-env', async (req, res) => {
     if (!coerced.ok) return jsonRes(res, 400, { ok: false, error: coerced.reason });
     value = coerced.value as Record<string, string>;
   }
-  const r = await applyConfigField(cachedLarkAppId, spec, value);
+  const cfg=getBot(cachedLarkAppId).config;
+  const separated=containerGlobalAgentMode()?splitContainerAgentEnvironment(cfg.cliId,value):null;
+  if(separated&&Object.keys(separated.global).length){
+    return jsonRes(res,409,{ok:false,error:'container_agent_environment_managed'});
+  }
+  const r=await applyConfigField(cachedLarkAppId,spec,separated?.local??value);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, env: value ? JSON.stringify(value, null, 2) : '' });
 });
@@ -7601,6 +7615,9 @@ ipcRoute('PUT', '/api/bot-codex-auth-sync', async (req, res) => {
   catch { return jsonRes(res, 400, { error: 'invalid_json' }); }
   if (body.codexAuthSync !== 'shared' && body.codexAuthSync !== 'isolated') {
     return jsonRes(res, 400, { ok: false, error: 'invalid_codex_auth_sync' });
+  }
+  if(containerGlobalAgentMode()&&body.codexAuthSync==='isolated'){
+    return jsonRes(res,409,{ok:false,error:'container_global_auth_required'});
   }
   const spec = findConfigField('codexAuthSync');
   if (!spec) return jsonRes(res, 500, { ok: false, error: 'field_unavailable' });

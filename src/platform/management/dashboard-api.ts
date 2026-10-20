@@ -1,13 +1,28 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dirname, join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { BotOnboardingManager } from '../../dashboard/bot-onboarding.js';
 import { readBotsJsonOrEmpty } from '../../setup/bots-store.js';
 import { jsonRes } from '../../dashboard/http.js';
 import { createFeishuSessionReader, type FeishuSessionStatus } from './feishu-session.js';
 import { createOnboardingSessionConfirmation } from './onboarding-session.js';
+import { createLocalBotDetacher,LocalDetachError } from './local-bot-detach.js';
+import { withLocalInventoryLock } from './local-inventory-lock.js';
+import {originMatchesHost} from '../../dashboard/control-csrf.js';
+import {createLocalControlAgent,LocalControlError} from './local-control-agent.js';
 
-export function platformManagementEnabled(): boolean { return process.env.BOTMUX_PLATFORM_MANAGED === 'true'; }
+export function platformWorkerImage():boolean{
+  try{return readFileSync('/etc/botmux-platform-role','utf8').trim()==='worker';}catch{return false;}
+}
+export function platformManagementEnabled(): boolean {
+  // A worker's root-owned image role cannot be promoted with container env.
+  // Native Botmux transport, credentials, sessions and Dashboard stay intact.
+  let imageRole: string | undefined;
+  try { imageRole = readFileSync('/etc/botmux-platform-role', 'utf8').trim(); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false; }
+  if (imageRole === 'worker') return false;
+  return process.env.BOTMUX_PLATFORM_MANAGED === 'true';
+}
 
 export async function platformRequest(path: string, method='GET',body?:unknown) {
   const base=process.env.CONTROL_PLANE_URL?.trim();
@@ -25,8 +40,17 @@ export function createPlatformDashboardApi(deps:{
   localOnboarding:BotOnboardingManager;
   listLocalBots:()=>Array<{larkAppId:string;displayName?:string;name?:string}>;
   readFeishuSession?:(force?:boolean)=>Promise<FeishuSessionStatus>;
+  stopLocalBot?:(appId:string)=>Promise<{ok:boolean}>;
+  isLocalBotStopped?:(appId:string)=>Promise<boolean>;
+  startLocalBot?:(appId:string)=>Promise<{ok:boolean}>;
+  localAgentBusy?:(ids:string[])=>Promise<boolean>;
+  changeLocalCli?:(appId:string,cli:string)=>Promise<{status:number;data:any}>;
+  openWorkerDashboard?:(containerId:string,req:IncomingMessage)=>Promise<{url:string}>;
 }) {
   const readFeishuSession = deps.readFeishuSession ?? createFeishuSessionReader();
+  const localAgent=createLocalControlAgent({botsJsonPath:deps.botsJsonPath,request:platformRequest,
+    stop:id=>deps.stopLocalBot?.(id)??Promise.resolve({ok:false}),start:id=>deps.startLocalBot?.(id)??Promise.resolve({ok:false}),
+    isStopped:id=>deps.isLocalBotStopped?.(id)??Promise.resolve(false),busy:ids=>deps.localAgentBusy?.(ids)??Promise.resolve(ids.length>0),changeCli:deps.changeLocalCli});
   const onboardingSession=createOnboardingSessionConfirmation(()=>deps.localOnboarding.sessionStatus());
   const path=join(dirname(deps.botsJsonPath),'platform','pool-bots.json');
   // Native atomic config/pending-job writers deliberately do not create their
@@ -46,25 +70,60 @@ export function createPlatformDashboardApi(deps:{
   // Reuse native QR, permission automation and target-app owner validation.
   // The private store is NEVER loaded by the native fleet.
   const poolOnboarding=new BotOnboardingManager({botsJsonPath:path,startBotLive:register});
+  const localDetach=createLocalBotDetacher({botsJsonPath:deps.botsJsonPath,
+    stop:appId=>deps.stopLocalBot?deps.stopLocalBot(appId):Promise.resolve({ok:false}),
+    isStopped:appId=>deps.isLocalBotStopped?deps.isLocalBotStopped(appId):Promise.resolve(false),
+    release:body=>platformRequest('/local-release','POST',{...(body as object),gatewayId:process.env.BOTMUX_PLATFORM_GATEWAY_ID||'local-gateway'})});
   async function inventory() {
+    return withLocalInventoryLock(async()=>{
     const bots=deps.listLocalBots().map(bot=>({appId:bot.larkAppId,displayName:bot.displayName||bot.name||bot.larkAppId}));
     const result=await platformRequest('/local-claims','POST',{gatewayId:process.env.BOTMUX_PLATFORM_GATEWAY_ID||'local-gateway',bots});
     if(result.status>=400)throw new Error('无法确认本地机器人占用，请检查平台后台');
     return bots;
+    });
   }
   return async(req:IncomingMessage,res:ServerResponse,url:URL,canManage:boolean)=>{
     if(!url.pathname.startsWith('/api/platform/'))return false;
     if(!canManage){jsonRes(res,401,{error:'management_auth_required'});return true;}
     if(url.pathname==='/api/platform/capabilities'){
-      jsonRes(res,200,{enabled:platformManagementEnabled()});return true;
+      jsonRes(res,200,{enabled:platformManagementEnabled(),worker:platformWorkerImage()});return true;
     }
     if(!platformManagementEnabled()){jsonRes(res,404,{error:'platform_disabled'});return true;}
+    if(['POST','PUT','PATCH','DELETE'].includes(req.method||'')&&req.headers){
+      const origin=req.headers.origin,site=req.headers['sec-fetch-site'];
+      const contentType=String(req.headers['content-type']||'').split(';')[0]?.trim().toLowerCase();
+      // SameSite cookies do not protect Control from a sibling Worker origin.
+      // Reuse native Origin normalization and require JSON (cross-origin
+      // browser fetch then requires a CORS preflight, which we never grant).
+      if(contentType!=='application/json'||(origin!==undefined&&!originMatchesHost(origin,req.headers.host))||
+        (origin===undefined&&site!==undefined&&site!=='same-origin')){
+        jsonRes(res,403,{error:'platform_origin_rejected'});return true;
+      }
+    }
     const read=async()=>{
       let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>65536)throw new Error('请求过大');}
       const value=JSON.parse(raw||'{}');if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('需要 JSON 对象');return value;
     };
     try {
       const suffix=url.pathname.slice('/api/platform'.length);
+      if(suffix==='/local-agent'&&req.method==='GET'){jsonRes(res,200,await localAgent.status());return true;}
+      const localModel=suffix.match(/^\/local-agent\/(pi|codex|claude-code)$/);
+      if(localModel&&req.method==='PUT'){const input=await read();jsonRes(res,200,await withLocalInventoryLock(()=>localAgent.apply(localModel[1]!,input)));return true;}
+      const localLogin=suffix.match(/^\/local-agent\/(codex|claude-code)\/login$/);
+      if(localLogin&&req.method==='POST'){jsonRes(res,200,await localAgent.login(localLogin[1]!,await read()));return true;}
+      const localCli=suffix.match(/^\/local-agent\/bots\/([A-Za-z0-9._-]+)$/);
+      if(localCli&&req.method==='PUT'){const input=await read();jsonRes(res,200,await withLocalInventoryLock(()=>localAgent.changeCli(localCli[1]!,input)));return true;}
+      const workerDashboard=suffix.match(/^\/(?:containers|logins)\/([0-9a-f-]{36})\/dashboard$/);
+      if(workerDashboard&&req.method==='POST'){
+        if(!deps.openWorkerDashboard){jsonRes(res,503,{error:'worker_proxy_unavailable'});return true;}
+        jsonRes(res,200,await deps.openWorkerDashboard(workerDashboard[1]!,req));return true;
+      }
+      const localUnbind=suffix.match(/^\/local-bots\/([A-Za-z0-9._-]+)\/unbind$/);
+      if(localUnbind&&req.method==='POST'){
+        const input=await read();const local=deps.listLocalBots().find(bot=>bot.larkAppId===localUnbind[1]);
+        const result=await localDetach.detach(localUnbind[1]!,input.localRevision,input.confirmLocalStop,local?.displayName||local?.name||localUnbind[1]!);
+        jsonRes(res,200,result);return true;
+      }
       if(suffix==='/feishu-session'&&req.method==='GET'){
         jsonRes(res,200,{session:await readFeishuSession(url.searchParams.get('refresh')==='1')});return true;
       }
@@ -107,14 +166,19 @@ export function createPlatformDashboardApi(deps:{
         }
         if(req.method==='GET'&&!jobMatch[3]){jsonRes(res,200,{job});return true;}
       }
-      if(!/^\/(catalog|workspaces|bots(?:\/[A-Za-z0-9._-]+\/unbind)?|containers(?:\/[0-9a-f-]+(?:\/reconcile)?)?|models(?:\/[A-Za-z0-9._-]+)?)$/.test(suffix)||
+      const accessRoute=/^\/(?:browser-profiles|logins(?:\/[0-9a-f-]{36})?|containers\/[0-9a-f-]{36}\/(?:login|network(?:\/(?:apply|refresh))?))$/.test(suffix);
+      if((!accessRoute&&!/^\/(catalog|workspaces|bots(?:\/[A-Za-z0-9._-]+\/unbind)?|containers(?:\/[0-9a-f-]+(?:\/reconcile)?)?|models(?:\/[A-Za-z0-9._-]+(?:\/clone)?)?)$/.test(suffix))||
         !['GET','POST','PUT','DELETE'].includes(req.method||'')){
         jsonRes(res,404,{error:'not_found'});return true;
       }
-      const allowed = req.method === 'GET' && ['/catalog','/workspaces','/bots','/containers','/models'].includes(suffix)
-        || req.method === 'POST' && (suffix === '/containers' || /^\/containers\/[0-9a-f-]+\/reconcile$/.test(suffix)||/^\/bots\/[A-Za-z0-9._-]+\/unbind$/.test(suffix))
-        || req.method === 'PUT' && /^\/(containers\/[0-9a-f-]+|models\/[A-Za-z0-9._-]+)$/.test(suffix)
-        || req.method === 'DELETE' && /^\/containers\/[0-9a-f-]+$/.test(suffix);
+      const allowed = accessRoute&&(req.method==='GET'&&/^\/(?:browser-profiles|logins|containers\/[0-9a-f-]{36}\/network)$/.test(suffix)
+        ||req.method==='POST'&&/^\/(?:browser-profiles|logins\/[0-9a-f-]{36}|containers\/[0-9a-f-]{36}\/(?:login|network\/(?:apply|refresh)))$/.test(suffix)
+        ||req.method==='PUT'&&/^\/containers\/[0-9a-f-]{36}\/network$/.test(suffix)
+        ||req.method==='DELETE'&&/^\/logins\/[0-9a-f-]{36}$/.test(suffix))
+        || req.method === 'GET' && ['/catalog','/workspaces','/bots','/containers','/models'].includes(suffix)
+        || req.method === 'POST' && (suffix === '/containers' || /^\/models\/[A-Za-z0-9._-]+(?:\/clone)?$/.test(suffix)|| /^\/containers\/[0-9a-f-]+\/reconcile$/.test(suffix)||/^\/bots\/[A-Za-z0-9._-]+\/unbind$/.test(suffix))
+        || req.method === 'PUT' && (suffix==='/workspaces'||/^\/(containers\/[0-9a-f-]+|models\/[A-Za-z0-9._-]+)$/.test(suffix))
+        || req.method === 'DELETE' && (/^\/containers\/[0-9a-f-]+$/.test(suffix)||/^\/models\/[A-Za-z0-9._-]+$/.test(suffix));
       if (!allowed) { jsonRes(res,405,{error:'method_not_allowed'});return true; }
       // Inventory is sampled on every mutation/list: no sandbox can select a
       // local identity merely because the UI last loaded an old free-bot list.
@@ -123,12 +187,19 @@ export function createPlatformDashboardApi(deps:{
       if(suffix==='/bots'&&req.method==='GET'&&result.status===200){
         const rows=result.data.bots as Array<{appId:string}>;
         for(const bot of local){const existing=rows.find(row=>row.appId===bot.appId) as any;
-          if(!existing)rows.push({...bot,botId:bot.appId,usage:'local',secretConfigured:true} as any);
-          else if(existing.usage==='local'&&bot.displayName!==bot.appId)existing.displayName=bot.displayName;
+          if(!existing)rows.push({...bot,botId:bot.appId,usage:'local',secretConfigured:true,localRevision:localDetach.revision(bot.appId)} as any);
+          else if(existing.usage==='local'){if(bot.displayName!==bot.appId)existing.displayName=bot.displayName;existing.localRevision=localDetach.revision(bot.appId);}
+        }
+        for(const pending of localDetach.pending()){
+          const existing=rows.find(row=>row.appId===pending.appId) as any;
+          if(existing)Object.assign(existing,pending,{usage:'local'});
+          else rows.push({...pending,botId:pending.appId,usage:'local',secretConfigured:true} as any);
         }
       }
       jsonRes(res,result.status,result.data);return true;
-    }catch{
+    }catch(error){
+      if(error instanceof LocalControlError){jsonRes(res,error.status,{error:'local_agent_failed',message:error.message});return true;}
+      if(error instanceof LocalDetachError){jsonRes(res,error.status,{error:'local_detach_failed',message:error.message});return true;}
       jsonRes(res,502,{error:'platform_unavailable',message:'平台后台操作未确认完成，请刷新查看记录；不要重复创建飞书应用'});
       return true;
     }

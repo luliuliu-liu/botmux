@@ -39,7 +39,7 @@ const V3_EVENT_TYPES = {
   runSucceeded: true,
 } as const satisfies Record<V3Event['type'], true>;
 
-function isV3EventType(value: string): value is V3Event['type'] {
+export function isV3EventType(value: string): value is V3Event['type'] {
   return Object.hasOwn(V3_EVENT_TYPES, value);
 }
 

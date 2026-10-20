@@ -258,6 +258,13 @@ function handleLine(line) {
       else if (scenario === 'multi-step') runMultiStepTurn(sessionId, messageId);
       else if (scenario === 'stale') runStaleTurn(sessionId, messageId);
       else if (scenario === 'turn-error') runTurnErrorTurn(sessionId, messageId);
+      else if (scenario === 'progress') {
+        notify('session.progress',{sessionId,type:'text',text:'stale-before-receipt'});
+        sendInboxReceipt(sessionId,messageId);
+        notify('session.progress',{sessionId:'other-session',type:'text',text:'foreign-progress'});
+        notify('session.progress',{sessionId,type:'text',text:'live-sdk-partial'});
+        setTimeout(()=>runHappyTurn(sessionId,messageId),30);
+      }
       else runHappyTurn(sessionId, messageId);
     });
     return;

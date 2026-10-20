@@ -918,6 +918,7 @@ export function BotDefaultsPage() {
         <div>
           <p className="eyebrow">{tr('nav.botDefaults')}</p>
           <h1>{tr('botDefaults.title')}</h1>
+          {ui.platformWorker ? <p className="hint bd-platform-notice">此工作台保留本地通信和会话配置。机器人绑定与模型请在 Control Agent 的 Agent 管理中修改。</p> : ui.platformManaged ? <p className="hint bd-platform-notice">此页管理本地机器人配置。新建机器人请前往 <a href="#/platform-bots">管理 → Bot 管理</a>。</p> : null}
         </div>
         <div className="page-heading-actions">
           <RefreshIconButton id="bd-refresh" label={tr('botDefaults.refresh')} busy={refreshing} disabled={refreshing} onClick={() => void reload()} />
@@ -925,7 +926,7 @@ export function BotDefaultsPage() {
             <DropdownMenu<string>
               className="clone-bot-menu"
               ariaLabel={tr('botOnboarding.clone')}
-              disabled={onboardingBusy || ui.platformManaged}
+              disabled={onboardingBusy || ui.platformManaged || ui.platformWorker}
               label={tr('botOnboarding.clone')}
               value=""
               options={bots.map(bot => ({
@@ -947,7 +948,7 @@ export function BotDefaultsPage() {
           {ui.authed ? (
             <CreateActionButton
               className="page-primary-action add-bot-btn"
-              disabled={onboardingBusy || ui.platformManaged}
+              disabled={onboardingBusy || ui.platformManaged || ui.platformWorker}
               onClick={() => {
                 setOnboardingBusy(true);
                 void openBotOnboarding().finally(() => setOnboardingBusy(false));
@@ -958,7 +959,6 @@ export function BotDefaultsPage() {
           ) : null}
         </div>
       </div>
-      {ui.platformManaged ? <p className="hint">此页管理本地机器人配置。新建机器人请前往 <a href="#/platform-bots">管理 → Bot 管理</a>。</p> : null}
       <div className="bd-layout">
         <aside id="bd-roster" className="bd-roster">
           <form id="bd-filters" className="filters dashboard-toolbar" onSubmit={event => event.preventDefault()}>
@@ -1108,7 +1108,7 @@ function BotDefaultsCard(props: {
         >
           <BdTabGrid>
             <section className="bd-tile">
-              <BotAgentSection bot={bot} sessionFallback={cli} cliState={cliState} patchBot={patchBot} />
+              {ui.platformWorker?<><h3>Agent · {cli}</h3><p>{bot.model||'默认模型'}</p><p className="hint">当前为容器级全局配置；修改模型请使用 Control Agent 的模型管理 / Agent 管理。</p></>:<BotAgentSection bot={bot} sessionFallback={cli} cliState={cliState} patchBot={patchBot} />}
             </section>
             <section className="bd-tile">
               <WorkingDirSection bot={bot} patchBot={patchBot} putCardPref={putCardPref} />
@@ -2993,7 +2993,7 @@ export function BotAgentSection(props: {
               value={model}
               onChange={setModel}
               options={modelCandidates}
-              disabled={agentBusy || modelDisabledByCli}
+              disabled={agentBusy || modelDisabledByCli || bot.containerAgentGlobalMode === true}
               busy={detectingModels}
               dataInput="agentModel"
               ariaLabel={tr('botDefaults.agentModel')}
@@ -3006,6 +3006,7 @@ export function BotAgentSection(props: {
                 : undefined}
             />
           </label>
+          {bot.containerAgentGlobalMode ? <small>模型由当前 Agent 类型的容器级全局配置提供；请在模型管理 / Agent 管理中修改。</small> : null}
         </div>
       )}
       {isTraex && (
@@ -3791,14 +3792,14 @@ function CodexAuthSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
           <select
             data-input="codexAuthSync"
             value={authMode}
-            disabled={authBusy}
+            disabled={authBusy || bot.containerAgentGlobalMode === true}
             onChange={event => void saveAuthMode(event.currentTarget.value as 'shared' | 'isolated')}
           >
             <option value="shared">{tr('botDefaults.codexAuthSyncShared')}</option>
             <option value="isolated">{tr('botDefaults.codexAuthSyncIsolated')}</option>
           </select>
         </label>
-        <small>{tr('botDefaults.codexAuthSyncHelp')}</small>
+        <small>{bot.containerAgentGlobalMode ? tr('botDefaults.codexAuthGlobalContainerHelp') : tr('botDefaults.codexAuthSyncHelp')}</small>
         <StatusSpan status={authStatus} attr={{ 'data-codex-auth-sync-status': '' }} />
       </div>
     </section>

@@ -281,6 +281,7 @@ export function buildConfigTextCard(data: ConfigCardData, locale?: Locale): stri
 }
 
 const cliDisplayNames: Record<CliId, string> = {
+  zcode:'ZCode',
   'claude-code': 'Claude',
   'seed': 'Seed',
   'relay': 'Relay',

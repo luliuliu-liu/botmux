@@ -219,6 +219,13 @@ export function stripCompanionStartupEnv(env: NodeJS.ProcessEnv): void {
 }
 
 export const REDACTED_CHILD_ENV_KEYS = [
+  // Global authority belongs to the Control Agent's management processes,
+  // never to a model CLI (also removed from tmux server/pane environments).
+  'CONTROL_PLANE_SYNC_KEY',
+  'CONTROL_PLANE_CONFIG_KEY',
+  'WORKFLOW_DATABASE_URL',
+  'WORKFLOW_API_KEY',
+  'SANDBOX_API_KEY',
   'LARK_APP_ID',
   'LARK_APP_SECRET',
   'GITHUB_TOKEN',

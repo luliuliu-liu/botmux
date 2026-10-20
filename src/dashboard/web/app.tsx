@@ -1465,8 +1465,10 @@ async function loadWorkbenchCapabilities(): Promise<void> {
 
 async function loadAuthState(): Promise<void> {
   const platformProbe = origFetch('/api/platform/capabilities').then(async response => {
-    ui.platformManaged = response.ok && (await response.json()).enabled === true;
-  }).catch(() => { ui.platformManaged = false; });
+    const capabilities=response.ok?await response.json():{};
+    ui.platformManaged = capabilities.enabled === true;
+    ui.platformWorker = capabilities.worker === true;
+  }).catch(() => { ui.platformManaged = false;ui.platformWorker=false; });
   // 能力探测与 /api/settings 并行：两者互不依赖，也都在首次 route() 之前完成。
   const capabilitiesProbe = loadWorkbenchCapabilities();
   try {

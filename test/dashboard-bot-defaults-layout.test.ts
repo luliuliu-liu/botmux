@@ -7,6 +7,11 @@ const css = readFileSync(new URL('../src/dashboard/web/style.css', import.meta.u
 const i18n = readFileSync(new URL('../src/dashboard/web/i18n.ts', import.meta.url), 'utf8');
 
 describe('bot defaults focused layout', () => {
+  it('keeps the managed hint inside the page heading, not an extra desktop grid row',()=>{
+    const heading=page.indexOf('<div className="page-heading">'),layout=page.indexOf('<div className="bd-layout">');
+    const notice=page.indexOf('className="hint bd-platform-notice"');expect(notice).toBeGreaterThan(heading);expect(notice).toBeLessThan(page.indexOf('<div className="page-heading-actions">',heading));expect(notice).toBeLessThan(layout);
+    expect((page.match(/此页管理本地机器人配置/g)||[])).toHaveLength(1);
+  });
   it('keeps every task panel mounted while hiding inactive categories', () => {
     for (const tab of ['common', 'sessions', 'security', 'cards', 'advanced']) {
       expect(page).toContain(`id="bd-panel-${tab}"`);
