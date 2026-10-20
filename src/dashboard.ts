@@ -1864,6 +1864,7 @@ const workerDashboardProxy=createWorkerDashboardProxy({
   resolve:async id=>{
     let response=await platformRequest(`/containers/${id}/dashboard-route`);
     if(response.status!==200)response=await platformRequest(`/logins/${id}/dashboard-route`);
+    if(response.status!==200)response=await platformRequest(`/local-login-workbench/${id}/dashboard-route`);
     if(response.status!==200)throw new Error('worker_unavailable');
     const base=process.env.CONTROL_PLANE_URL!,key=process.env.CONTROL_PLANE_SYNC_KEY!;
     return {url:`${base.replace(/\/$/,'')}/internal/v1/worker-dashboard/${id}`,headers:{'x-api-key':key}};

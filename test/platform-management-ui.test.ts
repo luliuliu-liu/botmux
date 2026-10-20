@@ -105,6 +105,23 @@ describe('model and Agent management UI',()=>{
     expect(fetcher.mock.calls.every(([,init])=>init.method==='GET')).toBe(true);
     expect(JSON.stringify(r.toJSON())).toContain('OAuth 凭据只保留在目标 Worker');
   });
+  it('edits the selected browser profile proxy instead of deployment environment',async()=>{
+    const profile={profileId:'11111111-1111-4111-8111-111111111111',displayName:'SSO',storageKind:'volume',storageSource:'agent-browser-profile-11111111-1111-4111-8111-111111111111',proxyUrl:null,revision:1};
+    fetcher.mockImplementation(async(url:string,init?:any)=>{
+      if(url.endsWith('/browser-profiles')&&(!init||init.method==='GET'))return {ok:true,json:async()=>({profiles:[profile]})};
+      if(url.endsWith('/logins'))return {ok:true,json:async()=>({logins:[]})};
+      if(url.includes('/browser-profiles/')&&init?.method==='PUT')return {ok:true,json:async()=>({profile:{...profile,proxyUrl:'http://proxy.example:7890',revision:2}})};
+      return {ok:true,json:async()=>({})};
+    });
+    const r=await mount(React.createElement(LoginWorkbench,{container:null,containers:[],onClose:()=>{}}));
+    await act(async()=>r.root.findAllByType('select').find(s=>s.findAllByType('option').some(o=>o.props.value===profile.profileId))!.props.onChange({target:{value:profile.profileId}}));
+    const proxy=r.root.findAllByType('input').find(i=>i.props.placeholder==='http://host.docker.internal:7890')!;
+    await act(async()=>proxy.props.onChange({target:{value:'http://proxy.example:7890'}}));
+    await act(async()=>button(r,'保存登录网络').props.onClick());
+    expect(fetcher.mock.calls.some(([url,init])=>url===`/api/platform/browser-profiles/${profile.profileId}`&&init.method==='PUT'&&
+      JSON.parse(init.body).proxyUrl==='http://proxy.example:7890')).toBe(true);
+    expect(JSON.stringify(r.toJSON())).toContain('代理不会影响 Worker');
+  });
   it('groups Agent choices by connection and expands every configured model',async()=>{
     const r=await mount(React.createElement(ContainerForm,{data:{...data,models:[{...models[0],modelIds:['model-1','model-2']}]} as any,container:current,onClose:()=>{},onDone:()=>{}}));
     const select=r.root.findByProps({name:'modelSelection'});

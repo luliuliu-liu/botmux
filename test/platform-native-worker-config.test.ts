@@ -70,6 +70,36 @@ describe('native worker authority',()=>{
     }
     expect(()=>nativeModelEnvironment(f.home,'pi',config.model)).toThrow();
   });
+  it('keeps unmanaged Codex root settings when switching OAuth to an API-key model',async()=>{
+    const f=fixture(),oauth={...f.configuration,agentType:'codex' as const,
+      model:{provider:'openai',baseUrl:'https://api.openai.com/v1',protocol:'openai-responses',authMethod:'oauth',modelId:'',modelIds:[],apiKey:''}};
+    await f.apply(oauth);
+    const file=join(f.home,'.codex','config.toml');
+    writeFileSync(file,readFileSync(file,'utf8').replace(
+      '# botmux-platform-root:end',
+      'model_reasoning_effort = "medium"\n# botmux-platform-root:end',
+    ));
+    const api={...oauth,revision:2,model:{...f.configuration.model,protocol:'openai-responses',authMethod:'api-key'}};
+    await f.apply(api);
+    const text=readFileSync(file,'utf8');
+    expect(text).toContain('model_provider = "platform"');
+    expect(text).toContain('model_reasoning_effort = "medium"');
+    expect(text).not.toContain('cli_auth_credentials_store = "file"');
+  });
+  it('accepts a legacy OAuth ownership subset after Codex adds model and reasoning inside the marker',async()=>{
+    const f=fixture(),oauth={...f.configuration,agentType:'codex' as const,
+      model:{provider:'openai',baseUrl:'https://api.openai.com/v1',protocol:'openai-responses',authMethod:'oauth',modelId:'',modelIds:[],apiKey:''}};
+    await f.apply(oauth);
+    const file=join(f.home,'.codex','config.toml');
+    writeFileSync(file,readFileSync(file,'utf8').replace(
+      'cli_auth_credentials_store = "file"',
+      'cli_auth_credentials_store = "file"\nmodel = "user-selected"\nmodel_reasoning_effort = "medium"',
+    ));
+    const api={...oauth,revision:2,model:{...f.configuration.model,protocol:'openai-responses',authMethod:'api-key'}};
+    await f.apply(api);
+    const text=readFileSync(file,'utf8');expect(text).toContain('model_reasoning_effort = "medium"');
+    expect(text).toContain('model_provider = "platform"');expect(text).not.toContain('model = "user-selected"');
+  });
   it('registers all Pi models but keeps an explicit selected model in the bot and environment',async()=>{
     const f=fixture();await f.apply({...f.configuration,model:{...f.configuration.model,modelIds:['one','two'],modelId:'two'}});
     const registry=JSON.parse(readFileSync(join(f.home,'.pi','agent','models.json'),'utf8'));

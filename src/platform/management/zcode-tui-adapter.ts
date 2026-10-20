@@ -11,7 +11,11 @@ export function createZcodeAdapter(pathOverride?:string):CliAdapter{
     authPaths:['~/.zcode'],
     // ZCode allocates its own native session identifier; Botmux's UUID is not
     // a valid --resume id. Persistent tmux retains live sessions across reloads.
-    buildArgs(){return ['tui'];},
+    // A managed Worker has no local operator watching ZCode's approval panel:
+    // the user is interacting through Feishu/Botmux instead.  Use ZCode's
+    // official full-access mode rather than persisting private SQLite settings
+    // or teaching Botmux to click a version-specific TUI dialog.
+    buildArgs(){return ['tui','--mode','yolo'];},
     async writeInput(pty:PtyHandle,content:string){
       if(pty.sendText&&pty.sendSpecialKeys){
         pty.sendText('\x1b[200~'+content+'\x1b[201~');await delay(200);pty.sendSpecialKeys('Enter');

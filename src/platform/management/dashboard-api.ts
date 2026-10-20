@@ -167,7 +167,14 @@ export function createPlatformDashboardApi(deps:{
       const localModel=suffix.match(/^\/local-agent\/(pi|codex|claude-code)$/);
       if(localModel&&req.method==='PUT'){const input=await read();jsonRes(res,200,await withLocalInventoryLock(()=>localAgent.apply(localModel[1]!,input)));return true;}
       const localLogin=suffix.match(/^\/local-agent\/(codex|claude-code)\/login$/);
-      if(localLogin&&req.method==='POST'){jsonRes(res,200,await localAgent.login(localLogin[1]!,await read()));return true;}
+      if(localLogin&&req.method==='POST'){
+        const result=await localAgent.login(localLogin[1]!,await read());
+        if(result.dashboardLoginId){
+          if(!deps.openWorkerDashboard){jsonRes(res,503,{error:'worker_proxy_unavailable'});return true;}
+          jsonRes(res,200,await deps.openWorkerDashboard(result.dashboardLoginId,req));return true;
+        }
+        jsonRes(res,200,result);return true;
+      }
       const localCli=suffix.match(/^\/local-agent\/bots\/([A-Za-z0-9._-]+)$/);
       if(localCli&&req.method==='PUT'){const input=await read();await inventory();jsonRes(res,200,await localBinder.switchCli(localCli[1]!,input));return true;}
       const workerDashboard=suffix.match(/^\/(?:containers|logins)\/([0-9a-f-]{36})\/dashboard$/);
@@ -223,15 +230,15 @@ export function createPlatformDashboardApi(deps:{
         }
         if(req.method==='GET'&&!jobMatch[3]){jsonRes(res,200,{job});return true;}
       }
-      const accessRoute=/^\/(?:browser-profiles|logins(?:\/[0-9a-f-]{36})?|containers\/[0-9a-f-]{36}\/(?:login|network(?:\/(?:apply|refresh))?))$/.test(suffix);
+      const accessRoute=/^\/(?:browser-profiles(?:\/[0-9a-f-]{36})?|logins(?:\/[0-9a-f-]{36})?|local-login-workbench(?:\/[0-9a-f-]{36}(?:\/(?:ack|dashboard-route))?)?|containers\/[0-9a-f-]{36}\/(?:login|network(?:\/(?:apply|refresh))?))$/.test(suffix);
       if((!accessRoute&&!/^\/(catalog|workspaces|bots(?:\/[A-Za-z0-9._-]+\/unbind)?|containers(?:\/[0-9a-f-]+(?:\/reconcile)?)?|models(?:\/[A-Za-z0-9._-]+(?:\/clone)?)?)$/.test(suffix))||
         !['GET','POST','PUT','DELETE'].includes(req.method||'')){
         jsonRes(res,404,{error:'not_found'});return true;
       }
-      const allowed = accessRoute&&(req.method==='GET'&&/^\/(?:browser-profiles|logins|containers\/[0-9a-f-]{36}\/network)$/.test(suffix)
-        ||req.method==='POST'&&/^\/(?:browser-profiles|logins\/[0-9a-f-]{36}|containers\/[0-9a-f-]{36}\/(?:login|network\/(?:apply|refresh)))$/.test(suffix)
-        ||req.method==='PUT'&&/^\/containers\/[0-9a-f-]{36}\/network$/.test(suffix)
-        ||req.method==='DELETE'&&/^\/logins\/[0-9a-f-]{36}$/.test(suffix))
+      const allowed = accessRoute&&(req.method==='GET'&&/^\/(?:browser-profiles|logins|local-login-workbench\/[0-9a-f-]{36}\/dashboard-route|containers\/[0-9a-f-]{36}\/network)$/.test(suffix)
+        ||req.method==='POST'&&/^\/(?:browser-profiles|logins\/[0-9a-f-]{36}|local-login-workbench(?:\/[0-9a-f-]{36}(?:\/ack)?)?|containers\/[0-9a-f-]{36}\/(?:login|network\/(?:apply|refresh)))$/.test(suffix)
+        ||req.method==='PUT'&&/^\/(?:browser-profiles\/[0-9a-f-]{36}|containers\/[0-9a-f-]{36}\/network)$/.test(suffix)
+        ||req.method==='DELETE'&&/^\/(?:logins|local-login-workbench)\/[0-9a-f-]{36}$/.test(suffix))
         || req.method === 'GET' && ['/catalog','/workspaces','/bots','/containers','/models'].includes(suffix)
         || req.method === 'POST' && (suffix === '/containers' || /^\/models\/[A-Za-z0-9._-]+(?:\/clone)?$/.test(suffix)|| /^\/containers\/[0-9a-f-]+\/reconcile$/.test(suffix)||/^\/bots\/[A-Za-z0-9._-]+\/unbind$/.test(suffix))
         || req.method === 'PUT' && (suffix==='/workspaces'||/^\/(containers\/[0-9a-f-]+|models\/[A-Za-z0-9._-]+)$/.test(suffix))

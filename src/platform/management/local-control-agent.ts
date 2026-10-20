@@ -39,6 +39,12 @@ export function createLocalControlAgent(deps:Dependencies){
   });
   restoring=oauth.restore();await restoring;
  }
+ async function closeWorkbench(){
+  if(!owner?.workbenchGeneration)return;
+  const result=await deps.request(`/local-login-workbench/${owner.loginId}`,'DELETE',{});
+  if(result.status!==200||result.data.closed!==true)throw new LocalControlError(502,'登录工作台关闭未确认，请重试取消或关闭');
+  delete owner.workbenchGeneration;delete owner.profileId;saveOwner();
+ }
  async function ensureNoLogin(){if(owner){await loginManager();await restoring;if(oauth.busy())throw new LocalControlError(409,'本地原生登录仍在进行，请先完成或取消登录');}}
  return {
   async assertNoLogin(){await ensureNoLogin();},
@@ -90,16 +96,47 @@ export function createLocalControlAgent(deps:Dependencies){
    });
   },
   async login(type:string,input:any){requireType(type);
-   if(!['codex','claude-code'].includes(type)||!['start','inspect','cancel','callback'].includes(input.action))throw new LocalControlError(400,'原生登录操作无效');
+   if(!['codex','claude-code'].includes(type)||!['start','inspect','cancel','callback','dashboard'].includes(input.action))throw new LocalControlError(400,'原生登录操作无效');
    return withFileLock(join(directory,'local-agent-operation'),async()=>{
     await loginManager();await restoring;
     if(input.action==='start'){
      const current=meta(type);if(current?.authMethod!=='oauth')throw new LocalControlError(409,'请先选择并同步原生 OAuth 登录方式');
      if(oauth.busy())throw new LocalControlError(409,'已有本地登录正在进行，请先完成或取消');
-     owner={agentType:type,revision:current.revision,loginId:randomUUID(),appIds:[]};saveOwner();
+     if(typeof input.profileId!=='string'||!/^[0-9a-f-]{36}$/.test(input.profileId))throw new LocalControlError(400,'请选择登录工作台的浏览器配置');
+     owner={agentType:type,revision:current.revision,loginId:randomUUID(),appIds:[],profileId:input.profileId};saveOwner();
     }
     if(owner?.agentType!==type)throw new LocalControlError(409,'没有此 CLI 的本地登录任务');
-    return oauth.request(input.action,{loginId:owner.loginId,generation:'local-control',revision:owner.revision,...(input.action==='callback'?{callback:input.callback}:{})});
+    if(input.action==='dashboard'){
+     if(!owner.workbenchGeneration)throw new LocalControlError(409,'登录工作台尚未就绪');
+     return {dashboardLoginId:owner.loginId};
+    }
+    let result=await oauth.request(input.action,{loginId:owner.loginId,generation:'local-control',revision:owner.revision,...(input.action==='callback'?{callback:input.callback}:{})});
+    if(input.action==='start'&&result.oauth.authorizationUrl){
+     const generation=randomUUID(),created=await deps.request('/local-login-workbench','POST',{
+      loginId:owner.loginId,controlId,agentType:type,profileId:owner.profileId,generation,
+      authorizationUrl:result.oauth.authorizationUrl,callbackPort:result.oauth.callbackPort,callbackPath:result.oauth.callbackPath,
+     });
+     if(created.status!==201){
+      await oauth.request('cancel',{loginId:owner.loginId,generation:'local-control',revision:owner.revision});
+      await deps.request(`/local-login-workbench/${owner.loginId}`,'DELETE',{});
+      throw new LocalControlError(created.status,created.data.message||'登录工作台启动失败');
+     }
+     owner.workbenchGeneration=generation;saveOwner();
+    }
+    if(input.action==='start'&&!result.oauth.authorizationUrl){
+     await oauth.request('cancel',{loginId:owner.loginId,generation:'local-control',revision:owner.revision});
+     throw new LocalControlError(502,'原生登录初始化未返回官方授权地址，请重试');
+    }
+    if(input.action==='inspect'&&owner.workbenchGeneration){
+     const browser=await deps.request(`/local-login-workbench/${owner.loginId}`,'POST',{});
+     if(browser.status===200&&browser.data.callback&&result.oauth.state==='waiting'){
+      result=await oauth.request('callback',{loginId:owner.loginId,generation:'local-control',revision:owner.revision,callback:browser.data.callback});
+      await deps.request(`/local-login-workbench/${owner.loginId}/ack`,'POST',{});
+     }
+     if(['succeeded','failed','cancelled'].includes(result.oauth.state))await closeWorkbench();
+    }
+    if(input.action==='cancel')await closeWorkbench();
+    return result;
    });
   },
  };

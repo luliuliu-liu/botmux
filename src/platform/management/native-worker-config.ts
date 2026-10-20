@@ -32,8 +32,43 @@ const runtimeModel=(config:NativeConfiguration)=>config.model.modelId
   :null;
 const CODEX_ROOT_BEGIN='# botmux-platform-root:begin',CODEX_ROOT_END='# botmux-platform-root:end';
 const CODEX_PROVIDER_BEGIN='# botmux-platform-provider:begin',CODEX_PROVIDER_END='# botmux-platform-provider:end';
-function codexManagedProjection(text:string){
+function codexLegacyManagedProjection(text:string){
   return text.match(/# botmux-platform-(?:root|provider):begin[\s\S]*?# botmux-platform-(?:root|provider):end/g)??[];
+}
+function markedBlock(text:string,begin:string,end:string){
+  const from=text.indexOf(begin),to=from<0?-1:text.indexOf(end,from);
+  return from<0||to<0?'':text.slice(from,to+end.length);
+}
+function codexManagedProjection(text:string){
+  const root=markedBlock(text,CODEX_ROOT_BEGIN,CODEX_ROOT_END);
+  const ownedRoot=root?[
+    CODEX_ROOT_BEGIN,
+    ...root.split(/\r?\n/).filter(line=>/^\s*(?:model|model_provider|cli_auth_credentials_store)\s*=/.test(line)),
+    CODEX_ROOT_END,
+  ].join('\n'):'';
+  const provider=markedBlock(text,CODEX_PROVIDER_BEGIN,CODEX_PROVIDER_END);
+  return [ownedRoot,provider].filter(Boolean);
+}
+function codexUnmanagedMarkedRoot(text:string){
+  const root=markedBlock(text,CODEX_ROOT_BEGIN,CODEX_ROOT_END);
+  if(!root)return '';
+  return root.split(/\r?\n/).filter(line=>line!==CODEX_ROOT_BEGIN&&line!==CODEX_ROOT_END
+    &&line.trim()&&!/^\s*(?:model|model_provider|cli_auth_credentials_store)\s*=/.test(line)).join('\n');
+}
+function codexManagedProjectionCandidates(text:string){
+  const root=markedBlock(text,CODEX_ROOT_BEGIN,CODEX_ROOT_END);
+  if(!root)return [hash([])];
+  const provider=markedBlock(text,CODEX_PROVIDER_BEGIN,CODEX_PROVIDER_END);
+  const fields=root.split(/\r?\n/).filter(line=>/^\s*(?:model|model_provider|cli_auth_credentials_store)\s*=/.test(line));
+  // Older releases hashed the whole block. Codex may later add/change values
+  // inside that marker (for example model + reasoning). Recognize the exact
+  // sidecar-owned subset, but never accept an unmarked/provider mutation.
+  const candidates=[];for(let mask=0;mask<2**fields.length;mask++){
+    const block=[CODEX_ROOT_BEGIN,...fields.filter((_,i)=>(mask&(1<<i))!==0),CODEX_ROOT_END].join('\n');
+    candidates.push(hash([block,...provider?[provider]:[]]));
+  }
+  candidates.push(hash(codexLegacyManagedProjection(text)));
+  return [...new Set(candidates)];
 }
 function removeMarkedBlock(text:string,begin:string,end:string){
   const starts=text.split(begin).length-1,stops=text.split(end).length-1;
@@ -46,9 +81,11 @@ function codexManagedConfiguration(previous:string|null,owned:any,pending:any,fi
   let base=previous??'';
   const marked=base.includes(CODEX_ROOT_BEGIN)||base.includes(CODEX_PROVIDER_BEGIN);
   if(marked){
-    const observed=hash(codexManagedProjection(base));
-    if(owned?.managedDigest!==observed&&pending?.nextManagedDigest!==observed)throw new Error('codex_global_config_conflict');
+    const candidates=codexManagedProjectionCandidates(base);
+    if(!candidates.includes(owned?.managedDigest)&&!candidates.includes(pending?.nextManagedDigest))throw new Error('codex_global_config_conflict');
+    const unmanagedRoot=codexUnmanagedMarkedRoot(base);
     base=removeMarkedBlock(removeMarkedBlock(base,CODEX_ROOT_BEGIN,CODEX_ROOT_END),CODEX_PROVIDER_BEGIN,CODEX_PROVIDER_END);
+    if(unmanagedRoot)base=`${unmanagedRoot}\n${base.replace(/^\s*\n/,'')}`;
   }else if(base){
     // Compatibility with the prior full-file writer. Only a byte-identical
     // file recorded by its ownership sidecar may be retired wholesale.
@@ -164,7 +201,7 @@ export async function writeNativeAgentModel(home:string,config:NativeConfigurati
     const owned=read(ownership,null),pending=read(transaction,null);
     const next=codexManagedConfiguration(previousText,owned,pending,file,config);
     const nextManagedDigest=hash(codexManagedProjection(next));
-    save(transaction,{schemaVersion:1,file,previousManagedDigest:hash(codexManagedProjection(previousText??'')),nextManagedDigest});
+    save(transaction,{schemaVersion:2,file,previousManagedDigest:hash(codexManagedProjection(previousText??'')),nextManagedDigest});
     atomicWriteFileSync(file,next,{mode:0o600});
     save(ownership,{file,managedDigest:nextManagedDigest});
     try{unlinkSync(transaction);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}

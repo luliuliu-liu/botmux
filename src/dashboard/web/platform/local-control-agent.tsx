@@ -58,14 +58,18 @@ function LocalCliForm({bot,onClose,onDone}:{bot:Bot;onClose:()=>void;onDone:(s:s
  </form></Modal>;
 }
 function LocalLogin({agent,onClose}:{agent:Agent;onClose:()=>void}){
- const [value,setValue]=useState<any>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[callback,setCallback]=useState('');
- const action=async(action:string)=>{setBusy(true);try{const result=await platformApi(`/local-agent/${agent.agentType}/login`,'POST',{action,...(action==='callback'?{callback}:{})});setValue(result.oauth);setError('');}catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}};
+ const [value,setValue]=useState<any>(null),[profiles,setProfiles]=useState<any[]>([]),[profileId,setProfileId]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState('');
+ useEffect(()=>{void platformApi('/browser-profiles').then(result=>{setProfiles(result.profiles||[]);if(result.profiles?.length===1)setProfileId(result.profiles[0].profileId);}).catch(e=>setError(e instanceof Error?e.message:String(e)));},[]);
+ const action=async(action:string)=>{setBusy(true);try{const result=await platformApi(`/local-agent/${agent.agentType}/login`,'POST',{action,...(action==='start'?{profileId}:{})});if(result.oauth)setValue(result.oauth);setError('');return result;}catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}};
+ const open=async()=>{const popup=window.open('about:blank','_blank');try{const result=await action('dashboard');if(result?.url&&popup){popup.opener=null;popup.location.replace(result.url);}else throw Error('登录工作台尚未就绪或浏览器拦截了弹窗');}catch(e){popup?.close();setError(e instanceof Error?e.message:String(e));}};
  useEffect(()=>{if(!value||!['starting','waiting','interrupted'].includes(value.state))return;const timer=setInterval(()=>void action('inspect'),5000);return()=>clearInterval(timer);},[value?.state]);
  return <Modal title={`本地 ${names[agent.agentType]} 原生登录`} onClose={onClose} busy={busy}>
-  <p className="hint">原生 CLI 在 Control Agent 内完成认证，凭据仅保存在其 /state。登录期间暂停同 CLI 的本地 Bot，完成或取消后恢复。不复制其他 Worker 的账号。</p>
+  <p className="hint">原生 CLI 在 Control Agent 内完成认证，凭据仅保存在其 /state；统一登录工作台只保存浏览器 Cookie。登录期间暂停同 CLI 的本地 Bot，完成或取消后恢复。</p>
+  <label>浏览器配置<select value={profileId} onChange={e=>setProfileId(e.target.value)} disabled={busy||!!value}><option value="">请选择持久化浏览器配置</option>{profiles.map(profile=><option key={profile.profileId} value={profile.profileId}>{profile.displayName} · {profile.storageKind}</option>)}</select></label>
   <p>状态：{value?.state||'尚未发起'}</p>{value?.authorizationUrl?<a href={value.authorizationUrl} target="_blank" rel="noreferrer">打开官方登录页面</a>:null}{value?.userCode?<p>设备验证码：<code>{value.userCode}</code></p>:null}
-  {value?.callbackPort?<label>授权完成后粘贴浏览器 localhost 回调 URL<input value={callback} onChange={e=>setCallback(e.target.value)}/><button disabled={busy||!callback} onClick={()=>void action('callback')}>提交给原生 CLI</button></label>:null}
+  {value?.authorizationUrl?<button disabled={busy} onClick={()=>void open()}>打开统一登录工作台</button>:null}
   <p className="hint">凭据文件：{value?.credentialPresent?'存在（有效性由原生 CLI 确认）':'尚未确认'}</p>
-  {error?<p className="hint-warn" role="alert">{error}</p>:null}<footer><button onClick={onClose} disabled={busy}>关闭面板</button><button disabled={busy} onClick={()=>void action('inspect')}>刷新状态</button><button disabled={busy||!value} onClick={()=>void action('cancel')}>取消登录并恢复</button><button className="primary" disabled={busy||value&&['starting','waiting','interrupted'].includes(value.state)} onClick={()=>void action('start')}>发起原生登录</button></footer>
+  {!profiles.length?<p className="hint-warn">请先在 Agent 管理 → 登录工作台新建浏览器配置。</p>:null}
+  {error?<p className="hint-warn" role="alert">{error}</p>:null}<footer><button onClick={onClose} disabled={busy}>关闭面板</button><button disabled={busy||!value} onClick={()=>void action('inspect')}>刷新状态</button><button disabled={busy||!value} onClick={()=>void action('cancel')}>取消登录并恢复</button><button className="primary" disabled={busy||!profileId||value&&['starting','waiting','interrupted'].includes(value.state)} onClick={()=>void action('start')}>发起原生登录</button></footer>
  </Modal>;
 }
