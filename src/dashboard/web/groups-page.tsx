@@ -1,3 +1,6 @@
+import { GroupIdleCloseRow } from './group-idle-close.js';
+import { GroupCardModeRow } from './group-card-mode.js';
+import { GroupReplyModeSection } from './group-reply-mode.js';
 import { GroupSerialInputRow } from './group-serial-input.js';
 import { GroupDefaultModelsRow } from './group-default-models.js';
 import { describeCloseResidual } from '../../core/close-residual.js';
@@ -30,6 +33,7 @@ import { copyText } from './clipboard.js';
 import { toast } from './toast.js';
 import { confirm } from './confirm-modal.js';
 import { FeedGroupPicker } from './feed-group-picker.js';
+import { FeedGroupAuthOverlay, FeedGroupAuthPrompt, useFeedGroups } from './feed-groups.js';
 import { BotMultiSelect } from './bot-multi-select.js';
 import {
   CreateActionButton,
@@ -41,16 +45,16 @@ import {
   OverviewListTail,
   RefreshIconButton,
 } from './dashboard-components.js';
-import {
-  hasExplicitChatRole,
-  summarizeGroupProfileMatches,
-  type EffectiveRoleValue,
-  type RoleProfileSummaryLike,
-} from './role-profile-match.js';
+import { GroupProfileStatus } from './group-profile-status.js';
+import type { RoleProfileSummaryLike } from './role-profile-match.js';
 import {
   allExpectedInChat,
   availableBotsForPicker,
+  botNameById,
+  chatHasAddableBots,
   collectGroupProfileEntries,
+  createAddBotsReconciler,
+  createReconciledChatCommitter,
   emptyGroupsSnapshot,
   fetchGroupsSnapshot,
   fetchRoleProfileSummaries,
@@ -58,7 +62,9 @@ import {
   injectOptimisticChat,
   isValidProfileId,
   loadGroupRoleProfileContext,
+  markBotsInChat,
   paginateGroupRows,
+  planAddBotsFollowup,
   roleKey,
   roleProfileBootstrapStatus,
   summarizeAddBotsResult,
@@ -81,7 +87,6 @@ type DialogState =
   | { type: 'manage'; chat: GroupChat };
 
 type DialogErrorState = { title: string; reason: unknown };
-type FeedGroupOption = { groupId: string; name: string; type: string };
 
 function emptyRoleContext(): RoleProfileContext {
   return {
@@ -164,7 +169,7 @@ function BotCheckboxes(props: {
   );
 }
 
-function AddBotsResult(props: { summary: AddBotsSummary }) {
+function AddBotsResult(props: { summary: AddBotsSummary; bots: GroupBot[] }) {
   const summary = props.summary;
   if (!summary.rows.length) {
     return <p className="hint-warn">没有返回添加结果。</p>;
@@ -175,51 +180,18 @@ function AddBotsResult(props: { summary: AddBotsSummary }) {
       <ul>
         {summary.rows.map((row, index) => {
           const id = String(row?.id ?? '?');
+          const name = botNameById(id, props.bots);
           return (
             <li key={`${id}-${index}`}>
-              <code>{id}</code>: {row?.ok ? 'OK' : `failed (${String(row?.error ?? 'unknown')})`}
+              <span className="g-add-bots-result-main">
+                <strong>{name}</strong>
+                <small>({id})</small>
+              </span>
+              {row?.ok ? ' : OK' : ` : failed (${String(row?.error ?? 'unknown')})`}
             </li>
           );
         })}
       </ul>
-    </div>
-  );
-}
-
-function GroupProfileStatus(props: {
-  chat: GroupChat;
-  context: RoleProfileContext;
-  tr: Translator;
-}) {
-  const { chat, context, tr } = props;
-  if (!context.profiles.length || !context.loaded) return null;
-
-  const rolesByBot = new Map<string, EffectiveRoleValue>();
-  for (const bot of chat.memberBots ?? []) {
-    if (!bot?.inChat) continue;
-    rolesByBot.set(bot.larkAppId, context.groupRoleContentByBot.get(roleKey(bot.larkAppId, chat.chatId)) ?? null);
-  }
-  if (!hasExplicitChatRole(rolesByBot)) return null;
-
-  const matches = summarizeGroupProfileMatches(
-    chat.memberBots ?? [],
-    context.profiles,
-    context.entriesById,
-    rolesByBot,
-  );
-  const best = matches[0];
-  if (!best) {
-    return <div className="g-profile-status muted">{tr('groups.profileStatusUnmatched')}</div>;
-  }
-  const key = best.kind === 'full' ? 'groups.profileStatusFullChat' : 'groups.profileStatusPartial';
-  return (
-    <div className={`g-profile-status ${best.kind}`}>
-      {tr(key, {
-        name: best.profileId,
-        matched: best.matched,
-        total: best.total,
-        chat: best.chatMatched,
-      })}
     </div>
   );
 }
@@ -266,7 +238,7 @@ function GroupBotCoverage(props: { chat: GroupChat; bots: GroupBot[]; tr: Transl
   );
 }
 
-const GroupListRow = memo(function GroupListRow(props: {
+export const GroupListRow = memo(function GroupListRow(props: {
   chat: GroupChat;
   bots: GroupBot[];
   roleContext: RoleProfileContext;
@@ -278,6 +250,16 @@ const GroupListRow = memo(function GroupListRow(props: {
   const { chat, tr } = props;
   const members = chat.memberBots ?? [];
   const inCount = members.filter(member => member.inChat).length;
+  // Grey out "添加 bot" when every roster bot is already in this chat — there is
+  // nothing to add, so opening the dialog would only show an empty picker. Derived
+  // from the snapshot, so it re-enables automatically once membership/roster shifts.
+  const hasAddableBots = chatHasAddableBots(chat, props.bots);
+  // An empty roster is NOT "every bot is already in this chat" — it means no bot is
+  // configured/online right now (the opposite of full coverage), so the disabled
+  // tooltip must distinguish the two instead of claiming every bot is already present.
+  const disabledTitle = props.bots.length === 0
+    ? tr('groups.noBotsOnline')
+    : tr('groups.addBotsAllInChat');
   return (
     <OverviewListItem kind="group" className="groups-list-row" data-chat={chat.chatId}>
       <ChatAvatar chat={chat} />
@@ -297,13 +279,26 @@ const GroupListRow = memo(function GroupListRow(props: {
             ) : null}
           </span>
         </div>
-        <GroupProfileStatus chat={chat} context={props.roleContext} tr={tr} />
+        <GroupProfileStatus
+          className="g-profile-status"
+          memberBots={chat.memberBots ?? []}
+          profiles={props.roleContext.profiles}
+          entriesByProfile={props.roleContext.entriesById}
+          loaded={props.roleContext.loaded}
+          roleOf={larkAppId => props.roleContext.groupRoleContentByBot.get(roleKey(larkAppId, chat.chatId))}
+          tr={tr}
+        />
       </OverviewListMain>
       <span className="groups-row-count">{tr('groups.memberSummary', { count: inCount, total: props.bots.length })}</span>
       <div className="groups-row-lower">
         <GroupBotCoverage chat={chat} bots={props.bots} tr={tr} />
         <OverviewListTail>
-          <CreateActionButton className="add-bots" onClick={() => props.onAddBots(chat)}>{tr('groups.addBots')}</CreateActionButton>
+          <CreateActionButton
+            className="add-bots"
+            onClick={() => props.onAddBots(chat)}
+            disabled={!hasAddableBots}
+            title={hasAddableBots ? undefined : disabledTitle}
+          >{tr('groups.addBots')}</CreateActionButton>
           <button
             className="save-profile"
             type="button"
@@ -333,86 +328,12 @@ function CreateDialog(props: {
   const [copied, setCopied] = useState(false);
   const [selectedBots, setSelectedBots] = useState<Set<string>>(new Set());
   const [roleProfileId, setRoleProfileId] = useState('');
-  const [feedGroups, setFeedGroups] = useState<FeedGroupOption[]>([]);
-  const [feedGroupAppId, setFeedGroupAppId] = useState('');
-  const [feedGroupId, setFeedGroupId] = useState('');
-  const [newFeedGroupName, setNewFeedGroupName] = useState('');
-  const [feedGroupsLoading, setFeedGroupsLoading] = useState(true);
-  const [feedGroupsError, setFeedGroupsError] = useState('');
-  const [feedGroupAuthSubmitting, setFeedGroupAuthSubmitting] = useState(false);
-  const [feedGroupAuthUrl, setFeedGroupAuthUrl] = useState('');
-  const [feedGroupCallbackUrl, setFeedGroupCallbackUrl] = useState('');
-
-  useEffect(() => {
-    let alive = true;
-    void fetch('/api/feed-groups')
-      .then(async response => {
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok || !body.ok) throw new Error(body.message ?? body.error ?? `HTTP ${response.status}`);
-        if (!alive) return;
-        setFeedGroups(Array.isArray(body.groups) ? body.groups : []);
-        setFeedGroupAppId(typeof body.larkAppId === 'string' ? body.larkAppId : '');
-      })
-      .catch(error => { if (alive) setFeedGroupsError(error instanceof Error ? error.message : String(error)); })
-      .finally(() => { if (alive) setFeedGroupsLoading(false); });
-    return () => { alive = false; };
-  }, []);
-
-  useEffect(() => {
-    if (!feedGroupAuthUrl) return;
-    let alive = true;
-    const timer = window.setInterval(() => {
-      void fetch('/api/feed-groups')
-        .then(async response => {
-          const body = await response.json().catch(() => ({}));
-          if (!response.ok || !body.ok || !alive) return;
-          setFeedGroups(Array.isArray(body.groups) ? body.groups : []);
-          setFeedGroupAppId(typeof body.larkAppId === 'string' ? body.larkAppId : '');
-          setFeedGroupsError('');
-          setFeedGroupAuthUrl('');
-          setFeedGroupCallbackUrl('');
-        })
-        .catch(() => { /* remote/manual fallback remains visible */ });
-    }, 1_000);
-    return () => { alive = false; window.clearInterval(timer); };
-  }, [feedGroupAuthUrl]);
-
-  async function openFeedGroupLogin(): Promise<void> {
-    const query = feedGroupAppId ? `?larkAppId=${encodeURIComponent(feedGroupAppId)}` : '';
-    const response = await fetch(`/api/feed-groups/auth-url${query}`);
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok || !body.authUrl) {
-      setError({ title: '无法发起标签授权', reason: body.error ?? `HTTP ${response.status}` });
-      return;
-    }
-    setFeedGroupAuthUrl(String(body.authUrl));
-    setFeedGroupCallbackUrl('');
-  }
-
-  async function completeFeedGroupLogin(callbackUrl: string): Promise<void> {
-    setFeedGroupAuthSubmitting(true);
-    try {
-      const response = await fetch('/api/feed-groups/oauth-callback', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ callbackUrl: callbackUrl.trim() }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || !body.ok) throw new Error(body.message ?? body.error ?? `HTTP ${response.status}`);
-      const groupsResponse = await fetch('/api/feed-groups');
-      const groupsBody = await groupsResponse.json().catch(() => ({}));
-      if (!groupsResponse.ok || !groupsBody.ok) throw new Error(groupsBody.message ?? groupsBody.error ?? `HTTP ${groupsResponse.status}`);
-      setFeedGroups(Array.isArray(groupsBody.groups) ? groupsBody.groups : []);
-      setFeedGroupAppId(typeof groupsBody.larkAppId === 'string' ? groupsBody.larkAppId : '');
-      setFeedGroupsError('');
-      setFeedGroupAuthUrl('');
-      setFeedGroupCallbackUrl('');
-    } catch (error) {
-      setError({ title: '标签授权失败', reason: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setFeedGroupAuthSubmitting(false);
-    }
-  }
+  const feed = useFeedGroups({
+    onAuthError: (kind, reason) => setError({
+      title: kind === 'open' ? '无法发起标签授权' : '标签授权失败',
+      reason,
+    }),
+  });
 
   async function submit(ev: FormEvent<HTMLFormElement>): Promise<void> {
     ev.preventDefault();
@@ -437,9 +358,9 @@ function CreateDialog(props: {
           larkAppIds: ids,
           bindWorkingDir: bindWorkingDir || undefined,
           roleProfileId: roleProfileId || undefined,
-          feedGroupId: feedGroupId || undefined,
-          newFeedGroupName: newFeedGroupName || undefined,
-          feedGroupAppId: (feedGroupId || newFeedGroupName) ? feedGroupAppId : undefined,
+          feedGroupId: feed.selectedId || undefined,
+          newFeedGroupName: feed.newName || undefined,
+          feedGroupAppId: (feed.selectedId || feed.newName) ? feed.appId : undefined,
         }),
       });
       const respBody = await r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` }));
@@ -575,48 +496,22 @@ function CreateDialog(props: {
           </fieldset>
           <fieldset className="g-modal-field g-feed-group-field">
             <legend>飞书标签（可选）</legend>
-            <input type="hidden" name="feedGroupId" value={feedGroupId} />
+            <input type="hidden" name="feedGroupId" value={feed.selectedId} />
             <FeedGroupPicker
-              groups={feedGroups}
-              selectedId={feedGroupId}
-              newName={newFeedGroupName}
-              disabled={feedGroupsLoading || !!feedGroupsError}
-              onChange={(selectedId, newName) => { setFeedGroupId(selectedId); setNewFeedGroupName(newName); }}
+              groups={feed.groups}
+              selectedId={feed.selectedId}
+              newName={feed.newName}
+              disabled={feed.loading || !!feed.error}
+              onChange={feed.select}
             />
             <small>展开后可在第一行输入新标签名称，或选择下方已有标签。</small>
-            {feedGroupsLoading ? <small>正在读取飞书标签…</small> : null}
-            {feedGroupsError ? (
-              <div className="hint-warn-inline">
-                <small>{feedGroupsError}</small>{' '}
-                <button type="button" disabled={feedGroupAuthSubmitting} onClick={() => void openFeedGroupLogin()}>
-                  {feedGroupAuthSubmitting ? '正在完成授权…' : '立即授权'}
-                </button>
-                <small> 授权后会弹窗提示你粘贴回调地址。</small>
-              </div>
-            ) : null}
-            {!feedGroupsLoading && !feedGroupsError && feedGroups.length === 0 ? <small>当前没有标签，可直接创建一个。</small> : null}
+            {feed.loading ? <small>正在读取飞书标签…</small> : null}
+            <FeedGroupAuthPrompt feed={feed} className="hint-warn-inline" />
+            {!feed.loading && !feed.error && feed.groups.length === 0 ? <small>当前没有标签，可直接创建一个。</small> : null}
           </fieldset>
         </div>
 
-        {feedGroupAuthUrl ? (
-          <div className="feed-group-auth-overlay">
-            <section className="feed-group-auth-card" role="dialog" aria-modal="true" aria-labelledby="feed-group-auth-title">
-              <h3 id="feed-group-auth-title">授权飞书标签</h3>
-              <p>点击下面的按钮，在飞书页面确认授权。如果 BotMux 与浏览器在同一台电脑，确认后会自动完成授权。如果 BotMux 运行在远程虚拟机上，浏览器会因无法访问本机地址 <code>127.0.0.1:9768</code> 而显示“无法访问”；此时请复制地址栏中的完整链接并粘贴到下方。</p>
-              <button type="button" className="primary feed-group-auth-open" onClick={() => window.open(feedGroupAuthUrl, '_blank', 'noopener')}>跳转飞书授权</button>
-              <label>
-                <span>请把点击授权后的完整链接粘贴在这里</span>
-                <input type="url" value={feedGroupCallbackUrl} placeholder="http://127.0.0.1:9768/callback?code=…&state=…" onChange={event => setFeedGroupCallbackUrl(event.currentTarget.value)} />
-              </label>
-              <div className="actions">
-                <button type="button" onClick={() => { setFeedGroupAuthUrl(''); setFeedGroupCallbackUrl(''); }}>取消</button>
-                <button type="button" className="primary" disabled={!feedGroupCallbackUrl.trim() || feedGroupAuthSubmitting} onClick={() => void completeFeedGroupLogin(feedGroupCallbackUrl)}>
-                  {feedGroupAuthSubmitting ? '正在完成授权…' : '完成授权'}
-                </button>
-              </div>
-            </section>
-          </div>
-        ) : null}
+        <FeedGroupAuthOverlay feed={feed} titleId="feed-group-auth-title" />
 
         <div className="g-create-status" data-create-status aria-live="polite">{error ? <DialogError {...error} /> : null}</div>
         <div className="actions g-create-actions">
@@ -669,16 +564,24 @@ export function AddBotsDialog(props: {
   bots: GroupBot[];
   tr: Translator;
   onClose(): void;
-  onReloadGroups(options?: { force?: boolean }): Promise<GroupsSnapshot>;
+  onBotsAdded(chatId: string, okIds: string[]): void;
 }) {
   const { chat, tr } = props;
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<DialogErrorState | null>(null);
-  const [summary, setSummary] = useState<{ result: AddBotsSummary; refreshError?: unknown } | null>(null);
+  const [summary, setSummary] = useState<{ result: AddBotsSummary } | null>(null);
   const [selectedBots, setSelectedBots] = useState<Set<string>>(new Set());
+  // Bots added optimistically in this dialog session. Kept locally because the
+  // parent's snapshot converges via a Lark-side-delayed reconciliation poll — the
+  // picker must drop them immediately, not wait for that round-trip.
+  const [locallyAdded, setLocallyAdded] = useState<Set<string>>(new Set());
   const inChatSet = useMemo(
     () => new Set((chat.memberBots ?? []).filter(member => member.inChat).map(member => member.larkAppId)),
     [chat],
+  );
+  const effectiveExclude = useMemo(
+    () => new Set([...inChatSet, ...locallyAdded]),
+    [inChatSet, locallyAdded],
   );
 
   async function submit(ev: FormEvent<HTMLFormElement>): Promise<void> {
@@ -707,12 +610,23 @@ export function AddBotsDialog(props: {
         });
       } else if (respBody.result) {
         const result = summarizeAddBotsResult(respBody.result);
-        try {
-          await props.onReloadGroups({ force: true });
-          setSummary({ result });
-        } catch (err) {
-          setSummary({ result, refreshError: `添加结果已返回，但刷新群组列表失败：${err}` });
+        const followup = planAddBotsFollowup(result, props.bots, effectiveExclude);
+        if (followup.okIds.length > 0) {
+          setSelectedBots(prev => {
+            const next = new Set(prev);
+            for (const id of followup.okIds) next.delete(id);
+            return next;
+          });
+          setLocallyAdded(prev => new Set([...prev, ...followup.okIds]));
+          // Parent optimistically flips inChat + reconciles server-side.
+          props.onBotsAdded(chat.chatId, followup.okIds);
         }
+        if (followup.shouldClose) {
+          toast(tr('groups.addBotsDone', { n: String(followup.okIds.length) }), { kind: 'success' });
+          props.onClose();
+          return;
+        }
+        setSummary({ result });
       } else {
         setError({ title: '响应异常', reason: JSON.stringify(respBody) });
       }
@@ -730,7 +644,7 @@ export function AddBotsDialog(props: {
       <form id="g-addform" onSubmit={ev => void submit(ev)}>
         <BotCheckboxes
           bots={props.bots}
-          excludeIds={inChatSet}
+          excludeIds={effectiveExclude}
           tr={tr}
           selected={selectedBots}
           onToggle={(id, checked) => setSelectedBots(prev => {
@@ -741,12 +655,7 @@ export function AddBotsDialog(props: {
         />
         <div data-add-status aria-live="polite">
           {error ? <DialogError {...error} /> : null}
-          {summary ? (
-            <>
-              <AddBotsResult summary={summary.result} />
-              {summary.refreshError ? <DialogError title="刷新失败" reason={summary.refreshError} /> : null}
-            </>
-          ) : null}
+          {summary ? <AddBotsResult summary={summary.result} bots={props.bots} /> : null}
         </div>
         <div className="actions">
           <button type="button" id="g-cancel" onClick={props.onClose}>{tr('groups.cancel')}</button>
@@ -1748,6 +1657,23 @@ export function ManageDialog(props: {
         />)}
       </fieldset>
 
+      {chat.sessionGroup ? null : <GroupReplyModeSection
+        chat={chat} disabled={!available}
+        onSaved={() => props.onReloadGroups({ force: true })}
+      />}
+
+      <fieldset data-group-idle-close>
+        <legend>{tr('groups.idleClose')}</legend>
+        <p><small>{tr('groups.idleCloseHelp')}</small></p>
+        {inChat.length === 0 ? <p className="empty">没有机器人在群里</p> : inChat.map(member => <GroupIdleCloseRow
+          key={`${chat.chatId}-${member.larkAppId}`}
+          chatId={chat.chatId} appId={member.larkAppId}
+          botName={member.botName ?? member.larkAppId}
+          settings={member.idleClose} disabled={!available}
+          onSaved={() => props.onReloadGroups({ force: true })}
+        />)}
+      </fieldset>
+
       <fieldset>
         <legend>新话题默认模型</legend>
         <p><small>CLI 跟随 Bot 的 Agent 配置；模型和思考强度可单独覆盖，选择继承则沿用 Agent 配置。修改仅影响新话题。</small></p>
@@ -1757,6 +1683,20 @@ export function ManageDialog(props: {
           botName={member.botName ?? member.larkAppId}
           cliId={member.agentCliId} botModel={member.agentModel} botEffort={member.agentReasoningEffort}
           models={member.defaultModels} disabled={!available}
+          onSaved={() => props.onReloadGroups({ force: true })}
+        />)}
+      </fieldset>
+
+      <fieldset data-group-card-mode>
+        <legend>{tr('groups.cardMode')}</legend>
+        <p><small>{tr('groups.cardModeHelp')}</small></p>
+        {inChat.length === 0 ? <p className="empty">没有机器人在群里</p> : inChat.map(member => <GroupCardModeRow
+          key={`${chat.chatId}-${member.larkAppId}`}
+          chatId={chat.chatId} appId={member.larkAppId}
+          botName={member.botName ?? member.larkAppId}
+          chatEnabled={member.streamingCardChatEnabled !== false}
+          masterEnabled={member.streamingCardMasterEnabled !== false}
+          disabled={!available}
           onSaved={() => props.onReloadGroups({ force: true })}
         />)}
       </fieldset>
@@ -1821,6 +1761,7 @@ function DialogHost(props: {
   onClose(): void;
   onCreated(resp: any, selectedIds: string[], name: string): void;
   onReloadGroups(options?: { force?: boolean }): Promise<GroupsSnapshot>;
+  onBotsAdded(chatId: string, okIds: string[]): void;
   onRefreshRoleContext(): Promise<void>;
   setTimer(fn: () => void, ms: number): number;
 }) {
@@ -1860,7 +1801,7 @@ function DialogHost(props: {
         bots={props.snapshot.bots}
         tr={props.tr}
         onClose={props.onClose}
-        onReloadGroups={props.onReloadGroups}
+        onBotsAdded={props.onBotsAdded}
       />
     );
   } else if (props.dialog?.type === 'save-profile') {
@@ -1923,12 +1864,20 @@ function GroupsPage() {
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [page, setPage] = useState(1);
 
-  const setSnapshot = useCallback((next: GroupsSnapshot | ((cur: GroupsSnapshot) => GroupsSnapshot)) => {
-    setSnapshotState(cur => {
-      const resolved = typeof next === 'function' ? next(cur) : next;
-      snapshotRef.current = resolved;
-      return resolved;
-    });
+  // Single source of truth for snapshot writes: update the synchronous `snapshotRef`
+  // BEFORE enqueuing the React state update, and always enqueue an absolute value (never
+  // an updater). This keeps `snapshotRef.current` the immediate truth for every read path
+  // — critical for the add-bots reconciler, whose read→merge→write commits can interleave
+  // with other snapshot writes in one React batch. If the ref were updated *inside* a
+  // deferred state updater (the old shape), a stale updater flushing later could clobber a
+  // committer's already-synced ref, leaving state canonical but ref stale (and the next
+  // reconcile would then recompute from the stale ref). Functional `next` resolves against
+  // the live ref so it also composes correctly within a batch.
+  const setSnapshot = useCallback((next: GroupsSnapshot | ((cur: GroupsSnapshot) => GroupsSnapshot)): GroupsSnapshot => {
+    const resolved = typeof next === 'function' ? next(snapshotRef.current) : next;
+    snapshotRef.current = resolved;
+    setSnapshotState(resolved);
+    return resolved;
   }, []);
 
   const setTimer = useCallback((fn: () => void, ms: number): number => {
@@ -1998,6 +1947,36 @@ function GroupsPage() {
       }
     }
   }, [delay, refreshRoleProfileContext, setSnapshot]);
+
+  // Add-bots reconciliation. Batches on the same chat can overlap (the dialog lets the
+  // user submit batch B while batch A is still catching up Lark-side), so the pure
+  // `createAddBotsReconciler` guards against an older poll committing a server snapshot
+  // that still lacks B and rolling B's optimistic membership back — via a per-chat
+  // generation id plus a per-chat union of pending okIds. Kept in a ref so the guard
+  // state survives re-renders. Commit is scoped to the reconciled chat via
+  // `mergeReconciledChat`: a server snapshot fetched while reconciling chat-X still carries
+  // chat-Y's not-yet-propagated (missing) membership, so replacing the whole snapshot would
+  // roll Y back. `createReconciledChatCommitter` does read→merge→write atomically; it reuses
+  // the shared `setSnapshot` (sync ref-first) for the write so there is exactly ONE snapshot
+  // entry point — a stale updater cannot later clobber the committer's ref, and a second chat
+  // commit in the same React batch reads the first commit's canonical merge (both stay canonical).
+  const reconcilerRef = useRef<ReturnType<typeof createAddBotsReconciler> | null>(null);
+  if (!reconcilerRef.current) {
+    reconcilerRef.current = createAddBotsReconciler({
+      fetchSnapshot: () => fetchGroupsSnapshot({ force: true }),
+      delay: ms => delay(ms),
+      isMounted: () => mountedRef.current,
+      commit: createReconciledChatCommitter({
+        getSnapshot: () => snapshotRef.current,
+        applySnapshot: merged => { setSnapshot(merged); },
+        onCommitted: merged => { void refreshRoleProfileContext(merged); },
+      }),
+    });
+  }
+  const reconcileAddedBots = useCallback(
+    (chatId: string, okIds: string[]) => reconcilerRef.current!.reconcile(chatId, okIds),
+    [],
+  );
 
   useEffect(() => {
     mountedRef.current = true;
@@ -2080,13 +2059,25 @@ function GroupsPage() {
     void refreshUntilSeen(chatId, expectedBotIds).catch(() => { /* tolerate */ });
   }
 
+  // Mirrors handleCreated: the dialog reports which bots were actually added, we flip
+  // their `inChat` optimistically so the outer list updates without waiting for the
+  // Lark-side membership snapshot, then converge to the server truth. Reconciliation
+  // goes through `reconcileAddedBots` (not `refreshUntilSeen`) because overlapping
+  // batches on the same chat must not let an older poll roll a newer batch back.
+  function handleBotsAdded(chatId: string, okIds: string[]): void {
+    if (okIds.length === 0) return;
+    const optimistic = markBotsInChat(snapshotRef.current, chatId, okIds);
+    setSnapshot(optimistic);
+    void refreshRoleProfileContext(optimistic);
+    void reconcileAddedBots(chatId, okIds).catch(() => { /* tolerate */ });
+  }
+
   const openAddBotsDialog = useCallback((chat: GroupChat): void => {
-    const inChatSet = new Set((chat.memberBots ?? []).filter(member => member.inChat).map(member => member.larkAppId));
-    const missing = snapshotRef.current.bots.filter(bot => !inChatSet.has(bot.larkAppId));
-    if (!missing.length) {
-      toast('All configured bots are already in this chat.', { kind: 'warning' });
-      return;
-    }
+    // The "添加 bot" button is disabled when nothing is addable, so this is the
+    // normal open path. Guard defensively against a stale snapshot (button
+    // enabled but roster already full) by silently ignoring — no toast, since the
+    // greyed-out button already communicates "nothing to add".
+    if (!chatHasAddableBots(chat, snapshotRef.current.bots)) return;
     setDialog({ type: 'add-bots', chat });
   }, []);
 
@@ -2232,6 +2223,7 @@ function GroupsPage() {
         onClose={() => setDialog(null)}
         onCreated={handleCreated}
         onReloadGroups={reloadGroups}
+        onBotsAdded={handleBotsAdded}
         onRefreshRoleContext={() => refreshRoleProfileContext()}
         setTimer={setTimer}
       />

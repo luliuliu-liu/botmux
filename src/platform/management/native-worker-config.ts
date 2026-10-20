@@ -43,18 +43,6 @@ function removeMarkedBlock(text:string,begin:string,end:string){
   const from=text.indexOf(begin),to=text.indexOf(end,from);
   return text.slice(0,from)+text.slice(to+end.length).replace(/^\r?\n/,'');
 }
-function removeLegacyPlatformConfiguration(text:string){
-  const lines=text.split(/\r?\n/),out:string[]=[];
-  let skipPlatform=false;
-  for(const line of lines){
-    const table=line.match(/^\s*\[([^\]]+)\]\s*(?:#.*)?$/)?.[1];
-    if(table){skipPlatform=table==='model_providers.platform';if(skipPlatform)continue;}
-    if(skipPlatform)continue;
-    if(/^\s*(?:model_provider\s*=\s*["']platform["']|cli_auth_credentials_store\s*=\s*["']file["']|model\s*=)/.test(line))continue;
-    out.push(line);
-  }
-  return out.join('\n');
-}
 function codexManagedConfiguration(previous:string|null,owned:any,pending:any,file:string,config:NativeConfiguration){
   let base=previous??'';
   const marked=base.includes(CODEX_ROOT_BEGIN)||base.includes(CODEX_PROVIDER_BEGIN);

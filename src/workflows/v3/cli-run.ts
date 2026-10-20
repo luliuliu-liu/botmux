@@ -20,7 +20,7 @@
 
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 import type { V3Dag } from './dag.js';
@@ -352,7 +352,7 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
   const resolveBotEnv = (botId: string | undefined): Record<string, string> | undefined =>
     resolveBotConfig(botId ?? args.botSelector, bots).env;
 
-  const { runNode } = createEphemeralPool({ resolveLarkAppSecret });
+  const { runNode } = createEphemeralPool({ resolveLarkAppSecret, resolveBotEnv: appId => bots.find(bot => bot.larkAppId === appId)?.env });
   const resolveGate = createFileGate({ awaitDecision: makeAwaitDecision(args.autoApproveGates) });
 
   let dag: V3Dag;

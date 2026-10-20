@@ -20,6 +20,7 @@ const renderers:TestRenderer.ReactTestRenderer[]=[];
 let fetcher:ReturnType<typeof vi.fn>,failure=false;
 beforeEach(()=>{vi.useFakeTimers();failure=false;fetcher=vi.fn(async(url:string,init?:any)=>{
   const path=url.replace('/api/platform','');
+  if(path==='/local-agent')return {ok:true,json:async()=>({name:'本地 Control Agent',controlId:'local-gateway',agents:[],bots:[]})};
   if(init?.method==='PUT')return {ok:!failure,status:failure?409:200,json:async()=>failure?{message:'Agent 正在执行任务'}:{container:{...current,modelProfileId:JSON.parse(init.body).modelProfileId,modelId:JSON.parse(init.body).modelId??current.modelId,revision:2,appliedRevision:2}}};
   return {ok:true,json:async()=>path==='/catalog'?{agents:[{id:'pi',name:'Pi',supported:true,version:'0.85.1',images:[{id:'runtime',label:'运行镜像',image:'pi:test'}]}]}:path==='/workspaces'?workspaceOptions:{[path.slice(1)]:data[path.slice(1) as keyof typeof data]}};
 });vi.stubGlobal('fetch',fetcher);});

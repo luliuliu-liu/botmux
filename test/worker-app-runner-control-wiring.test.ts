@@ -40,7 +40,7 @@ describe('worker app-runner control-channel wiring', () => {
     const safeRetryStart = flush.indexOf('const retryQueuedActivation =');
     const retryTransition = flush.indexOf("retryQueuedActivation ? 'retry' : 'cancel'", safeRetryStart);
     const requeue = flush.indexOf('requeueUnsubmittedQueuedActivation(item);', retryTransition);
-    const submittedAck = flush.indexOf("type: 'queued_activation_submitted'", retryTransition);
+    const submittedAck = flush.indexOf('acknowledgeQueuedActivation(item);', requeue);
     expect(safeRetryStart).toBeGreaterThan(writeIdx);
     expect(retryTransition).toBeGreaterThan(safeRetryStart);
     expect(requeue).toBeGreaterThan(retryTransition);
@@ -146,7 +146,7 @@ describe('worker app-runner control-channel wiring', () => {
       workerSource.indexOf('// Riff (and other remote HTTP backends)'),
     );
     expect(firstPromptTimeout).toContain(
-      "if (decideHardTimeoutAction(cliAdapter?.supportsTypeAhead === true) === 'flush')",
+      "if (decideHardTimeoutAction(runtimePtyInputPolicy().supportsTypeAhead) === 'flush')",
     );
     expect(firstPromptTimeout).not.toContain('codexAppRuntimeTypeAheadReady()');
   });
@@ -200,7 +200,7 @@ describe('worker app-runner control-channel wiring', () => {
     const callbackStart = workerSource.lastIndexOf('backend.onExit((code, signal) => {');
     const callbackEnd = workerSource.indexOf('backend.onError(', callbackStart);
     const callback = workerSource.slice(callbackStart, callbackEnd);
-    const fatalIdx = callback.indexOf("lastInitConfig?.cliId === 'codex-app' && codexAppControlFatal");
+    const fatalIdx = callback.indexOf('isCodexAppCliId(lastInitConfig?.cliId) && codexAppControlFatal');
     const fatalReturnIdx = callback.indexOf('return;', fatalIdx);
     const preparedIdx = callback.indexOf('const codexAppPreparedAtExit');
     const failIdx = callback.indexOf('failCodexAppControlGeneration(', preparedIdx);
@@ -340,18 +340,18 @@ describe('worker app-runner control-channel wiring', () => {
     const marker = workerSource.slice(markerStart, markerEnd);
     const suppressIdx = marker.indexOf('final_output suppressed');
     expect(suppressIdx).toBeGreaterThan(-1);
-    // Within the signed suppress block, the observer notification must fire
-    // against the FIFO-attributed turnId (before the final_output IPC).
-    const suppressBlock = marker.slice(suppressIdx, suppressIdx + 900);
-    expect(suppressBlock).toMatch(/notifyExplicitReplyObserved\(\s*turnId/);
-    expect(suppressBlock).toContain('explicitReplyMarkerForTurnWindow(gateInput');
-    // The notify precedes the suppressed final_output forward (suppressDelivery).
-    const notifyIdx = marker.indexOf('notifyExplicitReplyObserved(', suppressIdx);
-    const suppressedFinalIdx = marker.indexOf('suppressDelivery: true', suppressIdx);
+    // The observer notification is computed from exact-turn markers before the
+    // gate decides whether the final itself is suppressed.
+    const notifyIdx = marker.lastIndexOf('notifyExplicitRepliesObserved(', suppressIdx);
+    const notifyBlock = marker.slice(notifyIdx, suppressIdx);
     expect(notifyIdx).toBeGreaterThan(-1);
+    expect(notifyBlock).toMatch(/notifyExplicitRepliesObserved\(\s*turnId/);
+    expect(notifyBlock).toContain('attributableExplicitReplyMarkersForTurnWindow(');
+    // The notify precedes the suppressed final_output forward (suppressDelivery).
+    const suppressedFinalIdx = marker.indexOf('suppressDelivery: true', suppressIdx);
     expect(suppressedFinalIdx).toBeGreaterThan(notifyIdx);
     // Both the signed final and the bridge-fallback paths notify — never just one.
-    expect((workerSource.match(/notifyExplicitReplyObserved\(/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect((workerSource.match(/notifyExplicitRepliesObserved\(/g) ?? []).length).toBeGreaterThanOrEqual(2);
   });
 
   it('passes RAW finalContent (not the pre-stripped deliverable) to the suppress gate', () => {
@@ -379,7 +379,7 @@ describe('worker app-runner control-channel wiring', () => {
 
   it('enables OSC decoding for dsh and routes final frames to the generic path', () => {
     // The worker only decodes runner OSC frames for cliIds in this set.
-    expect(workerSource).toContain("const APP_RUNNER_OSC_CLI_IDS = new Set(['mira', 'mir', 'dsh']);");
+    expect(workerSource).toContain("const APP_RUNNER_OSC_CLI_IDS = new Set(['mira', 'mir', 'dsh', 'minimax']);");
     // dsh finals go through the generic (non-codex-app) settlement path.
     const markerStart = workerSource.indexOf('if (kind === \'final\' && typeof payload.content === \'string\')');
     expect(markerStart).toBeGreaterThan(-1);

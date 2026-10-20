@@ -10,7 +10,7 @@ const protocols:Record<string,string[]>={pi:['openai-completions','openai-respon
 export function LocalControlAgent({models}:{models:Model[]}){
  const [state,setState]=useState<Local|null>(null),[error,setError]=useState(''),[notice,setNotice]=useState(''),[selected,setSelected]=useState<Agent|null>(null),[bot,setBot]=useState<Bot|null>(null),[login,setLogin]=useState<Agent|null>(null);
  const live=useRef(true);
- const refresh=async()=>{try{const value=await platformApi('/local-agent');if(live.current){setState(value);setError('');}}catch(e){if(live.current)setError(e instanceof Error?e.message:String(e));}};
+ const refresh=async()=>{try{const value=await platformApi('/local-agent');if(!Array.isArray(value.agents)||!Array.isArray(value.bots))throw Error('本地 Agent 状态格式无效');if(live.current){setState(value);setError('');}}catch(e){if(live.current)setError(e instanceof Error?e.message:String(e));}};
  useEffect(()=>{live.current=true;void refresh();const timer=setInterval(()=>void refresh(),10000);return()=>{live.current=false;clearInterval(timer);};},[]);
  const done=(message:string)=>{setSelected(null);setBot(null);setNotice(message);void refresh();};
  return <section className="pm-local-control"><div className="pm-bot-list-heading"><h2>本地 Control Agent <Parameter help="固定常驻容器，不提供删除操作。CLI 类型按 Bot 选择；模型和认证按 CLI 全局共享。"> </Parameter></h2><div className="pm-local-cli-actions">{state?.bots.map(item=><button key={item.appId} title={`${item.displayName} · ${names[item.cliId]||item.cliId}`} onClick={()=>setBot(item)}>{state.bots.length>1?`${item.displayName} · `:''}切换 CLI</button>)}</div></div>

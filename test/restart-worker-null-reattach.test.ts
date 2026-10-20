@@ -87,7 +87,7 @@ describe('P1 requestSessionRestart wiring', () => {
     // Live-worker branch still sends the in-worker restart IPC — now also
     // carrying the latest per-bot env AND model (config edits apply on /restart).
     expect(body).toContain(
-      "ds.worker.send({ type: 'restart', attemptId, env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds) }",
+      "ds.worker.send({ type: 'restart', attemptId, ...restartIpcReason(observer.source), ...cwdMove, env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds), larkToolBinding: latestLarkToolBindingForRespawn(ds) }",
     );
 
     // No-worker branch: pane teardown MUST precede forkWorker.
@@ -255,41 +255,51 @@ describe('P2 worker onTaskDone generation fence', () => {
     );
     expect(setup).toBeGreaterThanOrEqual(0);
     expect(handlersStart).toBeGreaterThan(setup);
-    const region = workerSource.slice(setup, setup + 7500);
+    // The merged worker now carries both upstream strict-env/network handlers
+    // and Remote Runner outbound/final/recovered-turn settlement before the shared onExit.
+    // Keep the source contract bounded, but large enough to cover that handler.
+    const region = workerSource.slice(setup, setup + 15_000);
 
     const agentStatus = region.indexOf('.onAgentStatus((status)');
     const taskDone = region.indexOf('backend.onTaskDone?.(()');
-    const turnFinal = region.indexOf('backend.onTurnFinal?.((text)');
+    const turnFinal = region.indexOf('backend.onTurnFinal?.((text, turnId)');
+    const turnRecovered = region.indexOf('backend.onTurnRecovered?.((turn)');
     const onExit = region.indexOf('backend.onExit((code, signal)');
     expect(agentStatus, 'onAgentStatus').toBeGreaterThanOrEqual(0);
     expect(taskDone, 'onTaskDone').toBeGreaterThanOrEqual(0);
     expect(turnFinal, 'onTurnFinal').toBeGreaterThanOrEqual(0);
+    expect(turnRecovered, 'onTurnRecovered').toBeGreaterThanOrEqual(0);
     expect(onExit, 'onExit').toBeGreaterThanOrEqual(0);
 
     for (const [name, start] of [
       ['onAgentStatus', agentStatus],
       ['onTaskDone', taskDone],
       ['onTurnFinal', turnFinal],
+      ['onTurnRecovered', turnRecovered],
       ['onExit', onExit],
     ] as const) {
-      // 900-char window (matches the sibling onTaskDone test above): the merged
-      // onTaskDone body keeps BOTH the fatalWorkerErrorPending guard and the
-      // 8-line generation-fence rationale comment, so the fence sits ~684 chars
-      // in — just past the old 700 window.
-      expect(region.slice(start, start + 900), name)
+      // Keep enough source after each callback anchor to include its rationale
+      // comments and the actual generation fence.
+      expect(region.slice(start, start + 1400), name)
         .toContain('backend !== observedBackend');
     }
   });
 
   it('markPromptReady defers the restart success receipt when no backend is installed', () => {
-    const guard = workerSource.indexOf('if (activeRestartAttemptId) {');
+    const guard = workerSource.indexOf('function settleRestartAttemptOnReady(');
     expect(guard).toBeGreaterThanOrEqual(0);
-    const body = workerSource.slice(guard, guard + 700);
+    const body = workerSource.slice(guard, workerSource.indexOf('\n}\n', guard));
+    expect(body).toContain('if (!activeRestartAttemptId) return;');
     // Success is only reported behind a live-backend check; otherwise the
     // attempt id is preserved for the real replacement / coordinator timeout.
-    const backendCheck = body.indexOf('if (backend) {');
+    // The check lives in the pure decideRestartReceipt (`defer_no_backend`,
+    // unit-tested in restart-followup-policy.test.ts); success is gated on its
+    // `emit` verdict.
+    const backendCheck = body.indexOf('backendInstalled: !!backend');
+    const emitGate = body.indexOf("if (receipt === 'emit') {");
     const succeeded = body.indexOf("status: 'succeeded'");
     expect(backendCheck).toBeGreaterThan(0);
-    expect(succeeded).toBeGreaterThan(backendCheck);
+    expect(emitGate).toBeGreaterThan(backendCheck);
+    expect(succeeded).toBeGreaterThan(emitGate);
   });
 });

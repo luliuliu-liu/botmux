@@ -4,6 +4,12 @@ import { describe, expect, it } from 'vitest';
 const workerSource = readFileSync(new URL('../src/worker.ts', import.meta.url), 'utf8');
 
 describe('TRAE worker structured-bridge wiring', () => {
+  it('uses the TRAE-specific parser and rebinds a moved segment for the same session', () => {
+    expect(workerSource).toContain('traexSessionIdFromRolloutPath(path!)');
+    expect(workerSource).toContain('traexSessionIdFromRolloutPath(codexBridgeRolloutPath)');
+    expect(workerSource).toContain('rollout segment moved for ${cliSessionId}');
+  });
+
   it('gives the RPC app-server the non-secret Lark route required by botmux ask', () => {
     const start = workerSource.indexOf('async function engageCodexRpc');
     const end = workerSource.indexOf('engine = new CodexRpcEngine', start);
@@ -23,11 +29,19 @@ describe('TRAE worker structured-bridge wiring', () => {
     const end = workerSource.indexOf('\n}\n', start);
     const body = workerSource.slice(start, end);
 
-    expect(body).toContain('if (structuredBridgeIsCodex()) return drainCodexRollout(path, offset);');
+    // Dispatch is capability-driven now: the worker asks the adapter's bridgeSpec
+    // for the drainer and commits driver state only for specs that declare it.
+    expect(body).toContain('bridgeSpecFor(lastInitConfig?.cliId)');
+    expect(body).toContain("if (spec.stateCommit === 'drain') structuredBridgeDriverState = result.state;");
     // adoptMode is threaded into the TRAE drainer so it does not synthesise a
     // bare sentinel in adopt mode (where transcript text is posted verbatim).
-    expect(body).toContain('if (structuredBridgeIsTraex())');
-    expect(body).toContain('drainTraexRollout(path, offset, { adoptMode:');
+    expect(body).toContain("adoptMode: lastInitConfig?.adoptMode === true");
+    const traexSource = readFileSync(new URL('../src/adapters/cli/traex.ts', import.meta.url), 'utf8');
+    expect(traexSource).toContain('drainTraexRollout(path, offset, { adoptMode: ctx.adoptMode })');
+    // codex / traex share the rollout shape but NOT the drainer: codex carries state.
+    const codexSource = readFileSync(new URL('../src/adapters/cli/codex.ts', import.meta.url), 'utf8');
+    expect(codexSource).toContain('drainCodexRollout(path, offset, ctx.state as CodexDrainState | undefined)');
+    expect(codexSource).toContain("stateCommit: 'drain'");
   });
 
   it('publishes the latest TRAE runtime on attach and incremental ingest', () => {
@@ -63,7 +77,7 @@ describe('TRAE worker structured-bridge wiring', () => {
     const start = workerSource.indexOf('function codexBridgeNotifyCliSessionId');
     const end = workerSource.indexOf('function maybeFollowGrokSessionRotationViaPid', start);
     const notify = workerSource.slice(start, end);
-    const traexStart = notify.indexOf('if (structuredBridgeIsTraex())');
+    const traexStart = notify.indexOf("if (structuredBridgeIs('traex'))");
     const traexEnd = notify.indexOf('// Grok', traexStart);
     const traex = notify.slice(traexStart, traexEnd);
 
@@ -83,7 +97,7 @@ describe('TRAE worker structured-bridge wiring', () => {
     const start = workerSource.indexOf('function codexBridgeNotifyCliSessionId');
     const end = workerSource.indexOf('function maybeFollowGrokSessionRotationViaPid', start);
     const notify = workerSource.slice(start, end);
-    const traexStart = notify.indexOf('if (structuredBridgeIsTraex())');
+    const traexStart = notify.indexOf("if (structuredBridgeIs('traex'))");
     const traex = notify.slice(traexStart, notify.indexOf('// Grok', traexStart));
 
     expect(traex).toContain('traexHistorySidOwnedByCurrentPid(cliSessionId)');
@@ -113,14 +127,24 @@ describe('TRAE worker structured-bridge wiring', () => {
     expect(body).toContain('traexHistorySidIsOwned(cliSessionId, ownedRollouts)');
   });
 
-  it('wires fresh-managed TRAE cliPid so writeInput can prove submit ownership', () => {
+  it('wires fresh-managed TRAE cliPid without populating the adopt-only fallback', () => {
     // Without this, backend.cliPid is unset for a normal TRAE PTY/tmux session
-    // and the ownership gate can never admit the session id (only adopt mode,
-    // via adoptCliPid, would). Both the sync and async(zellij) wiring sites must
-    // include traex alongside grok.
-    const matches = workerSource.match(/claudeDataDir \|\| cfg\.cliId === 'grok' \|\| cfg\.cliId === 'traex'/g) ?? [];
+    // and writeInput cannot prove the session id belongs to this process. The
+    // separate codexAdoptPendingPid fallback must stay adopt-only: populating it
+    // for a fresh spawn makes the 1s bridge poller run pid-fd discovery before
+    // the first submit. Start before the async launcher resolver so bwrap and
+    // forge-traex leaf-pid rewiring is covered alongside direct/zellij wiring.
+    const start = workerSource.indexOf('const startTraexLauncherPidResolve');
+    const end = workerSource.indexOf('// Bridge fallback:', start);
+    const wiring = workerSource.slice(start, end);
+    // Both wiring sites go through the shared ownership-pid predicate, which names traex.
+    const matches = wiring.match(/cliAdapterBindsOwnershipPid\(cfg\.cliId, claudeDataDir\)/g) ?? [];
     expect(matches.length).toBeGreaterThanOrEqual(2);
-    expect(workerSource.match(/codexAdoptPendingPid = wiredPid;/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(readFileSync(new URL('../src/adapters/cli/ownership-pid.ts', import.meta.url), 'utf8')).toContain("cliId === 'traex'");
+    expect(wiring).toContain('.cliPid = realPid;');
+    expect(wiring).toContain('.cliPid = wiredPid;');
+    expect(wiring).not.toContain('codexAdoptPendingPid = realPid;');
+    expect(wiring).not.toContain('codexAdoptPendingPid = wiredPid;');
   });
 
   it('gates the TRAE INITIAL bridge attach on pid-fd ownership (adopt mode)', () => {
@@ -129,7 +153,7 @@ describe('TRAE worker structured-bridge wiring', () => {
     // keep the poller armed rather than pinning an unverified sid.
     expect(workerSource).toContain('TRAE initial-attach refused for unverified session');
     const idx = workerSource.indexOf('TRAE initial-attach refused');
-    const ctx = workerSource.slice(workerSource.lastIndexOf('if (structuredBridgeIsTraex()', idx), idx + 200);
+    const ctx = workerSource.slice(workerSource.lastIndexOf("if (structuredBridgeIs('traex')", idx), idx + 200);
     expect(ctx).toContain("lastInitConfig?.adoptMode && currentTraexObservedPid()");
     expect(ctx).toContain('traexHistorySidOwnedByCurrentPid(cliSessionId)');
   });
@@ -142,7 +166,7 @@ describe('TRAE worker structured-bridge wiring', () => {
     expect(workerSource).toContain('traexAttachGated');
     const idx = workerSource.indexOf('const codexAttachGated');
     const ctx = workerSource.slice(idx, idx + 700);
-    expect(ctx).toContain("structuredBridgeIsTraex() && lastInitConfig?.adoptMode");
+    expect(ctx).toContain("structuredBridgeIs('traex') && lastInitConfig?.adoptMode");
     expect(ctx).toContain('traexHistorySidOwnedByCurrentPid(sid)');
   });
 
@@ -179,9 +203,20 @@ describe('TRAE worker structured-bridge wiring', () => {
     const end = workerSource.indexOf('\n}\n', start);
     const follower = workerSource.slice(start, end);
 
+    expect(follower).toContain('lastInitConfig?.adoptMode !== true');
+    expect(follower).toContain('TRAEX_BRIDGE_PID_PROBE_INTERVAL_MS');
     expect(follower).toContain('findTraexRolloutByPid(pid, currentSid)');
     expect(follower).toContain('persistCliSessionId(observed.cliSessionId);');
     expect(follower).toContain('codexBridgeNotifyCliSessionId(observed.cliSessionId);');
+  });
+
+  it('keeps fresh late-attach session-id based and reserves pid fallback for adopt', () => {
+    const timerStart = workerSource.indexOf('function codexBridgeStartTimer');
+    const timerEnd = workerSource.indexOf('function hermesBridgeAttach', timerStart);
+    const timer = workerSource.slice(timerStart, timerEnd);
+
+    expect(timer).toContain('pid: lastInitConfig?.adoptMode ? codexAdoptPendingPid : undefined');
+    expect(timer).not.toContain('\n          pid: codexAdoptPendingPid,');
   });
 
   it('does not silently swallow completed TRAE turns whose final text is empty', () => {

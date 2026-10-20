@@ -26,6 +26,16 @@ describe('bot defaults focused layout', () => {
     expect(page).toContain('<RuntimeEnvironmentSection');
   });
 
+  it('keeps session-group lifecycle settings inside the existing session configuration', () => {
+    const panel = page.slice(page.indexOf('id="bd-panel-sessions"'), page.indexOf('id="bd-panel-security"'));
+    expect(panel).toContain('<SessionModeSection');
+    const mode = page.slice(page.indexOf('function SessionModeSection'), page.indexOf('type CommandTriggerCheck'));
+    expect(mode).toContain("p2p === 'group'");
+    expect(mode).toContain('<SessionGroupTagRow');
+    expect(mode).toContain('data-session-group-lifecycle');
+    expect(page.match(/<SessionGroupTagRow /g)).toHaveLength(1);
+  });
+
   it('lays task tiles out as a two-column waterfall so short tiles do not strand a gap', () => {
     // A row-major grid locks each row to its tallest tile, leaving dead space
     // under a short tile next to a tall one. BdTabGrid measures every tile and
@@ -49,14 +59,14 @@ describe('bot defaults focused layout', () => {
     // sliding it up and clips #bd-filters. Desktop therefore uses the same
     // fill-height shell as roles-page: main does not scroll, both columns
     // stretch, the list and the detail pane are the scrollports.
-    const desktop = cssRuleBody(css, 'main:has(.bot-defaults-page)');
+    const desktop = cssRuleBody(css, 'main:has(.page.bot-defaults-page)');
     expect(desktop).toMatch(/overflow:\s*hidden;/);
-    expect(cssRuleBody(css, 'main:has(.bot-defaults-page) .bot-defaults-page')).toMatch(/grid-template-rows:\s*auto minmax\(0,\s*1fr\);/);
-    expect(cssRuleBody(css, 'main:has(.bot-defaults-page) .bd-layout')).toMatch(/align-items:\s*stretch;/);
-    const shellRoster = cssRuleBody(css, 'main:has(.bot-defaults-page) .bd-roster');
+    expect(cssRuleBody(css, 'main:has(.page.bot-defaults-page) .page.bot-defaults-page')).toMatch(/grid-template-rows:\s*auto minmax\(0,\s*1fr\);/);
+    expect(cssRuleBody(css, 'main:has(.page.bot-defaults-page) .bd-layout')).toMatch(/align-items:\s*stretch;/);
+    const shellRoster = cssRuleBody(css, 'main:has(.page.bot-defaults-page) .bd-roster');
     expect(shellRoster).toMatch(/position:\s*static;/);
     expect(shellRoster).toMatch(/height:\s*100%;/);
-    expect(cssRuleBody(css, 'main:has(.bot-defaults-page) .bd-detail')).toMatch(/overflow-y:\s*auto;/);
+    expect(cssRuleBody(css, 'main:has(.page.bot-defaults-page) .bd-detail')).toMatch(/overflow-y:\s*auto;/);
 
     const roster = cssRuleBody(css, '.bot-defaults-page .bd-roster');
     expect(roster).toMatch(/grid-template-rows:\s*auto auto minmax\(0,\s*1fr\);/);

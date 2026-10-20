@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 
+import { procStatStartTime } from './proc-stat.js';
+
 const LINUX_BOOT_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -45,15 +47,10 @@ export function readProcessStartIdentity(pid: number): string | undefined {
   // A containerized supervisor commonly runs as PID 1. Keep rejecting an
   // arbitrary external PID 1 (the host init process), but allow the current
   // process to attest itself when it is the container entrypoint.
-  if (!Number.isInteger(pid) || pid <= 0 || (pid === 1 && pid !== process.pid)) return undefined;
+  if (!Number.isSafeInteger(pid) || pid <= 0 || (pid === 1 && pid !== process.pid)) return undefined;
   if (process.platform === 'linux') {
     try {
-      const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
-      const closeParen = raw.lastIndexOf(')');
-      if (closeParen >= 0) {
-        const fields = raw.slice(closeParen + 2).trim().split(/\s+/);
-        if (fields[19]) return fields[19];
-      }
+      return procStatStartTime(readFileSync(`/proc/${pid}/stat`, 'utf8'));
     } catch {
       // Disappeared or unreadable: never fall through to ambient ps.
     }

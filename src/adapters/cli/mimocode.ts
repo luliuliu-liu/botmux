@@ -22,9 +22,8 @@ export function createMiMoCodeAdapter(pathOverride?: string) {
     dbPath: mimocodeDbPath,
     skillsDir: `${mimocodeConfigPath()}/skills`,
     hookConfigPath: `${mimocodeConfigPath()}/plugin/botmux-ask.js`,
+    modelListArgs: ['models'],
     startupArgs: ['--trust'],
     modelChoices: CLI_MODEL_CHOICES['mimocode'],
   });
 }
-
-export const create = createMiMoCodeAdapter;

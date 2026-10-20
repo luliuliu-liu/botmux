@@ -12,7 +12,7 @@
  *  修复 — daemon 发 restart IPC 时捎带 daemon 侧最新 bots.json `env`
  *  （latestPerBotEnvForRestart，三分态：对象=最新 / null=已清空 / undefined=
  *  取不到保持旧行为）；worker 在 respawn 前全量覆盖 lastInitConfig.env，
- *  spawnCli 的 sanitizePerBotEnv(cfg.env) 每次 spawn 都重跑即生效。
+ *  spawnCli 的 botInjectedEnv(cfg.env, cfg.envPolicy) 每次 spawn 都重跑即生效。
  *
  *  覆盖：
  *  1. latestPerBotEnvForRestart 纯函数三分态（最新 / 清空 / 取不到兜底）。
@@ -214,18 +214,18 @@ describe('requestSessionRestart live-worker branch carries env (behavioral)', ()
 describe('every daemon-side restart IPC producer carries env (source wiring)', () => {
   it('worker-pool.ts: every {type:restart} send includes env', () => {
     const sends = workerPoolSource.match(/ds\.worker\.send\(\{ type: 'restart'[^}]*\}/g) ?? [];
-    expect(sends.length).toBeGreaterThanOrEqual(2); // requestSessionRestart + auto-restart
+    // requestSessionRestart 是唯一发送方（#1863）：CLI 崩溃自动重启 / dashboard 重启 /
+    // cwd-move 都经它走，自然捎带 env。
+    expect(sends.length).toBe(1);
     for (const s of sends) {
       expect(s, `missing env in: ${s}`).toContain('env: latestPerBotEnvForRestart(ds)');
     }
   });
 
-  it('dashboard-ipc-server.ts: every {type:restart} send includes env', () => {
+  it('dashboard-ipc-server.ts: sends no restart IPC itself — delegates to requestSessionRestart', () => {
     const sends = dashboardIpcSource.match(/ds\.worker\.send\(\{ type: 'restart'[^}]*\}/g) ?? [];
-    expect(sends.length).toBe(2); // dashboard restart 按钮 + cwd-move
-    for (const s of sends) {
-      expect(s, `missing env in: ${s}`).toContain('env: latestPerBotEnvForRestart(ds)');
-    }
+    expect(sends.length).toBe(0); // dashboard restart 按钮 + cwd-move 均改走 requestSessionRestart
+    expect(dashboardIpcSource.match(/requestSessionRestart\(ds,/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
   });
 
   it('the restart message type declares the three-state env field', () => {
@@ -263,7 +263,7 @@ describe('worker restart case merges env into lastInitConfig (source pin)', () =
   });
 
   it('spawnCli re-derives the inject set from cfg.env on every spawn (no cached copy)', () => {
-    const spawnCfg = workerSource.indexOf('const perBotInjectEnv = sanitizePerBotEnv(cfg.env);');
+    const spawnCfg = workerSource.indexOf('const perBotInjectEnv = botInjectedEnv(cfg.env, cfg.envPolicy);');
     expect(spawnCfg).toBeGreaterThanOrEqual(0);
   });
 });

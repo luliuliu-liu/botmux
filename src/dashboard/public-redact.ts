@@ -159,6 +159,7 @@ export function redactSchedulesForPublic(schedules: unknown[]): unknown[] {
 }
 
 const PRIVATE_SESSION_FIELDS = new Set([
+  'workspace',
   'gitBranch',
   'riffAccessUrl',
   // Concrete distribution identity is operator configuration, not anonymous
@@ -322,6 +323,7 @@ export function redactSessionEventForPublic(type: string, body: unknown): unknow
 export function redactSettingsForPublic(settings: unknown): unknown {
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return settings;
   const source = settings as Record<string, unknown>;
-  const { codexNotifier: _privateNotifier, hostOverloadAlert: _privateOverload, ...publicSettings } = source;
+  // httpProxy may embed `user:pass@` credentials.
+  const { codexNotifier: _privateNotifier, hostOverloadAlert: _privateOverload, httpProxy: _privateProxy, ...publicSettings } = source;
   return publicSettings;
 }
