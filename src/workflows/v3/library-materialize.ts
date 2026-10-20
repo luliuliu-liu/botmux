@@ -31,7 +31,7 @@ import {
   parseFrozenBotSnapshots,
   serializeFrozenBotSnapshots,
 } from './bot-resolve.js';
-import { readJournal } from './journal.js';
+import { readJournal,journalExists } from './journal.js';
 import { materialize } from './state.js';
 import { validateSpec } from './spec.js';
 import { mintV3RunId, type RunChatBinding } from './grill-state.js';
@@ -227,7 +227,7 @@ export function compileSavedWorkflowFromRun(
     allowedSources: ['ad_hoc', 'saved_definition', 'legacy_v3'],
   });
   const journalPath = join(runDir, 'journal.ndjson');
-  if (!existsSync(journalPath)) throw new Error('cannot save workflow: source run has not started');
+  if (!journalExists(journalPath)) throw new Error('cannot save workflow: source run has not started');
   const status = materialize(readJournal(journalPath)).runStatus;
   if (status !== 'succeeded' && status !== 'failed' && status !== 'blocked') {
     throw new Error(`cannot save workflow: source run is not terminal (status=${status})`);

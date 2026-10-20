@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {containerGlobalAgentMode,containerAgentGlobalConfiguration} from './platform/management/container-agent-policy.js';
 import { captureCodexNativeProcesses, waitForCodexNativeRelease } from './core/codex-native-release.js';
 import { freezeCodexCleanupLaunch } from './core/codex-cleanup-launch.js';
 import { networkPolicySupportError, networkProxyError } from './core/sandbox-network-policy.js';
@@ -341,6 +342,7 @@ import {
 } from './utils/render-dimensions.js';
 import { bridgeSpecFor, createCliAdapterSync, locateOnPath, resolveCommandReal } from './adapters/cli/registry.js';
 import { cliAdapterBindsOwnershipPid } from './adapters/cli/ownership-pid.js';
+import { classifyPiWorkflowFailure } from './workflows/v3/pi-workflow-errors.js';
 import { resolveCodexUpgradeCommand } from './services/codex-upgrade-target.js';
 import {
   CodexSessionUpgradeMonitor, hasCodexAutonomousGoal, isCodexProcess, isRestartableCodexHelper,
@@ -10025,6 +10027,7 @@ const CRASH_DIAGNOSTIC_RAW_MAX = 200_000; // enough scrollback for the web termi
 const CRASH_LOG_TAIL_MAX = 2_500; // bounded Feishu text payload
 let workflowTranscript = '';
 let workflowFinalOutputSent = false;
+let workflowFatalErrorSent = false;
 /** Tracks whether the CLI is currently in the alt screen buffer. Updated by
  *  scanning PTY output for DECSET 1049/47/1047 toggles. Used when trimming
  *  scrollback at cap so replay always starts with the correct buffer mode —
@@ -10859,6 +10862,18 @@ function captureWorkflowTranscript(data: string): void {
   workflowTranscript += data;
   if (workflowTranscript.length > WORKFLOW_TRANSCRIPT_MAX) {
     workflowTranscript = workflowTranscript.slice(-WORKFLOW_TRANSCRIPT_MAX);
+  }
+  // Pi displays provider/API failures in the terminal and then returns to an
+  // idle prompt.  A workflow worker must surface that as a terminal failure;
+  // otherwise the v3 pool waits until the generous hard deadline and looks
+  // like Architect is hung.  This is scoped to Pi + workflow workers only.
+  if (!workflowFatalErrorSent && lastInitConfig?.cliId === 'pi') {
+    const message = classifyPiWorkflowFailure(workflowTranscript);
+    if (message) {
+      workflowFatalErrorSent = true;
+      send({ type: 'error', message });
+      log('Workflow Pi provider failure reported to parent worker');
+    }
   }
 }
 
@@ -17677,7 +17692,7 @@ async function spawnCli(
   // sandbox itself still applies). Decided EARLY so every JSONL/bridge/resume
   // path below already targets the right dir. wrapperCli strips spawn args, so
   // the redirect (and its env) can't be guaranteed there → not redirected.
-  const legacyHomePolicy = !cfg.cliInstanceBinding || cfg.cliInstanceBinding.source === 'legacy';
+  const legacyHomePolicy = !containerGlobalAgentMode() && (!cfg.cliInstanceBinding || cfg.cliInstanceBinding.source === 'legacy');
   const isolatedCodexHomeRequested = legacyHomePolicy && cfg.cliId === 'codex' && cfg.codexAuthSync === 'isolated';
   // scratch deliberately reads the CLI's NATIVE ~/.claude/~/.codex (zero-config
   // is the mode's point); the oncall BOT_HOME redirect does not apply there.
@@ -25006,7 +25021,7 @@ function log(msg: string): void {
 // ─── IPC Message Handler ─────────────────────────────────────────────────────
 
 process.on('message', async (raw: unknown) => {
-  const msg = raw as DaemonToWorker;
+  const msg = containerAgentGlobalConfiguration(raw as DaemonToWorker);
 
   switch (msg.type) {
     case 'plugin_result_delivery_result': {
@@ -25055,6 +25070,7 @@ process.on('message', async (raw: unknown) => {
         }
       }
       lastInitConfig = msg;
+      workflowFatalErrorSent = false;
       if (isCodexAppCliId(msg.cliId) && msg.noProgressNotify?.timeoutMs !== undefined) {
         // Per-bot liveness window override (#1162). The value is normalized at
         // the registry layer, so retimeout's positive-finite guard is purely
@@ -25517,6 +25533,9 @@ process.on('message', async (raw: unknown) => {
       if (msg.larkToolBinding !== undefined && lastInitConfig) {
         lastInitConfig.larkToolBinding = msg.larkToolBinding === null ? false : msg.larkToolBinding;
       }
+      if(lastInitConfig){
+        lastInitConfig=containerAgentGlobalConfiguration(lastInitConfig);
+      }
       // NOTE: the mojo credential snapshot is deliberately NOT applied here. It
       // rides on the queue item and is applied when THIS turn is actually written
       // to the backend (see flushPending) — applying at receive time made two
@@ -25838,6 +25857,9 @@ process.on('message', async (raw: unknown) => {
       }
       if (msg.larkToolBinding !== undefined && lastInitConfig) {
         lastInitConfig.larkToolBinding = msg.larkToolBinding === null ? false : msg.larkToolBinding;
+      }
+      if(lastInitConfig){
+        lastInitConfig=containerAgentGlobalConfiguration(lastInitConfig);
       }
       // restart 合并：已有一轮 restart 在飞（teardown 进行中，或 tmux jitter
       // 定时器未触发）时不叠加第二轮——叠加会 clearTimeout 吃掉首轮 teardown、

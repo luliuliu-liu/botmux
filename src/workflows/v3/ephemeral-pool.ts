@@ -263,6 +263,7 @@ async function runNodeImpl(
     cliPathOverride: req.botSnapshot.cliPathOverride,
     wrapperCli: req.botSnapshot.wrapperCli,
     model: req.botSnapshot.model,
+    codexAuthSync: req.botSnapshot.codexAuthSync,
     envPolicy: req.botSnapshot.envPolicy,
     env: deps.resolveBotEnv ? deps.resolveBotEnv(req.botSnapshot.larkAppId)
       : (() => { try { return getBot(req.botSnapshot.larkAppId).config.env; } catch { return undefined; } })(),
@@ -275,6 +276,7 @@ async function runNodeImpl(
     backendType: v3WorkerBackendType(),
     prompt: '',
     resume: false,
+    ...(req.workerEnv ? { env: req.workerEnv } : {}),
     larkAppId: req.botSnapshot.larkAppId,
     larkAppSecret: secret,
     botName: req.node.bot,
@@ -513,6 +515,19 @@ async function runNodeImpl(
 }
 
 export function buildGoalCommand(req: RunNodeRequest): string {
+  const env = GOAL_ENV;
+  // Pi does not implement Botmux's `/goal` slash command.  Keep the same
+  // file-backed contract, but send a normal user turn with concrete paths so
+  // Pi can read the generated goal file and write the declared products.
+  if (req.botSnapshot.cliId === 'pi' || req.botSnapshot.cliId === 'zcode' || req.botSnapshot.cliId === 'dsh') {
+    const goalPath = req.env[env.GOAL_PATH];
+    const outputDir = req.env[env.OUTPUT_DIR];
+    const manifestPath = req.env[env.MANIFEST_PATH];
+    if (!goalPath || !outputDir || !manifestPath) {
+      throw new Error('v3 pi goal prompt requires goal, output, and manifest paths');
+    }
+    return `Read ${goalPath}. Write files in ${outputDir} and manifest at ${manifestPath}; manifest paths are relative to output dir. Complete it.`;
+  }
   return `${GOAL_COMMAND} ${GOAL_COMMAND_OBJECTIVE}`;
 }
 

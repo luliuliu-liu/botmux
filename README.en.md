@@ -81,6 +81,8 @@ More: [Roles & teams](https://deepcoldy.github.io/botmux/en/roles) · [File sand
 
 ## Supported CLIs & Agents
 
+Platform Workers also support `zcode`: a TUI-only build using a Z.AI Coding Plan API Key and native `/model` selection. The adapter lives in `src/platform/management/zcode-tui-adapter.ts`; Botmux session UUIDs are not passed as native ZCode resume IDs.
+
 Switch with `cliId` in `bots.json`. **20+ adapters**, spanning local CLIs (process-isolated, reachable via `tmux attach`) and API / cloud agents (e.g. Mira, riff — reached over API / remote, not a local process; mojo is API-driven but executes tools on the bot host by default, set cloud: true for the remote sandbox). Representative ones:
 
 `claude-code` · `codex` · `gemini` · `cursor` · `opencode` · `opencode2` · `mimocode` · `antigravity` · `copilot` · `grok` · `kimi` · `kiro-cli` · `reasonix` · `dsh` · `aiden` · `coco` (TRAE) · `hermes` · `ebsd` · `mira` · `riff` (cloud agent) … · `mojo` (API-driven, host execution by default) · `remote-runner` ([generic remote runner protocol](docs/remote-runner.md)) · `minimax` ([MiniMax Code / mcode](docs/minimax-code.md), with file/shell tools, native skills and exact session resume; sign in via `mcode login` / `mcode login --region global`, isolate accounts with `MINIMAX_DATA_DIR`) …

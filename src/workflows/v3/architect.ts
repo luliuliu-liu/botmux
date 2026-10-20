@@ -32,6 +32,8 @@ export interface RunArchitectInput {
   specPath: string;
   specJsonPath: string;
   botSnapshot: BotSnapshot;
+  /** Live per-bot CLI env; kept in memory and never written to the run. */
+  workerEnv?: Record<string, string>;
   timeoutMs?: number;
   cancelSignal?: AbortSignal;
   /**
@@ -80,6 +82,11 @@ export function buildArchitectGoal(specPath: string, specJsonPath: string): stri
     '- Write the manifest only to `$BOTMUX_GOAL_MANIFEST_PATH`. Every `files[].path` in the manifest is relative to `$BOTMUX_GOAL_OUTPUT_DIR`, not relative to the manifest directory.',
     '- Do not start or run the workflow. Do not call botmux v3 run.',
     '- The host will validate dag.json with botmux v3 DAG validation and ask the human to review it.',
+    '',
+    'Execution budget (hard):',
+    '- Use at most 12 tool calls total. Read spec.json first, read spec.md only if context is missing, then write the two output files and the manifest.',
+    '- Do not repeatedly grep, head, tail, or re-read files to self-validate; the host performs schema validation after you finish.',
+    '- If a write command fails, fix it once and continue. After dag.json, architect-notes.md, and the manifest are valid and present, stop immediately with a short summary.',
     '',
     'dag.json requirements:',
     '- Use the v3 DAG schema: { "schemaVersion": 2, runId, nodes: [ goal | host | loop ] }.',
@@ -176,6 +183,7 @@ export async function runArchitect(input: RunArchitectInput): Promise<RunArchite
       humanGate: null,
     },
     botSnapshot: input.botSnapshot,
+    ...(input.workerEnv ? { workerEnv: input.workerEnv } : {}),
     runDir: input.runDir,
     attemptDir,
     inputsPath,

@@ -55,6 +55,8 @@ describe('buildArchitectGoal', () => {
     expect(goal).toMatch(/relative to.*BOTMUX_GOAL_OUTPUT_DIR/i);
     expect(goal).toContain('Do not start or run the workflow');
     expect(goal).toContain('The host will validate dag.json');
+    expect(goal).toContain('Use at most 12 tool calls total');
+    expect(goal).toContain('Do not repeatedly grep, head, tail, or re-read files');
   });
 
   it('teaches edge activation: conditional edges, judge enum, triggerRule, sink coverage', () => {

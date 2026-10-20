@@ -294,6 +294,8 @@ export interface ArchitectDeps {
   /** Throws on an invalid dag (dag.ts loadDag). */
   loadDag: (path: string) => unknown;
   botSnapshot: BotSnapshot;
+  /** Live per-bot CLI env; never persisted with the run. */
+  workerEnv?: Record<string, string>;
   resolveLarkAppSecret: (larkAppId: string) => string | undefined | Promise<string | undefined>;
   timeoutMs?: number;
   cancelSignal?: AbortSignal;
@@ -338,6 +340,7 @@ export async function hostArchitect(runDir: string, deps: ArchitectDeps, now: Da
         specPath: cur.specPath,
         specJsonPath: cur.specJsonPath,
         botSnapshot: deps.botSnapshot,
+        workerEnv: deps.workerEnv,
         resolveLarkAppSecret: deps.resolveLarkAppSecret,
         timeoutMs: deps.timeoutMs,
         cancelSignal: deps.cancelSignal,
@@ -721,13 +724,12 @@ export function isHostSub(sub: string): boolean {
   return ['new', 'spec-finalize', 'approve-spec', 'revise-spec', 'architect', 'revise-dag', 'approve-dag'].includes(sub);
 }
 
-/** Resolve real bot/secret deps and run the architect step. */
-export function resolveArchitectBotSnapshot(
+/** Resolve the exact bot config used by the Architect worker. */
+export function resolveArchitectBotConfig(
   runDir: string,
   bots: BotConfig[],
   explicitSelector?: string,
-  workingDirOverride?: string,
-): BotSnapshot {
+): BotConfig {
   if (bots.length === 0) throw new Error('没有可用 bot 配置（bots.json 为空）');
   const state = mustRead(runDir);
   const selector = explicitSelector ?? state.chatBinding?.larkAppId;
@@ -741,6 +743,16 @@ export function resolveArchitectBotSnapshot(
       `没有同时满足 bypass + v3 CLI allowlist 的 bot（supported: ${V3_SUPPORTED_CLIS.join(', ')}）`,
     );
   }
+  return bot;
+}
+
+export function resolveArchitectBotSnapshot(
+  runDir: string,
+  bots: BotConfig[],
+  explicitSelector?: string,
+  workingDirOverride?: string,
+): BotSnapshot {
+  const bot = resolveArchitectBotConfig(runDir, bots, explicitSelector);
   const snapshot = botToSnapshot(bot, workingDirOverride);
   if (!isV3SupportedCli(snapshot.cliId)) {
     throw new Error(
@@ -757,10 +769,12 @@ async function runArchitectCli(runId: string, baseDir: string, rest: string[]): 
   // The authoritative constructor rejects disableCliBypass=true: architect and
   // goal workers both require CLI bypass permissions by product contract.
   const runDir = runDirFor(runId, baseDir);
+  const selector = argValue(rest, '--bot');
+  const bot = resolveArchitectBotConfig(runDir, bots, selector);
   const botSnapshot = resolveArchitectBotSnapshot(
     runDir,
     bots,
-    argValue(rest, '--bot'),
+    selector,
     argValue(rest, '--working-dir'),
   );
 
@@ -768,6 +782,7 @@ async function runArchitectCli(runId: string, baseDir: string, rest: string[]): 
     runArchitect: realRunArchitect,
     loadDag,
     botSnapshot,
+    workerEnv: bot.env,
     resolveLarkAppSecret: (id: string) => secretById.get(id),
   });
 }

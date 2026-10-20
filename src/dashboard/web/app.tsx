@@ -106,6 +106,7 @@ type PluginDashboardNavEntry = {
 };
 
 const MANAGE_ROUTES = [
+  'platform-bots', 'platform-models', 'platform-agents', 'opensandbox',
   'roles',
   'role-profiles',
   'bot-defaults',
@@ -124,6 +125,9 @@ const MANAGE_ROUTES = [
 ];
 
 const NAV_ITEMS: NavItem[] = [
+  { id: 'platform-bots', href: '#/platform-bots', label: 'Bot 管理', manage: true, icon: <><rect x="2" y="4" width="12" height="9" rx="2"/><path d="M8 1v3M5 8h1M10 8h1"/></> },
+  { id: 'platform-models', href: '#/platform-models', label: '模型管理', manage: true, icon: <><rect x="2" y="2" width="12" height="12" rx="2"/><path d="m4 6 2 2-2 2M8 10h3"/></> },
+  { id: 'platform-agents', href: '#/platform-agents', label: 'Agent 管理', manage: true, icon: <><path d="m8 1 6 3v8l-6 3-6-3V4zm0 6v8M2 4l6 3 6-3"/></> },
   {
     id: 'overview',
     href: '#/',
@@ -212,7 +216,7 @@ const NAV_GROUPS: Array<{ id: string; labelKey: string; items: string[] }> = [
   { id: 'collab', labelKey: 'nav.group.collab', items: ['sessions', 'agent-workbench', 'groups', 'schedules', 'workflows'] },
   { id: 'workforce', labelKey: 'nav.group.workforce', items: ['roles', 'skills', 'customization', 'message-listeners', 'doc-watches', 'bot-defaults', 'agents'] },
   { id: 'analytics', labelKey: 'nav.group.analytics', items: ['monitoring', 'insights', 'feedback'] },
-  { id: 'manage', labelKey: 'nav.group.manage', items: ['terminal', 'connectors', 'team', 'plugins', 'whiteboards', 'settings'] },
+  { id: 'manage', labelKey: 'nav.group.manage', items: ['platform-bots', 'platform-models', 'platform-agents', 'terminal', 'connectors', 'team', 'plugins', 'whiteboards', 'settings'] },
 ];
 
 let pinnedPluginNavItems: NavItem[] = [];
@@ -269,7 +273,7 @@ function sidebarNavItems(): NavItem[] {
     if (clientShell && item.id === 'workflows') return false;
     // 网页终端在 Desktop/Mobile 客户端壳里归原生会话面管（见 dashboardShellAllowsWebTerminal）。
     if (item.id === 'terminal') return !clientShell && ui.hostTerminal;
-    return true;
+    return ui.platformManaged || !['platform-bots','platform-models','platform-agents','opensandbox'].includes(item.id);
   });
   if (pinnedPluginNavItems.length === 0) return builtInItems;
   const pluginIndex = builtInItems.findIndex(item => item.id === 'plugins');
@@ -1610,6 +1614,11 @@ async function loadWorkbenchCapabilities(): Promise<void> {
 }
 
 async function loadAuthState(): Promise<void> {
+  const platformProbe = origFetch('/api/platform/capabilities').then(async response => {
+    const capabilities=response.ok?await response.json():{};
+    ui.platformManaged = capabilities.enabled === true;
+    ui.platformWorker = capabilities.worker === true;
+  }).catch(() => { ui.platformManaged = false;ui.platformWorker=false; });
   // 能力探测与 /api/settings 并行：两者互不依赖，也都在首次 route() 之前完成。
   const capabilitiesProbe = loadWorkbenchCapabilities();
   try {
@@ -1646,6 +1655,7 @@ async function loadAuthState(): Promise<void> {
     }
   } catch { /* keep defaults */ }
   await capabilitiesProbe;
+  await platformProbe;
 }
 
 async function loadPinnedPluginNavItems(): Promise<void> {

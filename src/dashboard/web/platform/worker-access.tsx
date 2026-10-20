@@ -1,0 +1,47 @@
+import {useEffect,useRef,useState} from 'react';
+import {Modal,platformApi,type Container} from './management-page.js';
+import {Parameter,CompactText} from './compact-controls.js';
+
+export function NetworkRules({container,onClose}:{container:Container;onClose:()=>void}){
+ const [value,setValue]=useState(''),[saved,setSaved]=useState<any>(),[busy,setBusy]=useState(false),[error,setError]=useState(''),[confirmed,setConfirmed]=useState(false);
+ const mounted=useRef(true),path=`/containers/${container.containerId}/network`;
+ const load=async(refresh=false)=>{setBusy(true);setError('');try{const result=await platformApi(path+(refresh?'/refresh':''),refresh?'POST':'GET',refresh?{}:undefined);if(mounted.current){setSaved(result);setValue(JSON.stringify(result.configuration,null,2));}}catch(e){if(mounted.current)setError(String(e instanceof Error?e.message:e));}finally{if(mounted.current)setBusy(false);}};
+ useEffect(()=>{void load();return()=>{mounted.current=false;};},[]);
+ const apply=async()=>{setBusy(true);setError('');try{
+  const configuration=JSON.parse(value);const next=await platformApi(path,'PUT',{revision:saved.revision,configuration});setSaved(next);
+  setSaved(await platformApi(`${path}/apply`,'POST',{revision:next.revision,confirmDisruption:confirmed}));
+ }catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}};
+ return <Modal title={`出口规则 · ${container.displayName}`} onClose={onClose} busy={busy}><p className="hint">Claude Code 默认启用出口规则；Pi / Codex 新建时默认直连。旧实例仍可在此管理已存在的规则，不重建容器。defaultAction: allow 且 egress: [] 表示取消出口限制。此 JSON 不接受代理密码、VPN 密钥或 OAuth Token。</p>
+  {saved?<><p role="status">目标版本 {saved.revision} / 已应用 {saved.appliedRevision} · {saved.inSync?'已读回确认':'待应用 / 实际规则有差异'}</p><label><Parameter help="schemaVersion 固定为 1。defaultAction 为 deny 时按域名配置规则；allow 加空 egress 表示不限制出口。保留模型、飞书、登录及刷新所需域名。">规则 JSON</Parameter><textarea className="pm-json-editor" aria-label="出口规则 JSON" rows={17} spellCheck={false} value={value} onChange={e=>setValue(e.target.value)} disabled={busy}/></label>
+  <details><summary>容器实际规则（上次读回）</summary><pre className="pm-json-readback">{JSON.stringify(saved.observed,null,2)}</pre></details><label className="pm-check"><input type="checkbox" checked={confirmed} onChange={e=>setConfirmed(e.target.checked)} disabled={busy}/><span>确认规则变更可能阻止模型、飞书和 OAuth 刷新请求；已建立的连接不保证立即断开。仅在 Agent 空闲时应用。</span></label>{saved.lastError?<p className="hint-warn">{saved.lastError}</p>:null}</>:null}
+  {error?<p role="alert" className="hint-warn">{error}</p>:null}<footer><button disabled={busy} onClick={onClose}>关闭</button><button disabled={busy} onClick={()=>void load(true)}>刷新实际规则</button><button className="primary" disabled={busy||!saved||!confirmed} onClick={()=>void apply()}>{busy?'处理中…':'保存并应用'}</button></footer>
+ </Modal>;
+}
+type Profile={profileId:string;displayName:string;storageKind:string;storageSource:string};
+type Login={loginId:string;containerId:string;profileId:string;state:string;workerState:string;expiresAt:string;lastError?:string;userCode?:string;credentialPresent?:boolean};
+const states:Record<string,string>={starting:'启动中',waiting:'等待浏览器授权',succeeded:'原生 CLI 登录成功',failed:'登录未完成',cancelled:'已取消',closing:'关闭待确认',interrupted:'登录进程中断'};
+export function LoginWorkbench({container,containers,onClose}:{container:Container|null;containers:Container[];onClose:()=>void}){
+ const [profiles,setProfiles]=useState<Profile[]>([]),[logins,setLogins]=useState<Login[]>([]),[profileId,setProfileId]=useState(''),[target,setTarget]=useState(container?.containerId||''),[busy,setBusy]=useState(false),[error,setError]=useState('');
+ const [newProfile,setNewProfile]=useState(false),[kind,setKind]=useState('volume'),[source,setSource]=useState(''),[name,setName]=useState('');
+ const refreshing=useRef(false),mounted=useRef(true);
+ const refresh=async()=>{if(refreshing.current)return;refreshing.current=true;try{
+  const [p,l]=await Promise.all([platformApi('/browser-profiles'),platformApi('/logins')]);
+  if(mounted.current){setProfiles(p.profiles);setLogins(previous=>l.logins.map((r:Login)=>({...previous.find(s=>s.loginId===r.loginId),...r})));}
+  for(const login of l.logins.filter((r:Login)=>r.state==='waiting')){
+   try{const status=await platformApi(`/logins/${login.loginId}`,'POST',{});if(mounted.current)setLogins(rows=>rows.map(row=>row.loginId===status.loginId?status:row));}catch{/* A user can retry status or close after transport errors. */}
+  }
+ }catch(e){if(mounted.current)setError(e instanceof Error?e.message:String(e));}finally{refreshing.current=false;}};
+ useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>{mounted.current=false;clearInterval(timer);};},[]);
+ const mutate=async(fn:()=>Promise<void>)=>{if(busy)return;setBusy(true);setError('');try{await fn();await refresh();}catch(e){setError(e instanceof Error?e.message:String(e));await refresh();}finally{setBusy(false);}};
+ const open=async(login:Login)=>{const popup=window.open('about:blank','_blank');try{const result=await platformApi(`/logins/${login.loginId}/dashboard`,'POST',{});if(popup){popup.opener=null;popup.location.replace(result.url);}else throw Error('请允许弹窗后重试');}catch(e){popup?.close();setError(e instanceof Error?e.message:String(e));}};
+ return <Modal title="登录工作台" onClose={onClose} busy={busy}><p className="hint">Worker 内原生 CLI 发起登录，浏览器仅辅助授权。OAuth 凭据只保留在目标 Worker，原生 CLI 自行刷新，不会复制到其他 Worker。登录期间暂停该 Worker 的机器人；浏览器 Google / SSO Cookie 则单独持久化。</p>
+  <label>目标 Agent<select value={target} onChange={e=>setTarget(e.target.value)} disabled={busy}><option value="">请选择 OAuth Agent</option>{containers.filter(c=>['codex','claude-code'].includes(c.agentType)).map(c=><option key={c.containerId} value={c.containerId}>{c.displayName} · {c.agentType}</option>)}</select></label>
+  <label><Parameter help="同一个配置同时只允许一个登录工作台使用。关闭工作台保留配置与 Cookie，下次可复用 Google / 企业 SSO 登录状态；不启用浏览器密码自动保存。">浏览器配置</Parameter><select value={profileId} onChange={e=>setProfileId(e.target.value)} disabled={busy}><option value="">选择持久化浏览器配置</option>{profiles.map(p=><option key={p.profileId} value={p.profileId}>{p.displayName} · {p.storageKind}</option>)}</select></label>
+  <button type="button" disabled={busy} onClick={()=>setNewProfile(!newProfile)}>{newProfile?'收起新建配置':'新建浏览器配置'}</button>
+  {newProfile?<fieldset className="pm-profile-fields"><legend>独立私有浏览器存储</legend><label>名称<input value={name} maxLength={64} onChange={e=>setName(e.target.value)}/></label><label>存储<select value={kind} onChange={e=>setKind(e.target.value)}><option value="volume">新建专用 volume</option><option value="hostpath">专用 hostPath</option></select></label>{kind==='hostpath'?<label>Docker 宿主机绝对路径<input value={source} onChange={e=>setSource(e.target.value)}/><span className="hint-warn">请使用独立目录，不能使用 Agent state、工作区或共享目录；此目录含账号 Cookie。</span></label>:null}<button disabled={busy||!name.trim()||kind==='hostpath'&&!source.startsWith('/')} onClick={()=>void mutate(async()=>{const before=new Set(profiles.map(p=>p.profileId));const result=await platformApi('/browser-profiles','POST',{displayName:name,storageKind:kind,storageSource:source,confirmSensitiveStorage:kind==='hostpath'});setProfiles(result.profiles);setProfileId(result.profiles.find((p:Profile)=>!before.has(p.profileId))?.profileId||'');setNewProfile(false);setName('');})}>保存浏览器配置</button></fieldset>:null}
+  <p className="hint">浏览器按需创建，15 分钟后自动关闭；关闭此弹窗不会关闭运行中的工作台，请使用下方“关闭工作台”。VPN / HTTP 代理由部署配置 LOGIN_WORKBENCH_PROXY 指定，不向 Worker 注入 VPN 密钥。</p>
+  <div className="pm-login-list">{logins.map(login=><article key={login.loginId}><div><strong>{containers.find(c=>c.containerId===login.containerId)?.displayName||'Agent'}</strong><span className="pm-state">{states[login.state]||login.state}</span></div><small>{profiles.find(p=>p.profileId===login.profileId)?.displayName} · 截止 {new Date(login.expiresAt).toLocaleTimeString()}</small>{login.userCode?<p>在浏览器输入设备码：<code>{login.userCode}</code></p>:null}{login.credentialPresent!==undefined?<small>Worker 凭据文件：{login.credentialPresent?'已存在（不等同于模型调用验证）':'尚未确认'}</small>:null}{login.lastError?<p className="hint-warn">{login.lastError}</p>:null}<div className="pm-actions"><button disabled={busy||login.state==='starting'} onClick={()=>void open(login)}>打开浏览器</button><button disabled={busy} onClick={()=>void mutate(async()=>{const s=await platformApi(`/logins/${login.loginId}`,'POST',{});setLogins(rows=>rows.map(r=>r.loginId===s.loginId?s:r));})}>刷新登录状态</button><button disabled={busy} onClick={()=>void mutate(async()=>{await platformApi(`/logins/${login.loginId}`,'DELETE',{});})}>关闭工作台 · 保留数据</button></div></article>)}</div>
+  <details><summary>浏览器存储详情</summary>{profiles.map(p=><p key={p.profileId}>{p.displayName}<small><CompactText text={`${p.storageKind} · ${p.storageSource}`}/></small></p>)}</details>
+  {error?<p className="hint-warn" role="alert">{error}</p>:null}<footer><button disabled={busy} onClick={onClose}>返回</button><button disabled={busy} onClick={()=>void refresh()}>刷新</button><button className="primary" disabled={busy||!target||!profileId||logins.some(l=>l.containerId===target||l.profileId===profileId)} onClick={()=>void mutate(async()=>{const worker=containers.find(c=>c.containerId===target);const result=await platformApi(`/containers/${target}/login`,'POST',{revision:worker?.revision,profileId});setLogins(rows=>[result,...rows]);})}>{busy?'处理中…':'Worker 发起登录'}</button></footer>
+ </Modal>;
+}

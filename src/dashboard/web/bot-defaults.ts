@@ -114,6 +114,7 @@ export type BotDefaultsRow = {
   /** Whether the scratch mode is available on this platform (Linux only). */
   scratchSupported?: boolean;
   codexAuthSync?: 'shared' | 'isolated';
+  containerAgentGlobalMode?: boolean;
   /** Trigger-user CLI auth: null / absent = off (the historical behavior, where
    *  CLI calls use whatever identity is logged in on the machine).
    *  gitHost / gitTokenExchangeUrl have no editor in the UI — they round-trip

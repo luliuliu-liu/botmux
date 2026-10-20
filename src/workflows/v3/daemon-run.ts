@@ -74,6 +74,7 @@ import {
 } from './human-gate.js';
 import {
   readJournal,
+  journalExists,
   appendEvent,
   withJournalMutationSync,
   type StoredEvent,
@@ -839,7 +840,7 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
   // — duplicate "done/failed" messages. Capture now, short-circuit after runWorkflow.
   const journalPath = join(runDir, 'journal.ndjson');
   const wasAlreadyTerminal =
-    existsSync(journalPath) &&
+    journalExists(journalPath) &&
     ['succeeded', 'failed', 'cancelled'].includes(materialize(readJournal(journalPath)).runStatus);
 
   const bots = (deps.loadBots ?? loadBotConfigs)();
@@ -865,6 +866,10 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
   });
 
   const resolveBotSnapshot = (botId: string | undefined) => botToSnapshot(resolveBotConfig(botId, bots));
+  // Provider credentials are live spawn inputs, not part of the frozen
+  // BotSnapshot/run envelope. Resolve them by the same selector only when a
+  // worker is about to launch; the ephemeral pool keeps them in memory.
+  const resolveBotEnv = (botId: string | undefined) => resolveBotConfig(botId, bots).env;
 
   const runNode = (deps.makeRunNode ?? defaultMakeRunNode)(resolveLarkAppSecret);
   const dag = context.dag;
@@ -876,6 +881,7 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
     runNode,
     validateManifest,
     resolveBotSnapshot,
+    resolveBotEnv,
     hostExecutors: createDefaultHostExecutorRegistry(imWriteOptions, replyWriteOptions),
     hostReconcilers: createDefaultProviderReconcilers(imWriteOptions, replyWriteOptions),
   };
@@ -974,7 +980,7 @@ export function resolveV3GateClick(
 ): V3GateClickOutcome {
   const runDir = safeRunDir(baseDir, runId);
   const journalPath = join(runDir, 'journal.ndjson');
-  if (!existsSync(journalPath)) return { kind: 'stale-run', reason: 'missing' };
+  if (!journalExists(journalPath)) return { kind: 'stale-run', reason: 'missing' };
   assertV3RunIntegrityForMutation(runDir);
   const snap = materialize(readJournal(journalPath));
   if (snap.runStatus !== 'running') return { kind: 'stale-run', reason: 'terminal' };
@@ -1153,7 +1159,7 @@ export function requestV3Retry(
 ): V3RetryOutcome {
   const runDir = safeRunDir(baseDir, runId);
   const journalPath = join(runDir, 'journal.ndjson');
-  if (!existsSync(journalPath)) return { kind: 'stale-run', reason: 'missing' };
+  if (!journalExists(journalPath)) return { kind: 'stale-run', reason: 'missing' };
   assertV3RunIntegrityForMutation(runDir);
 
   const events = readJournal(journalPath);
@@ -1286,7 +1292,7 @@ export function requestRevisitGrant(
 ): V3RevisitGrantOutcome {
   const runDir = safeRunDir(baseDir, runId);
   const journalPath = join(runDir, 'journal.ndjson');
-  if (!existsSync(journalPath)) return { kind: 'stale-run', reason: 'missing' };
+  if (!journalExists(journalPath)) return { kind: 'stale-run', reason: 'missing' };
   assertV3RunIntegrityForMutation(runDir);
 
   // Reject a half-filled pair before touching state (never widen to run grant).
@@ -1358,7 +1364,7 @@ export function requestV3LoopGrant(
 ): V3LoopGrantOutcome {
   const runDir = safeRunDir(baseDir, runId);
   const journalPath = join(runDir, 'journal.ndjson');
-  if (!existsSync(journalPath)) return { kind: 'stale-run', reason: 'missing' };
+  if (!journalExists(journalPath)) return { kind: 'stale-run', reason: 'missing' };
   assertV3RunIntegrityForMutation(runDir);
 
   const events = readJournal(journalPath);
@@ -1624,7 +1630,7 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
 function currentRunStatus(baseDir: string, runId: string): ReturnType<typeof materialize>['runStatus'] | undefined {
   try {
     const journalPath = join(safeRunDir(baseDir, runId), 'journal.ndjson');
-    if (!existsSync(journalPath)) return undefined;
+    if (!journalExists(journalPath)) return undefined;
     return materialize(readJournal(journalPath)).runStatus;
   } catch {
     // The actual drive path reports integrity/journal errors. This helper is
@@ -1655,7 +1661,7 @@ export function reconcileV3PendingGates(baseDir: string = defaultBaseDir(), owne
     try {
       if (!statSync(runDir).isDirectory()) continue;
       const journalPath = join(runDir, 'journal.ndjson');
-      if (!existsSync(journalPath)) continue;
+      if (!journalExists(journalPath)) continue;
       // Recovery may recreate a missing wait or heal a resolved wait by
       // appending gateResolved. Apply the same authorization boundary as live
       // clicks before cold-attach can mutate or repost anything for this run.

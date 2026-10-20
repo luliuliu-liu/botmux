@@ -30,6 +30,7 @@ import {
 import { dirname } from 'node:path';
 import { fsyncDirectorySyncPortable } from '../../utils/fs-durability.js';
 import { withFileLockSync } from '../../utils/file-lock.js';
+import {resolveJournalBackend} from './journal-backend.js';
 import type { JournalMutation, StoredEvent, V3Event } from './event-contract.js';
 export type {
   GoalAsk,
@@ -146,6 +147,8 @@ export function withJournalMutationSync<T>(
   journalPath: string,
   fn: (mutation: JournalMutation) => T,
 ): T {
+  const backend=resolveJournalBackend(journalPath,'mutation');
+  if(backend)return backend.withMutationSync(fn);
   const dir = dirname(journalPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   return withFileLockSync(journalPath, () => {
@@ -213,7 +216,14 @@ export function appendEventDurable(journalPath: string, event: V3Event): StoredE
  * looking pending forever), so fail loud instead (codex hardening #11).
  * Returns `[]` if the file does not exist yet (a run that never started).
  */
+export function journalExists(journalPath:string):boolean{
+  const backend=resolveJournalBackend(journalPath,'read');
+  return backend?backend.read().length>0:existsSync(journalPath);
+}
+
 export function readJournal(journalPath: string): StoredEvent[] {
+  const backend=resolveJournalBackend(journalPath,'read');
+  if(backend)return backend.read();
   if (!existsSync(journalPath)) return [];
   return parseJournalText(readFileSync(journalPath, 'utf-8'), journalPath, true);
 }

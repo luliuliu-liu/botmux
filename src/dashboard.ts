@@ -125,6 +125,11 @@ import { resolveLiveBotTransport } from './services/team-roster.js';
 import { handleFederationSpokeApi, syncAllMemberships, autoBindOwnerIfUnambiguous, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
 import type { TeamGroupCreateResult, TeamGroupOwnerTransferResult } from './dashboard/federated-group-core.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
+import { createPlatformDashboardApi,platformRequest,platformWorkerImage } from './platform/management/dashboard-api.js';
+import {createNativeWorkerProxyIdentity,nativeWorkerTerminalLink} from './platform/management/native-worker-proxy-auth.js';
+import {createControlBrowserBoundary} from './platform/management/control-browser-boundary.js';
+import { createWorkerDashboardProxy } from './platform/management/worker-dashboard-proxy.js';
+import { PlatformLocalInventory } from './platform/management/local-inventory-sync.js';
 import { FeishuLoginManager } from './dashboard/feishu-login.js';
 import {
   createDashboardH5AuthController,
@@ -1838,6 +1843,52 @@ const botOnboarding = new BotOnboardingManager({
     mutation: async () => mutation(),
   }),
 });
+
+const workerDashboardProxy=createWorkerDashboardProxy({
+  domain:process.env.BOTMUX_WORKER_DASHBOARD_DOMAIN||'localhost',issuer:()=>currentDashboardToken()||'',
+  resolve:async id=>{
+    let response=await platformRequest(`/containers/${id}/dashboard-route`);
+    if(response.status!==200)response=await platformRequest(`/logins/${id}/dashboard-route`);
+    if(response.status!==200)throw new Error('worker_unavailable');
+    const base=process.env.CONTROL_PLANE_URL!,key=process.env.CONTROL_PLANE_SYNC_KEY!;
+    return {url:`${base.replace(/\/$/,'')}/internal/v1/worker-dashboard/${id}`,headers:{'x-api-key':key}};
+  },
+});
+const platformDashboardApi = createPlatformDashboardApi({
+  openWorkerDashboard:(id,req)=>workerDashboardProxy.link(id,req.headers.host||'127.0.0.1:7891',process.env.BOTMUX_WORKER_DASHBOARD_SCHEME==='https'),
+  botsJsonPath: BOTS_JSON_PATH,
+  localOnboarding: botOnboarding,
+  stopLocalBot:spawnStopBotLive,
+  startLocalBot:spawnStartBotLive,
+  localAgentBusy:async ids=>{
+    for(const id of ids){
+      if(!registry.getByAppId(id))return true;
+      const response=await proxyToDaemon(id,'/api/sessions',{method:'GET'});
+      if(!response.ok)return true;
+      const body=await response.json() as any;
+      const sessions=Array.isArray(body)?body:body.sessions;
+      if(!Array.isArray(sessions)||sessions.some((s:any)=>!['idle','closed','dormant','waiting'].includes(s.status)))return true;
+    }
+    return false;
+  },
+  changeLocalCli:async(appId,cli)=>{
+    const response=await proxyToDaemon(appId,'/api/bot-agent',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({cliId:cli,model:''})});
+    return {status:response.status,data:await response.json()};
+  },
+  isLocalBotStopped:async appId=>{
+    const {readFleetStatus}=await import('./core/fleet-runtime.js');
+    const status=readFleetStatus();
+    return status.supervisorAlive&&status.rows.filter(row=>row.appId===appId).every(row=>!row.alive&&['stopped','errored'].includes(row.status));
+  },
+  listLocalBots: () => {
+    const online=new Map(registry.list().map(bot=>[bot.larkAppId,bot.botName]));
+    const persisted=readPersistedBotNames();
+    return loadBotConfigs().map(bot=>({...bot,displayName:bot.displayName||online.get(bot.larkAppId)||persisted.get(bot.larkAppId)||bot.name}));
+  },
+});
+const platformLocalInventory = new PlatformLocalInventory(() => loadBotConfigs());
+platformLocalInventory.start();
+process.once('exit', () => platformLocalInventory.stop());
 
 async function reloadLocaleOnAllDaemons(): Promise<void> {
   await Promise.all(registry.list().map(d =>
@@ -3935,9 +3986,14 @@ const companionApi = (() => {
   }
 })();
 
+const nativeWorkerProxyIdentity=createNativeWorkerProxyIdentity(currentDashboardToken);
+const controlBrowserBoundary=createControlBrowserBoundary();
 const server = createServer(async (req, res) => {
   try {
+    nativeWorkerProxyIdentity(req);
+    if(workerDashboardProxy.matches(req)){await workerDashboardProxy.http(req,res);return;}
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    if(controlBrowserBoundary(req,res,url.pathname))return;
 
     // Loopback self-identification (no auth): echoes this process's nonce so the
     // post-bind shadow check (listen-with-probe verifyBound) can distinguish our
@@ -4268,6 +4324,12 @@ const server = createServer(async (req, res) => {
       trustedProxyHops: dashboardH5AuthConfig.trustedProxyHops,
     })) {
       return;
+    }
+
+    if (await platformDashboardApi(req, res, url, authed)) return;
+    if(platformWorkerImage()&&((req.method==='POST'&&url.pathname==='/api/bot-onboarding/start')||
+      (req.method==='PUT'&&/^\/api\/bots\/[^/]+\/agent$/.test(url.pathname)))){
+      return jsonRes(res,403,{error:'control_agent_managed',message:'机器人创建、Agent 类型和模型由 Control Agent 统一管理'});
     }
 
     if (url.pathname === '/api/workflows' || url.pathname.startsWith('/api/workflows/')) {
@@ -6261,8 +6323,10 @@ const server = createServer(async (req, res) => {
       const owner = aggregator.ownerOf(sid);
       if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_session' });
       const upstream = await proxyToDaemon(owner, `/api/sessions/${sid}/write-link`, { method: 'GET' });
+      const body = await upstream.json() as {url?:unknown};
+      body.url = nativeWorkerTerminalLink(req, sid, body.url);
       res.writeHead(upstream.status, { 'content-type': 'application/json' });
-      res.end(await upstream.text());
+      res.end(JSON.stringify(body));
       return;
     }
 
@@ -7877,7 +7941,9 @@ oauthCallbackServer.listen(9768, '127.0.0.1', () => {
 // terminal-proxy.ts bridges to the worker. Non-`/s/*` upgrades are dropped (the
 // dashboard SPA uses SSE, not WebSocket).
 server.on('upgrade', (req: IncomingMessage, clientSocket: Duplex, head: Buffer) => {
+  nativeWorkerProxyIdentity(req);
   try {
+    if(workerDashboardProxy.matches(req)){void workerDashboardProxy.upgrade(req,clientSocket,head);return;}
     const rawUrl = req.url ?? '/';
     // Preview 的 WS 必须第一个判：沙箱化之后它来自不透明来源（`Origin: null`），
     // 凭据是路径里的 content capability，绝不能被下面的管理类 Origin 校验误杀。

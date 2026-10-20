@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './platform/workflow/install.js';
 import { assertMessageTopicAvailable, assertSendTopicsAvailable, createTopicMessageLookupCache, TopicSendError, type TopicMessageLookup } from './cli/topic-send-guard.js';
 import { privateReplyEnabled, sendPrivateReply } from './core/private-reply.js';
 /**
@@ -18184,6 +18185,47 @@ switch (command) {
   case 'serve':   await cmdServe(process.argv.slice(3)); break;
   case 'start-bot': await cmdStartBot(process.argv.slice(3)); break;
   case 'stop-bot': await cmdStopBot(process.argv.slice(3)); break;
+  case '__platform-goal': {
+    if(readFileSync('/etc/botmux-platform-role','utf8').trim()!=='worker')throw new Error('native_worker_image_required');
+    const {executeWorkerCommand}=await import('./platform/workflow/worker-command.js');
+    const controller=new AbortController();
+    process.on('SIGTERM',()=>controller.abort('worker_command_cancelled'));
+    process.on('SIGINT',()=>controller.abort('worker_command_cancelled'));
+    const result=await executeWorkerCommand(JSON.parse(readFileSync(0,'utf8')),controller.signal,
+      session=>{if(process.send)process.send({type:'session',session});});
+    console.log(JSON.stringify(result));
+    break;
+  }
+  case '__platform-worker': {
+    // Private image-local bridge. It has no HTTP listener and never accepts
+    // a global platform token. Only native Worker images expose this action.
+    if(readFileSync('/etc/botmux-platform-role','utf8').trim()!=='worker')throw new Error('native_worker_image_required');
+    const input=JSON.parse(readFileSync(0,'utf8'));
+    const {readFleetStatus,startBotViaSupervisor}=await import('./core/fleet-runtime.js');
+    const busy=async()=>{
+      const token=readFileSync(join(homedir(),'.botmux','.dashboard-token'),'utf8').trim();
+      const response=await fetch(`http://127.0.0.1:${process.env.BOTMUX_DASHBOARD_PORT||7891}/api/sessions`,{
+        headers:{cookie:`botmux_dashboard_token=${token}`},signal:AbortSignal.timeout(5000)});
+      if(!response.ok)throw new Error('native_sessions_unavailable');
+      const result=await response.json() as {sessions:Array<{status:string}>};
+      return result.sessions.some(session=>!['idle','closed','dormant','waiting'].includes(session.status));
+    };
+    if(input.action==='inspect')console.log(JSON.stringify({...readFleetStatus(),busy:await busy()}));
+    else if(input.action==='login-pause'||input.action==='login-resume'){
+      const {nativeWorkerLogin}=await import('./platform/management/native-worker-login.js');
+      console.log(JSON.stringify(await nativeWorkerLogin(input,{home:homedir(),busy,fleet:()=>readFleetStatus(),
+        stop:appId=>ensureBotDaemonStopped(appId,{quiet:true}),
+        start:async appId=>startBotViaSupervisor(appId,()=>randomUUID(),()=>new Date().toISOString())})));
+    }
+    else if(input.action==='apply'){
+      const {createNativeWorkerConfigurator}=await import('./platform/management/native-worker-config.js');
+      const apply=createNativeWorkerConfigurator({home:homedir(),fleet:()=>readFleetStatus(),busy,
+        stop:appId=>ensureBotDaemonStopped(appId,{quiet:true}),
+        start:async appId=>startBotViaSupervisor(appId,()=>randomUUID(),()=>new Date().toISOString())});
+      console.log(JSON.stringify(await apply(input.config)));
+    }else throw new Error('unknown_native_worker_action');
+    break;
+  }
   case 'stop':    await cmdStop(); break;
   case 'restart': await cmdRestart(); break;
   case 'logs':    await cmdLogs(); break;

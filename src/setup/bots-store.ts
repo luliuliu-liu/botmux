@@ -12,12 +12,18 @@ import { assertChangedBotConfigInvariants } from '../services/bot-config-invaria
 import { assertDurableConfigMutationAllowed } from '../services/durable-config-mutation.js';
 
 export function writeBotsJsonAtomic(botsJsonPath: string, bots: any[]): void {
+  mutateBotsJsonAtomic(botsJsonPath,()=>bots);
+}
+
+/** Update against the locked current generation, preserving unrelated edits. */
+export function mutateBotsJsonAtomic(botsJsonPath:string,update:(current:any[])=>any[]):void {
   assertDurableConfigMutationAllowed('bots');
   // PM2 start surfaces hold this same generation lock from snapshot through
   // post-start verification/rollback, so the ecosystem and its expected names
   // can never be built from different bots.json generations.
   withFileLockSync(botsJsonPath, () => {
     const previous = existsSync(botsJsonPath) ? JSON.parse(readFileSync(botsJsonPath, 'utf8')) as any[] : [];
+    const bots=update(previous);
     assertCodexInstanceConfigWrite(previous, bots);
     assertChangedBotConfigInvariants(previous, bots);
     // Clone/onboarding callers pass the exact generation they intend to save.

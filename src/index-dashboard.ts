@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './platform/workflow/install.js';
 // Dedicated entry point for the `botmux-dashboard` process. The fleet supervisor
 // spawns it as a supervised member (resolveDashboardSpec → the 'dashboard'
 // entry; under the Bun single binary via the `__dashboard` self-spawn token).

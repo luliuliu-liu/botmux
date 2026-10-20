@@ -1,0 +1,10 @@
+export const agentEnvironmentKeys:Record<string,string[]>;
+export function containerAgentDirectories(home:string):{codex:string;'claude-code':string;pi:string;zcode:string;dsh:string};
+export function containerAgentEnvironmentFile(home:string):string;
+export function nativeConfigurationPublicDigest(config:any):string;
+export function readContainerAgentEnvironment(home:string,agent:string):Record<string,string>|null;
+export function readContainerAgentModel(home:string,agent:string):string|null;
+export function writeContainerAgentConfiguration(home:string,agent:string,value:{env:Record<string,string>;model:string|null}):void;
+export function repairContainerAgentEnvironmentLock(home:string):boolean;
+export function writeContainerAgentEnvironment(home:string,agent:string,env:Record<string,string>):void;
+export function adoptLegacyContainerAgentHome(home:string,agent:string,botIds:string[],options?:{archiveUnauthenticated?:boolean}):{adopted:boolean;archive?:string};

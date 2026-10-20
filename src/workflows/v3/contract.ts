@@ -142,14 +142,14 @@ export type { GoalAnswer, GoalAsk } from './event-contract.js';
 // ─── Supported CLIs ─────────────────────────────────────────────────────────
 
 /**
- * v3 goal-mode is delivered via the native `/goal` command.  Keep this list
+ * v3 goal-mode is delivered through a CLI-specific goal prompt. Keep this list
  * capability-based and explicit. Claude Code, Codex, Seed, and Traex have
  * direct `/goal` execution evidence (Traex 0.200.16+ also needs its automation
  * hook-trust flag). Relay is admitted from its exact Claude-family adapter and
- * slash-command compatibility with Seed; a Relay-binary smoke remains pending
- * on hosts where that binary is installed. The manifest watcher and goal env
- * contract are CLI-neutral after dispatch. The runtime rejects a run whose
- * nodes resolve to any other CLI at start time.
+ * slash-command compatibility with Seed. Pi is supported through the generic
+ * file-backed goal prompt because Pi does not expose a native `/goal` command.
+ * The manifest watcher and goal env contract are CLI-neutral after dispatch.
+ * The runtime rejects a run whose nodes resolve to any other CLI at start time.
  */
 export const V3_SUPPORTED_CLIS: readonly CliId[] = [
   'claude-code',
@@ -157,6 +157,9 @@ export const V3_SUPPORTED_CLIS: readonly CliId[] = [
   'seed',
   'traex',
   'relay',
+  'pi',
+  'zcode',
+  'dsh',
 ];
 
 export function isV3SupportedCli(cliId: CliId): boolean {
@@ -184,6 +187,9 @@ export interface BotSnapshot {
   larkAppId: string;
   cliId: CliId;
   cliPathOverride?: string;
+  /** Native Codex data/auth ownership policy. Kept separate from arbitrary
+   * per-bot env because CODEX_HOME is intentionally a reserved key. */
+  codexAuthSync?: import('../../services/codex-auth-sync.js').CodexAuthSyncMode;
   /** Frozen configured launch prefix.  Workflow workers must use
    *  the same gateway/runtime selection as ordinary bot sessions. */
   wrapperCli?: string;
@@ -237,6 +243,12 @@ export interface RunNodeRequest {
   outputDir: string;
   /** Already includes the GOAL_ENV keys; pool merges into the worker env. */
   env: Record<string, string>;
+  /**
+   * Live per-bot CLI environment from bots.json (for example a model API key).
+   * This is an in-memory spawn input only: it must never be persisted in the
+   * run envelope, bot snapshot, journal, or attempt files.
+   */
+  workerEnv?: Record<string, string>;
   /** The run's authenticated chat binding (recorded by the daemon at run
    *  birth).  The pool threads it into the worker init so the CLI child sees
    *  the standard BOTMUX_* identity env (real chatId / ownerOpenId / …)

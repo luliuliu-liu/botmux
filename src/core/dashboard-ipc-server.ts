@@ -14,6 +14,9 @@ import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
+import {containerGlobalAgentMode,splitContainerAgentEnvironment} from '../platform/management/container-agent-policy.js';
+import {readContainerAgentModel} from '../platform/management/container-agent-files.mjs';
 import { logger } from '../utils/logger.js';
 import type { DurableLarkOutboxTarget } from '../services/durable-lark-outbox.js';
 import { cliAuthBind, loadDashboardSecret, verifyHmac } from '../dashboard/auth.js';
@@ -7273,8 +7276,9 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     replyDeliveryDefault = defaultReplyDeliveryFor(cfg.cliId);
     replyDeliverySupported = supportsTranscriptReplyDelivery(cfg.cliId);
   } catch { /* default send */ }
+  const containerAgentGlobalMode=containerGlobalAgentMode();
   let codexAuthSync: 'shared' | 'isolated' = 'shared';
-  try { if (getBot(cachedLarkAppId).config.codexAuthSync === 'isolated') codexAuthSync = 'isolated'; } catch { /* default shared */ }
+  try { if (!containerAgentGlobalMode&&getBot(cachedLarkAppId).config.codexAuthSync === 'isolated') codexAuthSync = 'isolated'; } catch { /* default shared */ }
   // Trigger-user CLI auth policy. Absent → null ("feature off"), which is what
   // the dashboard toggle renders as unchecked. It has to be echoed here or the
   // Bot Defaults page loses the setting on every refresh: the PUT persists it,
@@ -7327,7 +7331,9 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
       : null;
     wrapperCli = typeof cfg.wrapperCli === 'string' && cfg.wrapperCli.trim() ? cfg.wrapperCli : null;
     cliLaunchMode = cfg.cliLaunchMode ?? null;
-    model = typeof cfg.model === 'string' && cfg.model.trim() ? cfg.model : null;
+    model = containerGlobalAgentMode()
+      ? readContainerAgentModel(homedir(),cfg.cliId)
+      : typeof cfg.model === 'string' && cfg.model.trim() ? cfg.model : null;
     modelBackendVariant = isBackendVariantCliId(cfg.cliId)
       && (cfg.modelBackendVariant === 'standard' || cfg.modelBackendVariant === 'max')
       ? cfg.modelBackendVariant
@@ -7450,6 +7456,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     scratchDenyPaths: (() => { try { return getBot(cachedLarkAppId).config.scratchDenyPaths ?? null; } catch { return null; } })(),
     scratchSupported: process.platform === 'linux' || process.platform === 'darwin',
     codexAuthSync,
+    containerAgentGlobalMode,
     envPolicy: (() => { try { return getBot(cachedLarkAppId).config.envPolicy ?? { mode: 'inherit' }; } catch { return { mode: 'inherit' }; } })(),
     sandboxPaths: sandboxStore.getBotSandboxPaths(cachedLarkAppId) ?? null,
     sandboxNetworkPolicy: (() => { try { return getBot(cachedLarkAppId).config.sandboxNetworkPolicy ?? null; } catch { return null; } })(),
@@ -8133,7 +8140,8 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
     return jsonRes(res, 400, { ok: false, error: 'invalid_replace_cli_selection' });
   }
   const requestedSelection = selected;
-  const model = typeof body.model === 'string' ? body.model.trim() : '';
+  const globalAgentMode=containerGlobalAgentMode();
+  const model = globalAgentMode ? readContainerAgentModel(homedir(),selected.cliId)??'' : typeof body.model === 'string' ? body.model.trim() : '';
   const modelBackendVariantFieldPresent = Object.prototype.hasOwnProperty.call(body, 'modelBackendVariant');
   let modelBackendVariant: 'standard' | 'max' | undefined;
   const supportsModelBackendVariant = isBackendVariantCliId(selected.cliId);
@@ -8449,7 +8457,7 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
         delete entry.cliRuntime;
         delete entry.cliPathOverride;
       }
-      if (model) entry.model = model;
+      if (!globalAgentMode&&model) entry.model = model;
       else delete entry.model;
       if (!supportsModelBackendVariant) delete entry.modelBackendVariant;
       else if (modelBackendVariantFieldPresent) {
@@ -8949,6 +8957,11 @@ ipcRoute('PUT', '/api/bot-env', async (req, res) => {
     if (!coerced.ok) return jsonRes(res, 400, { ok: false, error: coerced.reason });
     incoming = coerced.value as Record<string, string>;
   }
+  const cfg=getBot(cachedLarkAppId).config;
+  const separated=containerGlobalAgentMode()?splitContainerAgentEnvironment(cfg.cliId,incoming):null;
+  if(separated&&Object.keys(separated.global).length){
+    return jsonRes(res,409,{ok:false,error:'container_agent_environment_managed'});
+  }
   // 合并在 bots.json 文件锁内基于盘上最新 env 计算，并发 merge/remove 不丢更新。
   const r = await applyPerBotEnvChange(cachedLarkAppId, {
     incoming,
@@ -8978,6 +8991,9 @@ ipcRoute('PUT', '/api/bot-codex-auth-sync', requireBoundBot(async (req, res) => 
   catch { return jsonRes(res, 400, { error: 'invalid_json' }); }
   if (body.codexAuthSync !== 'shared' && body.codexAuthSync !== 'isolated') {
     return jsonRes(res, 400, { ok: false, error: 'invalid_codex_auth_sync' });
+  }
+  if(containerGlobalAgentMode()&&body.codexAuthSync==='isolated'){
+    return jsonRes(res,409,{ok:false,error:'container_global_auth_required'});
   }
   const spec = findConfigField('codexAuthSync');
   if (!spec) return jsonRes(res, 500, { ok: false, error: 'field_unavailable' });
