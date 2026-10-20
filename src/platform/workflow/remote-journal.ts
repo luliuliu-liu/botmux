@@ -15,7 +15,7 @@ const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).d
 const artifacts=['dag.json','bots.snapshot.json','run.json','spec.json','goal.request.json','params.resolved.json','definition.snapshot.json','grill.state.json'];
 
 export function createPlatformJournalResolver(deps:{home:string;active:boolean;request?:PersistenceRequester;now?:()=>number;readCacheMs?:number}):JournalBackendResolver{
-  const root=join(deps.home,'.botmux','v3-runs'),identityPath=join(deps.home,'.botmux','platform','workflow-storage.json'),legacyPath=join(deps.home,'.botmux','platform','workflow-local-runs.json');
+  const root=join(deps.home,'.botmux','v3-runs'),identityPath=join(deps.home,'.botmux','platform','workflow-storage.json');
   const request=deps.request||requestPersistenceSync,now=deps.now||Date.now,backends=new Map<string,JournalBackend>();
   return (path,operation)=>{
     if(!deps.active)return undefined;
@@ -23,18 +23,7 @@ export function createPlatformJournalResolver(deps:{home:string;active:boolean;r
     if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)||journalPath!==join(root,id,'journal.ndjson'))throw new Error('managed_workflow_path_not_allowed');
     if(existsSync(directory)&&lstatSync(directory).isSymbolicLink())throw new Error('unsafe_workflow_directory');
     const descriptorPath=join(directory,'journal.api.json'),pendingPath=join(directory,'journal.api.pending.json');
-    // Only the one-time migration manifest can designate a legacy file run.
-    // A missing remote descriptor must NEVER turn an API-backed mirror into
-    // a writable local journal. Unknown existing journals fail closed.
-    if(!existsSync(legacyPath))throw new Error('workflow_storage_bootstrap_not_ready');
-    const legacy=read(legacyPath);
-    if(legacy.schema!=='botmux-local-journal-manifest-v1'||!legacy.runs||typeof legacy.runs!=='object')throw new Error('invalid_legacy_workflow_manifest');
-    if(legacy.runs[id]){
-      if(existsSync(descriptorPath)||existsSync(pendingPath)||!existsSync(journalPath))throw new Error('legacy_journal_identity_changed');
-      const first=readFileSync(journalPath,'utf8').split('\n').find(line=>line.trim());
-      if(!first||createHash('sha256').update(first).digest('hex')!==legacy.runs[id].firstEventSha256)throw new Error('legacy_journal_identity_changed');
-      return undefined;
-    }
+    if(!existsSync(identityPath))throw new Error('workflow_storage_bootstrap_not_ready');
     if(!existsSync(descriptorPath)&&!existsSync(pendingPath)&&existsSync(journalPath))throw new Error('remote_journal_descriptor_missing');
     let backend=backends.get(journalPath);
     if(!backend){
@@ -59,7 +48,7 @@ export function createPlatformJournalResolver(deps:{home:string;active:boolean;r
           if(!files['dag.json'])throw new Error('workflow_definition_not_frozen');
           const definition=JSON.parse(files['dag.json']);if(definition.runId!==id)throw new Error('workflow_definition_identity_mismatch');
           const fresh={runId:id,definition,executionProfiles:files['bots.snapshot.json']?JSON.parse(files['bots.snapshot.json']):{},
-            workspaceBinding:{claim:process.env.BOTMUX_WORKSPACE_CLAIM||'agent-poc-workspace'},authorizationSnapshot:{artifacts:files}};
+            workspaceBinding:{claim:process.env.BOTMUX_WORKSPACE_CLAIM||'agent-workspace'},authorizationSnapshot:{artifacts:files}};
           const frozenHash=hash(Object.fromEntries(Object.entries(files).filter(([name])=>name!=='grill.state.json'))),pending=existsSync(pendingPath)?read(pendingPath):null;
           if(pending&&pending.frozenHash!==frozenHash)throw new Error('pending_workflow_registration_conflict');
           const registration=pending?.registration||fresh,registrationHash=hash(registration);

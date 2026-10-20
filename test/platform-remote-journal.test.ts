@@ -2,7 +2,6 @@ import {afterEach,expect,it} from 'vitest';
 import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,existsSync,statSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {createHash} from 'node:crypto';
 import {configureJournalBackend} from '../src/workflows/v3/journal-backend.js';
 import {appendEvent,appendEventDurable,readJournal,journalExists,withJournalMutationSync} from '../src/workflows/v3/journal.js';
 import {createPlatformJournalResolver} from '../src/platform/workflow/remote-journal.js';
@@ -16,7 +15,6 @@ function fixture(){
   const platform=join(home,'.botmux','platform'),directory=join(home,'.botmux','v3-runs','test'),path=join(directory,'journal.ndjson');
   mkdirSync(platform,{recursive:true});mkdirSync(directory,{recursive:true});
   writeFileSync(join(platform,'workflow-storage.json'),JSON.stringify({baseUrl:'http://control-plane:8787',token:'registry-private',expiresAt:1e12}));
-  writeFileSync(join(platform,'workflow-local-runs.json'),JSON.stringify({schema:'botmux-local-journal-manifest-v1',runs:{}}));
   writeFileSync(join(directory,'dag.json'),JSON.stringify({runId:'test',nodes:[]}));
   writeFileSync(join(directory,'bots.snapshot.json'),'{}');writeFileSync(join(directory,'grill.state.json'),'{}');
   const state={events:[] as StoredEvent[],fence:0,holder:null as string|null,unavailable:false,loseAppend:false,loseRegister:false,revoked:false,registration:null as any,calls:[] as PersistenceRequest[]};
@@ -82,10 +80,8 @@ it('renews only the run-scoped capability after a key rotation and survives a mi
   expect(readJournal(f.path)).toHaveLength(1);expect(f.state.calls.some(call=>call.path.endsWith('/session'))).toBe(true);
   rmSync(f.path);f.install();expect(journalExists(f.path)).toBe(true);expect(readJournal(f.path)).toEqual(f.state.events);
 });
-it('keeps only explicitly recorded legacy journals local and rejects unknown file histories',()=>{
+it('rejects file-only histories in managed mode',()=>{
   const f=fixture(),line=JSON.stringify({type:'runStarted',runId:'test',ts:1});writeFileSync(f.path,line+'\n');
   expect(()=>readJournal(f.path)).toThrow('descriptor_missing');
-  writeFileSync(join(f.platform,'workflow-local-runs.json'),JSON.stringify({schema:'botmux-local-journal-manifest-v1',runs:{test:{firstEventSha256:createHash('sha256').update(line).digest('hex')}}}));
-  appendEvent(f.path,{type:'runSucceeded'});expect(readJournal(f.path)).toHaveLength(2);expect(f.state.calls).toEqual([]);
   expect(()=>readJournal(join(f.home,'outside','journal.ndjson'))).toThrow('path_not_allowed');
 });

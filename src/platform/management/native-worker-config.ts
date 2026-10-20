@@ -1,7 +1,6 @@
 /** Image-local native Botmux configuration; no control-plane credentials. */
 import { createHash } from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {parse as parseYaml} from 'yaml';
 import { mkdirSync,readFileSync,existsSync,realpathSync,unlinkSync } from 'node:fs';
 import {join} from 'node:path';
 import {withFileLock} from '../../utils/file-lock.js';
@@ -141,19 +140,14 @@ export async function writeNativeAgentModel(home:string,config:NativeConfigurati
   if(agentType==='dsh'){
     const directory=containerAgentDirectories(home).dsh;
     mkdirSync(directory,{recursive:true,mode:0o700});
-    const file=join(directory,'settings.yaml');
-    const existing=existsSync(file)?parseYaml(readFileSync(file,'utf8'))??{}:{};
-    if(typeof existing!=='object'||Array.isArray(existing))throw Error('invalid_dsh_settings');
     const official=model.protocol==='anthropic-messages'&&/^https:\/\/api\.deepseek\.com\/anthropic\/?$/.test(model.baseUrl);
-    const next={...existing,'agent-default-model':{...(existing['agent-default-model']??{}),provider:official?'deepseek-official':'platform',model:model.modelId}};
-    if(official)next['llm-deepseek']={...(existing['llm-deepseek']??{}),baseURL:model.baseUrl,apiKeyEnv:'PLATFORM_DSH_API_KEY'};
-    else next['llm-pi-ai']={...(existing['llm-pi-ai']??{}),providers:{...(existing['llm-pi-ai']?.providers??{}),platform:{
+    const next:Record<string,any>={'agent-default-model':{provider:official?'deepseek-official':'platform',model:model.modelId}};
+    if(official)next['llm-deepseek']={baseURL:model.baseUrl,apiKeyEnv:'PLATFORM_DSH_API_KEY'};
+    else next['llm-pi-ai']={providers:{platform:{
       api:model.protocol||'openai-completions',baseURL:model.baseUrl,apiKeyEnv:'PLATFORM_DSH_API_KEY',
       models:(model.modelIds??[model.modelId]).map(id=>({id})),
     }}};
-    save(file,next);
-    // settings.yaml is legacy/import-only in current dsh. Explicit native
-    // overlays register model routes before the SDK initialize handshake.
+    // Use the native overlay only; never rewrite the user's settings/profile.
     save(dshModelPatchPath(home),[
       {insert:[{id:'platform-sdk-progress',name:'/opt/agent/dsh-progress.mjs'}]},
       {id:'agent-default-model',config:next['agent-default-model']},

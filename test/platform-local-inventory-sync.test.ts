@@ -10,12 +10,15 @@ describe('native local inventory without retired Pi transport',()=>{
   afterEach(()=>{vi.useRealTimers();vi.clearAllMocks();});
   it('syncs claims and never fetches remote Bot credentials or forwards messages',async()=>{
     vi.useFakeTimers();request.mockResolvedValue({status:200});
-    const inventory=new PlatformLocalInventory(()=>[{larkAppId:'cli_local',name:'Local'}]);
+    request.mockResolvedValue({status:200,data:{bots:[{appId:'cli_local',action:'keep',decisionRevision:1}]}});
+    const inventory=new PlatformLocalInventory(()=>[{larkAppId:'cli_local',name:'Local',runtimeRunning:true,runtimeGeneration:'one'}],async()=>({ok:true}),async()=>true);
     inventory.start();await vi.advanceTimersByTimeAsync(10000);inventory.stop();
     expect(request.mock.calls.length).toBeGreaterThanOrEqual(2);
     for(const [path,method,body] of request.mock.calls){
       expect(path).toBe('/local-claims');expect(method).toBe('POST');
-      expect(body.bots).toEqual([{appId:'cli_local',displayName:'Local'}]);
+      expect(body.bots[0]).toMatchObject({appId:'cli_local',displayName:'Local'});
+      expect(body.bots[0].digest).toMatch(/^[a-f0-9]{64}$/);
+      expect(body.bots[0]).toMatchObject({runtimeRunning:true,runtimeGeneration:'one'});
       expect(JSON.stringify(body)).not.toContain('appSecret');
     }
     const count=request.mock.calls.length;await vi.advanceTimersByTimeAsync(5000);

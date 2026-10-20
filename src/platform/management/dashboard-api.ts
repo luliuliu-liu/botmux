@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dirname, join } from 'node:path';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { BotOnboardingManager } from '../../dashboard/bot-onboarding.js';
-import { readBotsJsonOrEmpty } from '../../setup/bots-store.js';
+import { readBotsJsonOrEmpty,mutateBotsJsonAtomic } from '../../setup/bots-store.js';
 import { jsonRes } from '../../dashboard/http.js';
 import { createFeishuSessionReader, type FeishuSessionStatus } from './feishu-session.js';
 import { createOnboardingSessionConfirmation } from './onboarding-session.js';
@@ -10,6 +10,8 @@ import { createLocalBotDetacher,LocalDetachError } from './local-bot-detach.js';
 import { withLocalInventoryLock } from './local-inventory-lock.js';
 import {originMatchesHost} from '../../dashboard/control-csrf.js';
 import {createLocalControlAgent,LocalControlError} from './local-control-agent.js';
+import {createExistingBotsManager,ExistingBotError} from './existing-bots.js';
+import {createLocalBotBinder,LocalBindError,localInventoryEntries} from './local-bot-bind.js';
 
 export function platformWorkerImage():boolean{
   try{return readFileSync('/etc/botmux-platform-role','utf8').trim()==='worker';}catch{return false;}
@@ -27,9 +29,11 @@ export function platformManagementEnabled(): boolean {
 export async function platformRequest(path: string, method='GET',body?:unknown) {
   const base=process.env.CONTROL_PLANE_URL?.trim();
   const key=process.env.CONTROL_PLANE_SYNC_KEY?.trim();
+  const gatewayKey=process.env.BOTMUX_PLATFORM_GATEWAY_KEY?.trim();
   if(!base||!key)throw new Error('平台后台尚未配置 CONTROL_PLANE_URL / CONTROL_PLANE_SYNC_KEY');
   const response=await fetch(`${base.replace(/\/$/,'')}/internal/v1/platform${path}`,{
-    method,headers:{'content-type':'application/json','x-api-key':key},
+    method,headers:{'content-type':'application/json','x-api-key':key,
+      ...(gatewayKey?{'x-platform-gateway-id':process.env.BOTMUX_PLATFORM_GATEWAY_ID||'local-gateway','x-platform-gateway-key':gatewayKey}:{})},
     ...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(path.startsWith('/dispatch/')?660000:180000)});
   const data=await response.json();
   return {status:response.status,data};
@@ -44,13 +48,15 @@ export function createPlatformDashboardApi(deps:{
   isLocalBotStopped?:(appId:string)=>Promise<boolean>;
   startLocalBot?:(appId:string)=>Promise<{ok:boolean}>;
   localAgentBusy?:(ids:string[])=>Promise<boolean>;
+  localBotRuntime?:(appId:string)=>Promise<{running:boolean;generation:string|null}>;
   changeLocalCli?:(appId:string,cli:string)=>Promise<{status:number;data:any}>;
   openWorkerDashboard?:(containerId:string,req:IncomingMessage)=>Promise<{url:string}>;
+  existingBots?:ReturnType<typeof createExistingBotsManager>;
 }) {
   const readFeishuSession = deps.readFeishuSession ?? createFeishuSessionReader();
   const localAgent=createLocalControlAgent({botsJsonPath:deps.botsJsonPath,request:platformRequest,
     stop:id=>deps.stopLocalBot?.(id)??Promise.resolve({ok:false}),start:id=>deps.startLocalBot?.(id)??Promise.resolve({ok:false}),
-    isStopped:id=>deps.isLocalBotStopped?.(id)??Promise.resolve(false),busy:ids=>deps.localAgentBusy?.(ids)??Promise.resolve(ids.length>0),changeCli:deps.changeLocalCli});
+    isStopped:id=>deps.isLocalBotStopped?.(id)??Promise.resolve(false),busy:ids=>deps.localAgentBusy?.(ids)??Promise.resolve(ids.length>0)});
   const onboardingSession=createOnboardingSessionConfirmation(()=>deps.localOnboarding.sessionStatus());
   const path=join(dirname(deps.botsJsonPath),'platform','pool-bots.json');
   // Native atomic config/pending-job writers deliberately do not create their
@@ -74,14 +80,46 @@ export function createPlatformDashboardApi(deps:{
     stop:appId=>deps.stopLocalBot?deps.stopLocalBot(appId):Promise.resolve({ok:false}),
     isStopped:appId=>deps.isLocalBotStopped?deps.isLocalBotStopped(appId):Promise.resolve(false),
     release:body=>platformRequest('/local-release','POST',{...(body as object),gatewayId:process.env.BOTMUX_PLATFORM_GATEWAY_ID||'local-gateway'})});
+  const gatewayId=process.env.BOTMUX_PLATFORM_GATEWAY_ID||'local-gateway';
+  const localBinder=createLocalBotBinder({botsJsonPath:deps.botsJsonPath,gatewayId,request:platformRequest,
+    stop:id=>deps.stopLocalBot?.(id)??Promise.resolve({ok:false}),start:id=>deps.startLocalBot?.(id)??Promise.resolve({ok:false}),
+    isStopped:id=>deps.isLocalBotStopped?.(id)??Promise.resolve(false),busy:ids=>deps.localAgentBusy?.(ids)??Promise.resolve(true),
+    runtime:id=>deps.localBotRuntime?.(id)??Promise.resolve({running:false,generation:null}),assertNoLogin:()=>localAgent.assertNoLogin()});
   async function inventory() {
     return withLocalInventoryLock(async()=>{
-    const bots=deps.listLocalBots().map(bot=>({appId:bot.larkAppId,displayName:bot.displayName||bot.name||bot.larkAppId}));
-    const result=await platformRequest('/local-claims','POST',{gatewayId:process.env.BOTMUX_PLATFORM_GATEWAY_ID||'local-gateway',bots});
+    const localBots=deps.listLocalBots(),bots=localBots.map(bot=>({appId:bot.larkAppId,displayName:bot.displayName||bot.name||bot.larkAppId}));
+    const entries=localInventoryEntries(deps.botsJsonPath,localBots);
+    const result=await platformRequest('/local-claims','POST',{bots:await Promise.all(entries.map(async bot=>{
+      const runtime=await deps.localBotRuntime?.(bot.appId)??{running:false,generation:null};
+      return {...bot,runtimeRunning:runtime.running,runtimeGeneration:runtime.generation};
+    }))});
     if(result.status>=400)throw new Error('无法确认本地机器人占用，请检查平台后台');
     return bots;
     });
   }
+  const existingBots=deps.existingBots??createExistingBotsManager({
+    managed:async()=>{
+      const local=await inventory(),result=await platformRequest('/bots');
+      if(result.status!==200)throw new ExistingBotError(503,'inventory_unavailable','无法确认已有机器人，请检查平台后台。');
+      const rows=[...result.data.bots];
+      for(const bot of local)if(!rows.some(row=>row.appId===bot.appId))rows.push({...bot,usage:'local'});
+      return rows;
+    },
+    register:async body=>{
+      const result=await platformRequest('/bots','POST',body);
+      if(result.status>=400)throw new ExistingBotError(result.status,'bot_registration_failed',result.data.message||'机器人入池未确认，请刷新后重试。');
+      return result.data;
+    },
+    refresh:(appId,displayName)=>withLocalInventoryLock(async()=>{
+      const result=await platformRequest(`/bots/${appId}/refresh`,'POST',{displayName});
+      if(result.status>=400)throw new ExistingBotError(result.status,'bot_refresh_failed',result.data.message||'配置刷新未确认，请重试。');
+      // Native listLocalBots reads persisted names first. No credential/CLI or
+      // owner mutation, fleet restart, or cross-container identity transfer.
+      if(deps.listLocalBots().some(bot=>bot.larkAppId===appId))
+        mutateBotsJsonAtomic(deps.botsJsonPath,bots=>bots.map(bot=>bot.larkAppId===appId?{...bot,displayName}:bot));
+      return result.data;
+    }),
+  });
   return async(req:IncomingMessage,res:ServerResponse,url:URL,canManage:boolean)=>{
     if(!url.pathname.startsWith('/api/platform/'))return false;
     if(!canManage){jsonRes(res,401,{error:'management_auth_required'});return true;}
@@ -106,13 +144,32 @@ export function createPlatformDashboardApi(deps:{
     };
     try {
       const suffix=url.pathname.slice('/api/platform'.length);
+      const localBind=suffix.match(/^\/local-bots\/(cli_[A-Za-z0-9_-]+)\/bind$/);
+      if(localBind&&req.method==='POST'){jsonRes(res,200,await localBinder.bind(localBind[1]!,await read()));return true;}
+      const deleteBot=suffix.match(/^\/bots\/(cli_[A-Za-z0-9_-]+)$/);
+      if(deleteBot&&req.method==='DELETE'){
+        const input=await read();
+        const result=await withLocalInventoryLock(async()=>{
+          if(readBotsJsonOrEmpty(deps.botsJsonPath).some(bot=>bot.larkAppId===deleteBot[1])||!await deps.isLocalBotStopped?.(deleteBot[1]!))
+            throw new LocalBindError(409,'请先确认本地 Bot 已解绑并停止');
+          const result=await platformRequest(`/bots/${deleteBot[1]}`,'DELETE',input);
+          if(result.status>=400)throw new LocalBindError(result.status,result.data.message||'删除未确认');
+          if(result.data.deleted!==true)throw new LocalBindError(409,'删除未确认');
+          if(readBotsJsonOrEmpty(path).some(bot=>bot.larkAppId===deleteBot[1]))mutateBotsJsonAtomic(path,bots=>bots.filter(bot=>bot.larkAppId!==deleteBot[1]));
+          localDetach.forget(deleteBot[1]!);return result.data;
+        });jsonRes(res,200,result);return true;
+      }
+      if(suffix==='/feishu-apps'&&req.method==='GET'){jsonRes(res,200,await existingBots.list());return true;}
+      if(suffix==='/bots/import'&&req.method==='POST'){jsonRes(res,201,await existingBots.import(await read()));return true;}
+      const botRefresh=suffix.match(/^\/bots\/(cli_[A-Za-z0-9_-]+)\/refresh$/);
+      if(botRefresh&&req.method==='POST'){await read();jsonRes(res,200,await existingBots.refresh(botRefresh[1]));return true;}
       if(suffix==='/local-agent'&&req.method==='GET'){jsonRes(res,200,await localAgent.status());return true;}
       const localModel=suffix.match(/^\/local-agent\/(pi|codex|claude-code)$/);
       if(localModel&&req.method==='PUT'){const input=await read();jsonRes(res,200,await withLocalInventoryLock(()=>localAgent.apply(localModel[1]!,input)));return true;}
       const localLogin=suffix.match(/^\/local-agent\/(codex|claude-code)\/login$/);
       if(localLogin&&req.method==='POST'){jsonRes(res,200,await localAgent.login(localLogin[1]!,await read()));return true;}
       const localCli=suffix.match(/^\/local-agent\/bots\/([A-Za-z0-9._-]+)$/);
-      if(localCli&&req.method==='PUT'){const input=await read();jsonRes(res,200,await withLocalInventoryLock(()=>localAgent.changeCli(localCli[1]!,input)));return true;}
+      if(localCli&&req.method==='PUT'){const input=await read();await inventory();jsonRes(res,200,await localBinder.switchCli(localCli[1]!,input));return true;}
       const workerDashboard=suffix.match(/^\/(?:containers|logins)\/([0-9a-f-]{36})\/dashboard$/);
       if(workerDashboard&&req.method==='POST'){
         if(!deps.openWorkerDashboard){jsonRes(res,503,{error:'worker_proxy_unavailable'});return true;}
@@ -121,7 +178,7 @@ export function createPlatformDashboardApi(deps:{
       const localUnbind=suffix.match(/^\/local-bots\/([A-Za-z0-9._-]+)\/unbind$/);
       if(localUnbind&&req.method==='POST'){
         const input=await read();const local=deps.listLocalBots().find(bot=>bot.larkAppId===localUnbind[1]);
-        const result=await localDetach.detach(localUnbind[1]!,input.localRevision,input.confirmLocalStop,local?.displayName||local?.name||localUnbind[1]!);
+        const result=typeof input.localRevision==='string'?await localDetach.detach(localUnbind[1]!,input.localRevision,input.confirmLocalStop,local?.displayName||local?.name||localUnbind[1]!):await localBinder.releaseMissing(localUnbind[1]!,input);
         jsonRes(res,200,result);return true;
       }
       if(suffix==='/feishu-session'&&req.method==='GET'){
@@ -195,9 +252,16 @@ export function createPlatformDashboardApi(deps:{
           if(existing)Object.assign(existing,pending,{usage:'local'});
           else rows.push({...pending,botId:pending.appId,usage:'local',secretConfigured:true} as any);
         }
+        for(const row of rows as any[]){
+          row.localConfigured=local.some(bot=>bot.appId===row.appId);
+          row.localOwned=!row.localGatewayId||row.localGatewayId===gatewayId;
+          if(row.usage==='local')row.localState=!row.localOwned?'other':!row.localConfigured?'missing':row.bindingRevision===row.localAppliedRevision?'synced':'pending';
+        }
       }
       jsonRes(res,result.status,result.data);return true;
     }catch(error){
+      if(error instanceof LocalBindError){jsonRes(res,error.status,{error:'local_bot_failed',message:error.message});return true;}
+      if(error instanceof ExistingBotError){jsonRes(res,error.status,{error:error.code,message:error.message});return true;}
       if(error instanceof LocalControlError){jsonRes(res,error.status,{error:'local_agent_failed',message:error.message});return true;}
       if(error instanceof LocalDetachError){jsonRes(res,error.status,{error:'local_detach_failed',message:error.message});return true;}
       jsonRes(res,502,{error:'platform_unavailable',message:'平台后台操作未确认完成，请刷新查看记录；不要重复创建飞书应用'});

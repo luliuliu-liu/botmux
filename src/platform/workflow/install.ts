@@ -11,8 +11,7 @@ let control=false;try{control=readFileSync('/etc/botmux-platform-role','utf8').t
 if(control){
   configureJournalBackend(createPlatformJournalResolver({home:homedir(),active:true}));
   configureExecutionBackend(runDir=>{
-    const home=homedir(),legacy=JSON.parse(readFileSync(join(home,'.botmux/platform/workflow-local-runs.json'),'utf8'));
-    if(legacy.runs?.[basename(runDir)])return undefined;
+    const home=homedir();
     // Selection precedes runStarted registration. Credentials are resolved
     // lazily at acquire, after the original runtime freezes its run artifacts
     // and commits runStarted through the journal backend.

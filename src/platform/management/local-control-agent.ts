@@ -41,6 +41,7 @@ export function createLocalControlAgent(deps:Dependencies){
  }
  async function ensureNoLogin(){if(owner){await loginManager();await restoring;if(oauth.busy())throw new LocalControlError(409,'本地原生登录仍在进行，请先完成或取消登录');}}
  return {
+  async assertNoLogin(){await ensureNoLogin();},
   async status(){
    const result=await deps.request(prefix);if(result.status!==200)throw new LocalControlError(503,'无法读取本地 Agent 的管理状态');
    return {name:'本地 Control Agent',controlId,bots:allBots().map(b=>({appId:b.larkAppId,displayName:b.displayName||b.name||b.larkAppId,cliId:b.cliId||'claude-code'})),agents:types.map(agentType=>{

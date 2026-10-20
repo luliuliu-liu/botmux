@@ -125,7 +125,10 @@ import { resolveLiveBotTransport } from './services/team-roster.js';
 import { handleFederationSpokeApi, syncAllMemberships, autoBindOwnerIfUnambiguous, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
 import type { TeamGroupCreateResult, TeamGroupOwnerTransferResult } from './dashboard/federated-group-core.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
-import { createPlatformDashboardApi,platformRequest,platformWorkerImage } from './platform/management/dashboard-api.js';
+import { createPlatformDashboardApi,platformManagementEnabled,platformRequest,platformWorkerImage } from './platform/management/dashboard-api.js';
+import {localBotManagedDigest} from './platform/management/local-bot-bind.js';
+import {withLocalInventoryLock} from './platform/management/local-inventory-lock.js';
+import {readFleetStatus} from './core/fleet-runtime.js';
 import {createNativeWorkerProxyIdentity,nativeWorkerTerminalLink} from './platform/management/native-worker-proxy-auth.js';
 import {createControlBrowserBoundary} from './platform/management/control-browser-boundary.js';
 import { createWorkerDashboardProxy } from './platform/management/worker-dashboard-proxy.js';
@@ -1836,7 +1839,19 @@ setDurableConfigCoordinator(dashboardConfigCoordinator);
 const botOnboarding = new BotOnboardingManager({
   botsJsonPath: BOTS_JSON_PATH,
   stopBotLive: spawnStopBotLive,
-  startBotLive: spawnStartBotLive,
+  startBotLive: async appId=>withLocalInventoryLock(async()=>{
+    if(platformManagementEnabled()){
+      const bot=loadBotConfigs().find(value=>value.larkAppId===appId);
+      if(!bot)return {ok:false,message:'本地配置未找到，未启动'};
+      const adopted=await platformRequest(`/local-bots/${appId}/adopt`,'POST',{
+        displayName:bot.displayName||bot.name||appId,appSecret:bot.larkAppSecret,brand:bot.brand==='lark'?'lark':'feishu',
+        cliId:bot.cliId||'pi',workingDir:bot.defaultWorkingDir||bot.workingDir||'/workspace',
+        owner:{allowedUsers:bot.allowedUsers,ownerOpenId:bot.ownerOpenId},digest:localBotManagedDigest(bot),
+      });
+      if(adopted.status!==200||adopted.data.adopted!==true)return {ok:false,message:adopted.data.message||'数据库纳管未确认，未启动'};
+    }
+    return spawnStartBotLive(appId);
+  }),
   runBotsMutation: mutation => runDurableConfigMutation({
     scope: 'bots',
     path: BOTS_JSON_PATH,
@@ -1880,13 +1895,30 @@ const platformDashboardApi = createPlatformDashboardApi({
     const status=readFleetStatus();
     return status.supervisorAlive&&status.rows.filter(row=>row.appId===appId).every(row=>!row.alive&&['stopped','errored'].includes(row.status));
   },
+  localBotRuntime:async appId=>{
+    const status=readFleetStatus(),row=status.rows.find(value=>value.appId===appId);
+    return {running:status.supervisorAlive&&row?.alive===true&&row.status==='online',
+      generation:row?`${status.supervisorStartedAt}/${row.startedAt||''}/${row.pid}`:null};
+  },
   listLocalBots: () => {
     const online=new Map(registry.list().map(bot=>[bot.larkAppId,bot.botName]));
     const persisted=readPersistedBotNames();
     return loadBotConfigs().map(bot=>({...bot,displayName:bot.displayName||online.get(bot.larkAppId)||persisted.get(bot.larkAppId)||bot.name}));
   },
 });
-const platformLocalInventory = new PlatformLocalInventory(() => loadBotConfigs());
+const isLocalBotStopped=async(appId:string)=>{
+  const {readFleetStatus}=await import('./core/fleet-runtime.js');
+  const status=readFleetStatus();
+  return status.supervisorAlive&&status.rows.filter(row=>row.appId===appId).every(row=>!row.alive&&['stopped','errored'].includes(row.status));
+};
+const platformLocalInventory = new PlatformLocalInventory(() => {
+  const status=readFleetStatus(),rows=new Map(status.rows.map(row=>[row.appId,row]));
+  return loadBotConfigs().map(bot=>{
+    const row=rows.get(bot.larkAppId);
+    return {...bot,runtimeRunning:status.supervisorAlive&&row?.alive===true&&row.status==='online',
+      runtimeGeneration:row?`${status.supervisorStartedAt}/${row.startedAt||''}/${row.pid}`:null};
+  });
+},spawnStopBotLive,isLocalBotStopped);
 platformLocalInventory.start();
 process.once('exit', () => platformLocalInventory.stop());
 

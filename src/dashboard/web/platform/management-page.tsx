@@ -4,12 +4,13 @@ import { ui } from '../ui.js';
 import { CreateActionButton, RefreshIconButton } from '../dashboard-components.js';
 import { FeishuSessionPanel } from './feishu-session-panel.js';
 import { PlatformBotCreate } from './bot-create.js';
+import { PlatformBotImport } from './bot-import.js';
 import { syncAgentConfiguration } from './agent-configuration.js';
 import { AgentActions, CompactText, Parameter } from './compact-controls.js';
 import {NetworkRules,LoginWorkbench} from './worker-access.js';
 import {LocalControlAgent} from './local-control-agent.js';
 
-type Bot={botId:string;displayName:string;appId:string;usage:'local'|'free'|'sandbox';localRevision?:string;localDetachPending?:boolean;containerId?:string;containerName?:string;containerRevision?:number;containerStatus?:string;detachPending?:boolean;secretConfigured:boolean};
+type Bot={botId:string;displayName:string;appId:string;usage:'local'|'free'|'sandbox';localRevision?:string;localDetachPending?:boolean;localConfigured?:boolean;localOwned?:boolean;localState?:string;bindingRevision?:number;localCliId?:string;ownerConfigured?:boolean;containerId?:string;containerName?:string;containerRevision?:number;containerStatus?:string;detachPending?:boolean;secretConfigured:boolean};
 type Model={profileId:string;displayName:string;provider:string;baseUrl:string;modelId:string;modelIds?:string[];apiKeyConfigured:boolean;enabled:boolean;protocol?:string;authMethod?:string};
 const dynamicModel=(model:Model)=>model.protocol==='zcode-coding-plan';
 const idsOf=(model:Model)=>dynamicModel(model)?['']:model.modelIds?.length?model.modelIds:[model.modelId];
@@ -31,10 +32,11 @@ export function Modal({title,children,onClose,busy=false}:{title:string;children
 }
 export function ManagementPage({page}:{page:'bots'|'models'|'agents'}){
   const [data,setData]=useState<Data>(initial),[error,setError]=useState(''),[notice,setNotice]=useState(''),[loading,setLoading]=useState(true);
-  const [modal,setModal]=useState<'bot'|'container'|'model'|'delete-model'|'delete'|'unbind'|'workspaces'|'network'|'logins'|null>(null),[selected,setSelected]=useState<Container|null>(null),[model,setModel]=useState<Model|null>(null),[selectedBot,setSelectedBot]=useState<Bot|null>(null);
+  const [modal,setModal]=useState<'bot'|'import-bot'|'bind-local'|'delete-bot'|'container'|'model'|'delete-model'|'delete'|'unbind'|'workspaces'|'network'|'logins'|null>(null),[selected,setSelected]=useState<Container|null>(null),[model,setModel]=useState<Model|null>(null),[selectedBot,setSelectedBot]=useState<Bot|null>(null);
   const [cloneSourceId,setCloneSourceId]=useState<string|null>(null);
   const mounted=useRef(true);
   const syncing=useRef(false),[syncingId,setSyncingId]=useState<string|null>(null);
+  const refreshingBot=useRef(false),[refreshingBotId,setRefreshingBotId]=useState<string|null>(null);
   const clone=(source:Model)=>{
     setCloneSourceId(source.profileId);
     setModel({...source,profileId:`${source.profileId.slice(0,95)}-copy`,displayName:`${source.displayName.slice(0,190)} 副本`,enabled:false});
@@ -63,9 +65,20 @@ export function ManagementPage({page}:{page:'bots'|'models'|'agents'}){
     try{const result=await platformApi(`/containers/${container.containerId}/dashboard`,'POST',{});if(popup){popup.opener=null;popup.location.replace(result.url);}else setError('请允许弹出工作台窗口后重试');}
     catch(error){popup?.close();setError(error instanceof Error?error.message:String(error));}
   };
+  const refreshBot=async(bot:Bot)=>{
+    if(refreshingBot.current)return;refreshingBot.current=true;setRefreshingBotId(bot.appId);setError('');setNotice('');
+    try{
+      const result=await platformApi(`/bots/${encodeURIComponent(bot.appId)}/refresh`,'POST',{});
+      if(result.refreshed!==true)throw new Error('刷新尚未确认，请重试。');
+      await refresh();
+      if(mounted.current){if(result.runtimeSynced===false)setError(result.message);else setNotice(result.message||'飞书配置已刷新。');}
+    }catch(error){if(mounted.current)setError(error instanceof Error?error.message:String(error));}
+    finally{refreshingBot.current=false;if(mounted.current)setRefreshingBotId(null);}
+  };
   if(!ui.platformManaged)return <section className="page"><h1>平台管理未启用</h1><p>此部署保持原生 Botmux 模式。</p></section>;
   return <section className="page pm-page"><div className="page-heading"><div><p className="eyebrow">管理</p><h1>{title}</h1></div><div className="page-heading-actions">
     <RefreshIconButton label="刷新" busy={loading} onClick={()=>void refresh()}/>
+    {page==='bots'?<button onClick={()=>setModal('import-bot')}>导入已有 Bot</button>:null}
     {page==='agents'?<><button onClick={()=>{setSelected(null);setModal('logins');}}>登录工作台</button><button onClick={()=>setModal('workspaces')}>工作区设置</button></>:null}
     {page==='bots'?<CreateActionButton onClick={()=>setModal('bot')}>新建 Bot</CreateActionButton>:page==='agents'?<CreateActionButton onClick={()=>{setSelected(null);setModal('container');}}>创建 Agent</CreateActionButton>:<CreateActionButton onClick={()=>{setModel(null);setCloneSourceId(null);setModal('model');}}>添加模型连接</CreateActionButton>}
   </div></div>
@@ -73,7 +86,14 @@ export function ManagementPage({page}:{page:'bots'|'models'|'agents'}){
   {error?<p className="hint-warn" role="alert">{error}</p>:null}{notice?<p className="hint" role="status">{notice}</p>:null}
   {loading?<p>正在加载…</p>:page==='bots'?<>
     <div className="pm-bot-list-heading"><h2>机器人</h2><span>{data.bots.length} 个机器人</span></div>
-    <div className="pm-table-wrap"><table><thead><tr><th>名称</th><th>App ID</th><th>凭证</th><th>使用情况</th><th>操作</th></tr></thead><tbody>{data.bots.map(bot=><tr key={bot.botId}><td>{bot.displayName}</td><td><code>{bot.appId}</code></td><td>{bot.secretConfigured?'已配置':'未配置'}</td><td>{bot.usage==='free'?<span className="pm-state">空闲</span>:bot.usage==='local'?'本地 Botmux':`Agent / ${bot.containerName}`}{bot.detachPending?<small className="hint-warn">摘除待同步，保留占用</small>:null}{bot.localDetachPending?<small className="hint-warn">本地解绑未完成，请重试</small>:null}</td><td>{bot.usage==='sandbox'?<><button disabled={bot.containerStatus!=='ready'||!bot.containerId} onClick={()=>{setSelectedBot(bot);setModal('unbind');}}>摘除绑定</button>{bot.detachPending?<a href="#/platform-agents">重试同步</a>:null}</>:bot.usage==='local'?<button disabled={!bot.localRevision} onClick={()=>{setSelectedBot(bot);setModal('unbind');}}>{bot.localDetachPending?'重试本地解绑':'解除本地绑定'}</button>:<span className="hint">—</span>}</td></tr>)}</tbody></table>{!data.bots.length?<p className="empty">暂无机器人</p>:null}</div>
+    <p className="hint">从当前飞书账号导入已有机器人，或新建应用。名称变化后，通过操作菜单刷新飞书配置；不会重置密钥或改变绑定。</p>
+    <div className="pm-table-wrap"><table><thead><tr><th>名称</th><th>App ID</th><th>凭证</th><th>使用情况</th><th>操作</th></tr></thead><tbody>{data.bots.map(bot=><tr key={bot.botId}><td>{bot.displayName}</td><td><code>{bot.appId}</code></td><td>{bot.secretConfigured?'已配置':'未配置'}</td><td>{bot.usage==='free'?<span className="pm-state">空闲</span>:bot.usage==='local'?(bot.localState==='missing'?'本地绑定待恢复':bot.localState==='pending'?'本地配置待同步':bot.localState==='other'?'其他 Control Agent':'本地 Botmux'):`Agent / ${bot.containerName}`}{bot.detachPending?<small className="hint-warn">摘除待同步，保留占用</small>:null}{bot.localDetachPending?<small className="hint-warn">本地解绑未完成，请重试</small>:null}{refreshingBotId===bot.appId?<small>刷新中…</small>:null}</td><td><AgentActions name={`${bot.displayName}（${bot.appId}）`} actions={[
+      {label:'刷新飞书配置',disabled:refreshingBotId!==null,run:()=>void refreshBot(bot)},
+      ...(bot.usage!=='sandbox'?[{label:bot.usage==='local'?'同步到本地 Botmux':'绑定本地 Botmux',disabled:bot.localOwned===false||!bot.secretConfigured,run:()=>{setSelectedBot(bot);setModal('bind-local');}}]:[]),
+      ...(bot.usage==='sandbox'?[{label:'摘除绑定',disabled:bot.containerStatus!=='ready'||!bot.containerId,run:()=>{setSelectedBot(bot);setModal('unbind');}}]:[]),
+      ...(bot.usage==='local'?[{label:bot.localDetachPending?'重试本地解绑':'解除本地绑定',disabled:bot.localOwned===false,run:()=>{setSelectedBot(bot);setModal('unbind');}}]:[]),
+      {label:'删除记录',danger:true,disabled:bot.usage!=='free',run:()=>{setSelectedBot(bot);setModal('delete-bot');}},
+    ]}/>{bot.detachPending?<a href="#/platform-agents">重试同步</a>:null}</td></tr>)}</tbody></table>{!data.bots.length?<p className="empty">暂无机器人</p>:null}</div>
   </>:page==='models'?<>
     <p className="hint">集中维护模型、服务地址和 API Key。保存连接不会自动修改已运行的 Agent；请到 <a href="#/platform-agents">Agent 管理</a> 切换模型或同步最新配置。</p>
     <h2>模型连接</h2><div className="pm-table-wrap"><table className="pm-model-table"><thead><tr><th>名称</th><th>Provider / 模型</th><th>认证 / 状态</th><th>操作</th></tr></thead><tbody>{data.models.map(m=><tr key={m.profileId}><td><CompactText text={m.displayName}/><small><CompactText text={m.protocol||'openai-completions'}/></small></td><td><CompactText text={m.provider}/><details><summary>{dynamicModel(m)?'原生动态模型':idsOf(m).length} 个模型 · 展开查看</summary>{idsOf(m).map(id=><small key={id}><CompactText text={`${dynamicModel(m)?'ZCode 自主管理模型列表':id}${!dynamicModel(m)&&id===m.modelId?'（默认）':''}`}/></small>)}</details></td><td>{m.authMethod==='oauth'?'实例内官方登录':m.apiKeyConfigured?'Key 已配置':'未配置'}<small>{m.enabled?'已启用':'已停用'}</small></td><td><AgentActions name={`${m.displayName}（${m.profileId}）`} actions={[
@@ -96,6 +116,9 @@ export function ManagementPage({page}:{page:'bots'|'models'|'agents'}){
     <h2 className="pm-catalog-heading">支持的 Agent</h2><div className="pm-agent-list">{data.agents.map(agent=><details key={agent.id}><summary><span className="pm-agent-chevron" aria-hidden="true">›</span><strong>{agent.name}</strong><span className={agent.supported?'pm-state':'pm-catalog-muted'}>{agent.supported?'已支持':'待适配'}</span><span className="pm-catalog-version">{agent.version||'—'}</span></summary><div className="pm-agent-details"><p>{agent.supported?`${agent.authMethods?.includes('oauth')?'API Key / 原生 OAuth':'API Key'} · 支持切换兼容模型，下个任务生效`:'镜像、模型和认证能力验证完成后开放'}</p>{agent.images.map(image=><div className="pm-catalog-image" key={image.id}><span>{image.label}</span><CompactText text={image.image}/></div>)}</div></details>)}</div>
   </>}
   {modal==='bot'?<PlatformBotCreate api={platformApi} onClose={()=>setModal(null)} onDone={finish}/>:null}
+  {modal==='import-bot'?<PlatformBotImport api={platformApi} onClose={()=>setModal(null)} onDone={finish}/>:null}
+  {modal==='bind-local'&&selectedBot?<BindLocalBot bot={selectedBot} onClose={()=>setModal(null)} onDone={finish}/>:null}
+  {modal==='delete-bot'&&selectedBot?<DeleteBot bot={selectedBot} onClose={()=>setModal(null)} onDone={finish}/>:null}
   {modal==='container'?<ContainerForm data={data} container={selected} onClose={()=>setModal(null)} onDone={finish}/>:null}
   {modal==='model'?<ModelForm model={model} cloneSourceId={cloneSourceId} onClose={()=>setModal(null)} onDone={finish}/>:null}
   {modal==='delete-model'&&model?<DeleteModel model={model} onClose={()=>setModal(null)} onDone={finish}/>:null}
@@ -120,11 +143,37 @@ export function WorkspaceSettings({options,onClose,onDone}:{options:WorkspaceOpt
     {error?<p role="alert" className="hint-warn">{error}</p>:null}<footer><button type="button" onClick={onClose} disabled={busy}>取消</button><button className="primary" disabled={busy||!options.hostPathEnabled}>{busy?'保存中…':'保存设置'}</button></footer>
   </form></Modal>;
 }
+export function BindLocalBot({bot,onClose,onDone}:{bot:Bot;onClose:()=>void;onDone:(m:string)=>void}){
+  const [cliId,setCliId]=useState(bot.localCliId||'pi'),[owner,setOwner]=useState(''),[confirmed,setConfirmed]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('');const submitting=useRef(false);
+  useEffect(()=>{if(bot.ownerConfigured)return;let cancelled=false;void platformApi('/feishu-session').then(value=>{if(!cancelled)setOwner(current=>current||value.session?.identity?.email||'');}).catch(()=>{});return()=>{cancelled=true;};},[bot.ownerConfigured]);
+  return <Modal title="同步到本地 Botmux" onClose={onClose} busy={busy}><form onSubmit={async e=>{
+    e.preventDefault();if(!confirmed||submitting.current)return;submitting.current=true;setBusy(true);setError('');
+    try{const result=await platformApi(`/local-bots/${encodeURIComponent(bot.appId)}/bind`,'POST',{bindingRevision:bot.bindingRevision,cliId,confirmRestart:true,...(!bot.ownerConfigured?{owner}: {})});
+      if(result.applied!==true)throw new Error('同步尚未确认，请刷新后重试');onDone('数据库配置已同步到本地 Botmux，并确认启动。');
+    }catch(error){setError(error instanceof Error?error.message:String(error));}finally{submitting.current=false;setBusy(false);}
+  }}><p>从数据库恢复「{bot.displayName}」的凭据和绑定。本地 Bot 配置页面将在同步成功后显示此机器人。</p>
+    <label>本地 CLI<select name="localBotCli" value={cliId} disabled={busy} onChange={e=>setCliId(e.target.value)}><option value="pi">Pi</option><option value="codex">Codex</option><option value="claude-code">Claude Code</option></select></label>
+    {!bot.ownerConfigured?<label>确认机器人所有者<input name="localBotOwner" required value={owner} disabled={busy} onChange={e=>setOwner(e.target.value)} placeholder="企业邮箱、手机号或 union_id"/><small className="hint">此记录缺少 owner，需要在目标应用下验证；不会从其他 Bot 复制 open_id。</small></label>:null}
+    <p className="hint">模型和 OAuth 使用当前容器的全局配置，不复制、不删除登录态。正在执行任务时拒绝同步。</p>
+    <label className="pm-check"><input type="checkbox" required checked={confirmed} disabled={busy} onChange={e=>setConfirmed(e.target.checked)}/><span>确认同步配置并启动此 Bot；已有空闲进程会重启。</span></label>
+    {error?<p className="hint-warn" role="alert">{error}</p>:null}<footer><button type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary" disabled={busy||!confirmed||!bot.ownerConfigured&&!owner.trim()}>{busy?'同步中…':'同步并启动'}</button></footer>
+  </form></Modal>;
+}
+export function DeleteBot({bot,onClose,onDone}:{bot:Bot;onClose:()=>void;onDone:(m:string)=>void}){
+  const [confirmId,setConfirmId]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState('');const submitting=useRef(false);
+  return <Modal title="删除 Bot 平台记录" onClose={onClose} busy={busy}><form onSubmit={async e=>{
+    e.preventDefault();if(confirmId!==bot.appId||submitting.current)return;submitting.current=true;setBusy(true);setError('');
+    try{const result=await platformApi(`/bots/${encodeURIComponent(bot.appId)}`,'DELETE',{confirmAppId:confirmId});if(result.deleted!==true)throw new Error('删除尚未确认');onDone('平台记录已删除，保存的 Bot 凭据已清除；飞书应用未删除，可重新导入。');}
+    catch(error){setError(error instanceof Error?error.message:String(error));}finally{submitting.current=false;setBusy(false);}
+  }}><p>仅删除「{bot.displayName}」的平台记录及其保存的凭据，不删除飞书应用、Agent 登录态、会话或工作区。绑定中的机器人必须先解绑。</p>
+    <label>输入 App ID 确认<input name="confirmBotAppId" value={confirmId} disabled={busy} onChange={e=>setConfirmId(e.target.value)} placeholder={bot.appId}/></label>
+    {error?<p role="alert" className="hint-warn">{error}</p>:null}<footer><button type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary" disabled={busy||confirmId!==bot.appId}>{busy?'删除中…':'删除平台记录'}</button></footer></form></Modal>;
+}
 export function UnbindLocalBot({bot,onClose,onDone}:{bot:Bot;onClose:()=>void;onDone:(m:string)=>void}){
   const [confirmed,setConfirmed]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('');const submitting=useRef(false);
   return <Modal title="解除本地 Bot 绑定" onClose={onClose} busy={busy}><form onSubmit={async e=>{
     e.preventDefault();if(!confirmed||submitting.current)return;submitting.current=true;setBusy(true);setError('');
-    try{const result=await platformApi(`/local-bots/${encodeURIComponent(bot.appId)}/unbind`,'POST',{localRevision:bot.localRevision,confirmLocalStop:true});
+    try{const result=await platformApi(`/local-bots/${encodeURIComponent(bot.appId)}/unbind`,'POST',{...(bot.localRevision?{localRevision:bot.localRevision}:{bindingRevision:bot.bindingRevision}),confirmLocalStop:true});
       if(result.released!==true)throw new Error('本地解绑尚未确认，请刷新后重试');onDone('本地 Agent 已停止，机器人已回到空闲池；飞书应用和数据保留。');
     }catch(error){setError(error instanceof Error?error.message:String(error));}finally{submitting.current=false;setBusy(false);}
   }}><p>将「{bot.displayName}」从本地 Botmux 解绑并移入空闲池。</p><p className="hint">保留飞书应用、凭据恢复副本、会话及工作区文件。解绑后不会随 Gateway 重启自动绑定本地。</p><label className="pm-check"><input type="checkbox" required checked={confirmed} onChange={e=>setConfirmed(e.target.checked)} disabled={busy}/><span>确认停止此机器人的本地 Agent，可能中断正在运行的任务。</span></label>{error?<p className="hint-warn" role="alert">{error}</p>:null}<footer><button type="button" onClick={onClose} disabled={busy}>取消</button><button className="primary" disabled={busy||!confirmed}>{busy?'解绑中…':'确认停止并解绑'}</button></footer></form></Modal>;

@@ -1,5 +1,5 @@
 import { createHash,randomUUID } from 'node:crypto';
-import { existsSync,readFileSync,writeFileSync,renameSync,mkdirSync,readdirSync } from 'node:fs';
+import { existsSync,readFileSync,writeFileSync,renameSync,mkdirSync,readdirSync,unlinkSync } from 'node:fs';
 import { dirname,join } from 'node:path';
 import { mutateBotsJsonAtomic } from '../../setup/bots-store.js';
 import { withFileLock } from '../../utils/file-lock.js';
@@ -16,6 +16,7 @@ export function createLocalBotDetacher(deps:{botsJsonPath:string;stop:(appId:str
   const read=(appId:string):Job|null=>existsSync(file(appId))?JSON.parse(readFileSync(file(appId),'utf8')):null;
   const save=(job:Job)=>{const p=file(job.appId),tmp=`${p}.${randomUUID()}.tmp`;writeFileSync(tmp,JSON.stringify(job),{mode:0o600});renameSync(tmp,p);};
   return {
+    forget(appId:string){if(!/^[A-Za-z0-9._-]+$/.test(appId))throw new LocalDetachError(400,'App ID 无效');if(existsSync(file(appId)))unlinkSync(file(appId));},
     revision(appId:string){const bot=current().find(bot=>bot.larkAppId===appId);return bot?localBotRevision(bot):undefined;},
     pending(){return readdirSync(directory).filter(name=>/^[A-Za-z0-9._-]+\.json$/.test(name)).flatMap(name=>{const appId=name.slice(0,-5),job=read(appId);return job&&!job.completed?[{appId,displayName:job.displayName,localRevision:job.revision,localDetachPending:true}]:[];});},
     async detach(appId:string,revision:unknown,confirmed:unknown,displayName:string){

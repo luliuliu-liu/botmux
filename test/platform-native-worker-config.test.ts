@@ -32,8 +32,8 @@ describe('native worker authority',()=>{
     writeFileSync(join(f.home,'.dsh','settings.yaml'),'user-setting: keep\n');
     const config={...f.configuration,agentType:'dsh' as const,model:{...f.configuration.model,protocol:'anthropic-messages',baseUrl:'https://api.deepseek.com/anthropic'}};
     await f.apply(config);
-    const settings=JSON.parse(readFileSync(join(f.home,'.dsh','settings.yaml'),'utf8'));
-    expect(settings['user-setting']).toBe('keep');
+    expect(readFileSync(join(f.home,'.dsh','settings.yaml'),'utf8')).toBe('user-setting: keep\n');
+    const settings=Object.fromEntries(JSON.parse(readFileSync(dshModelPatchPath(f.home),'utf8')).filter((r:any)=>r.id).map((r:any)=>[r.id,r.config]));
     expect(settings['agent-default-model']).toEqual({provider:'deepseek-official',model:'one'});
     expect(settings['llm-deepseek'].baseURL).toBe(config.model.baseUrl);
     expect(f.bots()[0].env).toEqual({});
@@ -47,10 +47,11 @@ describe('native worker authority',()=>{
     writeFileSync(join(f.home,'.dsh','settings.yaml'),JSON.stringify({'llm-pi-ai':{providers:{custom:{api:'openai-completions'}}},'user-setting':'keep'}));
     const model={...f.configuration.model,protocol,modelIds:['one','two'],modelId:'two'};
     await f.apply({...f.configuration,agentType:'dsh',model});
-    const settings=JSON.parse(readFileSync(join(f.home,'.dsh','settings.yaml'),'utf8'));
+    const original=JSON.parse(readFileSync(join(f.home,'.dsh','settings.yaml'),'utf8'));
+    const settings=Object.fromEntries(JSON.parse(readFileSync(dshModelPatchPath(f.home),'utf8')).filter((r:any)=>r.id).map((r:any)=>[r.id,r.config]));
     expect(settings['agent-default-model']).toMatchObject({provider:'platform',model:'two'});
     expect(settings['llm-pi-ai'].providers.platform).toEqual({api:protocol,baseURL:model.baseUrl,apiKeyEnv:'PLATFORM_DSH_API_KEY',models:[{id:'one'},{id:'two'}]});
-    expect(settings['llm-pi-ai'].providers.custom).toBeDefined();expect(settings['user-setting']).toBe('keep');
+    expect(original['llm-pi-ai'].providers.custom).toBeDefined();expect(original['user-setting']).toBe('keep');
     expect(JSON.stringify(settings)).not.toContain('model-private');
     const patch=JSON.parse(readFileSync(dshModelPatchPath(f.home),'utf8'));
     expect(patch.find((row:any)=>row.id==='llm-pi-ai').config.providers.platform.api).toBe(protocol);

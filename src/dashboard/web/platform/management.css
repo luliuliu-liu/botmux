@@ -128,3 +128,14 @@
 .pm-dialog input:disabled { background: var(--surface-muted); color: var(--muted); }
 .pm-dialog footer { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--border-soft); margin-top: 20px; padding-top: 15px; }
 .pm-dialog .pm-qr { display: block; width: min(240px,100%); margin: 18px auto; background: var(--qr-surface); }
+.pm-import-dialog { box-sizing: border-box; max-height: calc(100dvh - 32px); }
+.pm-import-list { max-height: min(300px,35dvh); overflow-y: auto; border: 1px solid var(--border-soft); border-radius: var(--radius-md); }
+.pm-dialog .pm-import-choice { flex-direction: row; align-items: center; gap: 12px; margin: 0; padding: 12px; border-bottom: 1px solid var(--border-soft); cursor: pointer; }
+.pm-import-choice:last-child { border-bottom: 0; }
+.pm-dialog .pm-import-choice input { width: 16px; flex: 0 0 16px; accent-color: var(--accent); }
+.pm-import-choice > span:first-of-type { flex: 1; min-width: 0; }
+.pm-import-choice strong,.pm-import-choice small { display: block; overflow-wrap: anywhere; }
+.pm-import-choice small { margin-top: 4px; color: var(--muted); font-size: 12px; }
+.pm-import-choice[data-registered="true"] { cursor: default; color: var(--muted); }
+.pm-import-choice:has(input:checked) { background: var(--surface-muted); }
+.pm-import-choice .pm-import-description { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

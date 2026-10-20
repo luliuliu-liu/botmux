@@ -1,7 +1,51 @@
 import { describe,expect,it,vi } from 'vitest';
 import { platformManagementEnabled, createPlatformDashboardApi } from '../src/platform/management/dashboard-api.js';
-import { readFileSync } from 'node:fs';
+import { readFileSync,mkdtempSync,writeFileSync,rmSync } from 'node:fs';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
 describe('v2 platform boundaries',()=>{
+  it('shows missing local configuration without exposing inventory secrets and fences record deletion on process absence',async()=>{
+    const names=['BOTMUX_PLATFORM_MANAGED','CONTROL_PLANE_URL','CONTROL_PLANE_SYNC_KEY'] as const;
+    const before=Object.fromEntries(names.map(name=>[name,process.env[name]]));
+    const dir=mkdtempSync(join(tmpdir(),'platform-lifecycle-')),path=join(dir,'bots.json');writeFileSync(path,'[]');
+    let stopped=false;
+    const fetcher=vi.fn(async(url:string)=>({status:200,json:async()=>url.endsWith('/bots')?{bots:[{appId:'cli_lifecycle',botId:'cli_lifecycle',usage:'local',bindingRevision:1,localAppliedRevision:0,secretConfigured:true}]}:url.endsWith('/cli_free')?{deleted:true}:{ok:true}}));
+    try{
+      process.env.BOTMUX_PLATFORM_MANAGED='true';process.env.CONTROL_PLANE_URL='http://resource.invalid';process.env.CONTROL_PLANE_SYNC_KEY='fixture-key';vi.stubGlobal('fetch',fetcher);
+      const api=createPlatformDashboardApi({botsJsonPath:path,localOnboarding:{} as any,listLocalBots:()=>[],isLocalBotStopped:async()=>stopped,
+        localBotRuntime:async()=>({running:true,generation:'dashboard-generation'})});
+      const call=async(suffix:string,method='GET',authorized=true)=>{
+        let status=0,body='';await api({method,headers:{host:'localhost',origin:'http://localhost','content-type':'application/json'},async *[Symbol.asyncIterator](){yield JSON.stringify({confirmAppId:'cli_free'});}} as any,
+          {writeHead:(v:number)=>status=v,end:(v:string)=>body=v} as any,new URL('http://localhost/api/platform'+suffix),authorized);return {status,body};
+      };
+      expect(JSON.parse((await call('/bots')).body).bots[0]).toMatchObject({localConfigured:false,localState:'missing'});
+      expect((await call('/bots/cli_free','DELETE',false)).status).toBe(401);
+      expect((await call('/bots/cli_free','DELETE')).status).toBe(409);
+      expect(fetcher.mock.calls.some(([url])=>url.endsWith('/cli_free'))).toBe(false);
+      stopped=true;expect(await call('/bots/cli_free','DELETE')).toEqual({status:200,body:JSON.stringify({deleted:true})});
+      writeFileSync(path,JSON.stringify([{larkAppId:'cli_native',larkAppSecret:'private-inventory-secret',cliId:'pi'}]));
+      expect((await call('/bots')).body).not.toContain('private-inventory-secret');
+      const inventory=fetcher.mock.calls.findLast(([url])=>url.endsWith('/local-claims'));
+      expect((inventory as any)?.[1].body).not.toContain('private-inventory-secret');
+      expect(JSON.parse((inventory as any)?.[1].body).bots[0].digest).toMatch(/^[a-f0-9]{64}$/);
+      expect(JSON.parse((inventory as any)?.[1].body).bots[0]).toMatchObject({runtimeRunning:true,runtimeGeneration:'dashboard-generation'});
+    }finally{vi.unstubAllGlobals();for(const name of names){if(before[name]===undefined)delete process.env[name];else process.env[name]=before[name];}rmSync(dir,{recursive:true,force:true});}
+  });
+  it('protects existing-app listing/import/refresh with management auth and same-origin JSON',async()=>{
+    const old=process.env.BOTMUX_PLATFORM_MANAGED;process.env.BOTMUX_PLATFORM_MANAGED='true';
+    const existingBots={list:vi.fn(async()=>({apps:[]})),import:vi.fn(async()=>({imported:true})),refresh:vi.fn(async()=>({refreshed:true}))};
+    try{
+      const api=createPlatformDashboardApi({botsJsonPath:'/tmp/platform-api-boundary-test/bots.json',localOnboarding:{} as any,listLocalBots:()=>[],existingBots});
+      const call=async(path:string,method:string,authorized=true,origin='http://localhost')=>{
+        let status=0;await api({method,headers:{host:'localhost',origin,'content-type':'application/json'},async *[Symbol.asyncIterator](){yield JSON.stringify({appId:'cli_one'});}} as any,
+          {writeHead:(code:number)=>status=code,end:()=>{}} as any,new URL('http://localhost/api/platform'+path),authorized);return status;
+      };
+      expect(await call('/feishu-apps','GET',false)).toBe(401);expect(existingBots.list).not.toHaveBeenCalled();
+      expect(await call('/bots/import','POST',true,'http://worker.localhost')).toBe(403);expect(existingBots.import).not.toHaveBeenCalled();
+      expect(await call('/feishu-apps','GET')).toBe(200);expect(await call('/bots/import','POST')).toBe(201);
+      expect(await call('/bots/cli_one/refresh','POST')).toBe(200);expect(existingBots.refresh).toHaveBeenCalledWith('cli_one');
+    }finally{if(old===undefined)delete process.env.BOTMUX_PLATFORM_MANAGED;else process.env.BOTMUX_PLATFORM_MANAGED=old;}
+  });
   it('proxies model create, save-clone and delete only through authenticated management JSON routes',async()=>{
     const names=['BOTMUX_PLATFORM_MANAGED','CONTROL_PLANE_URL','CONTROL_PLANE_SYNC_KEY'] as const;
     const previous=Object.fromEntries(names.map(name=>[name,process.env[name]]));

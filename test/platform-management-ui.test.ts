@@ -9,7 +9,7 @@ vi.mock('../src/dashboard/web/dashboard-components.js',()=>({
 }));
 vi.mock('../src/dashboard/web/platform/feishu-session-panel.js',()=>({FeishuSessionPanel:()=>null}));
 vi.mock('../src/dashboard/web/platform/bot-create.js',()=>({PlatformBotCreate:()=>null}));
-import { ManagementPage,ContainerForm,ModelForm,DeleteModel,UnbindBot,UnbindLocalBot,WorkspaceSettings } from '../src/dashboard/web/platform/management-page.js';
+import { ManagementPage,ContainerForm,ModelForm,DeleteModel,UnbindBot,UnbindLocalBot,WorkspaceSettings,BindLocalBot,DeleteBot } from '../src/dashboard/web/platform/management-page.js';
 import {NetworkRules,LoginWorkbench} from '../src/dashboard/web/platform/worker-access.js';
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
 const current={containerId:'agent-1',displayName:'Agent One',agentType:'pi',image:'pi:test',sandboxId:'sandbox',status:'ready',revision:1,appliedRevision:1,modelProfileId:'old',modelName:'Old',modelId:'model-1',egressHosts:['example.com'],botId:'bot-1',botName:'Bot',workspaceClaim:'workspace',stateClaim:'state',lastError:null};
@@ -28,6 +28,43 @@ afterEach(()=>{for(const r of renderers.splice(0))act(()=>r.unmount());vi.unstub
 async function mount(component:React.ReactElement){let r!:TestRenderer.ReactTestRenderer;await act(async()=>{r=TestRenderer.create(component);});renderers.push(r);return r;}
 const button=(r:TestRenderer.ReactTestRenderer,text:string)=>r.root.findAllByType('button').find(b=>b.children.join('')===text)!;
 describe('model and Agent management UI',()=>{
+  it('restores a DB local binding only after confirmation and submits no model or credential fields',async()=>{
+    fetcher.mockResolvedValue({ok:true,json:async()=>({applied:true})});const done=vi.fn();
+    const r=await mount(React.createElement(BindLocalBot,{bot:{...data.bots[0],usage:'local',bindingRevision:3,localCliId:'codex',ownerConfigured:true} as any,onClose:()=>{},onDone:done}));
+    await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){}}));expect(fetcher).not.toHaveBeenCalled();
+    await act(async()=>r.root.findByProps({type:'checkbox'}).props.onChange({target:{checked:true}}));
+    await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){}}));
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({bindingRevision:3,cliId:'codex',confirmRestart:true});expect(done).toHaveBeenCalled();
+  });
+  it('allows explicit release even when the native roster is missing, fenced by DB revision',async()=>{
+    fetcher.mockResolvedValue({ok:true,json:async()=>({released:true})});
+    const r=await mount(React.createElement(UnbindLocalBot,{bot:{...data.bots[0],usage:'local',bindingRevision:4} as any,onClose:()=>{},onDone:()=>{}}));
+    await act(async()=>r.root.findByProps({type:'checkbox'}).props.onChange({target:{checked:true}}));
+    await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){}}));
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({bindingRevision:4,confirmLocalStop:true});
+  });
+  it('deletes only a confirmed platform record and does not call Feishu app deletion',async()=>{
+    fetcher.mockResolvedValue({ok:true,json:async()=>({deleted:true})});const done=vi.fn();
+    const r=await mount(React.createElement(DeleteBot,{bot:data.bots[0] as any,onClose:()=>{},onDone:done}));
+    await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){}}));expect(fetcher).not.toHaveBeenCalled();
+    await act(async()=>r.root.findByProps({name:'confirmBotAppId'}).props.onChange({target:{value:'cli_test'}}));
+    await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){}}));
+    expect(fetcher.mock.calls[0][0]).toBe('/api/platform/bots/cli_test');expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({confirmAppId:'cli_test'});expect(done).toHaveBeenCalled();
+  });
+  it('offers existing-Bot import and puts remote refresh in each Bot action menu',async()=>{
+    const r=await mount(React.createElement(ManagementPage,{page:'bots'}));
+    expect(button(r,'导入已有 Bot')).toBeDefined();expect(button(r,'新建 Bot')).toBeDefined();
+    expect(button(r,'刷新飞书配置')).toBeUndefined();
+    await act(async()=>r.root.findByProps({'aria-label':'Bot（cli_test） 的操作',type:'button'}).props.onClick());
+    expect(r.root.findAllByProps({role:'menuitem'}).map(b=>b.children.join(''))).toEqual(['刷新飞书配置','摘除绑定','删除记录']);
+    fetcher.mockImplementation(async(url:string,init?:any)=>{
+      if(url.endsWith('/refresh'))return {ok:true,json:async()=>({refreshed:true,runtimeSynced:false,message:'名称已刷新，Agent 同步未确认'})};
+      const path=url.replace('/api/platform','');return {ok:true,json:async()=>path==='/catalog'?{agents:[]}:path==='/workspaces'?workspaceOptions:{[path.slice(1)]:data[path.slice(1) as keyof typeof data]}};
+    });
+    await act(async()=>button(r,'刷新飞书配置').props.onClick());await act(async()=>{});
+    expect(fetcher.mock.calls.some(([url,init])=>url==='/api/platform/bots/cli_test/refresh'&&init.method==='POST')).toBe(true);
+    expect(JSON.stringify(r.toJSON())).toContain('Agent 同步未确认');
+  });
   it('offers native OAuth by Agent capability without any OAuth model record, and submits a native default',async()=>{
     const agents=[{id:'pi',name:'Pi',supported:true,version:'test',authMethods:['api-key'],protocols:['openai-completions'],images:[{id:'native',image:'pi:test',label:'Pi'}]},
       {id:'codex',name:'Codex',supported:true,version:'test',authMethods:['api-key','oauth'],protocols:['openai-responses'],images:[{id:'native',image:'codex:test',label:'Codex'}]}];

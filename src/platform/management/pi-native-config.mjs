@@ -1,6 +1,5 @@
-/** Shared by native Worker configuration and the resource bridge's compatibility
- * path. Node built-ins only: old Workers can be repaired without replacing their
- * image or passing credentials in argv. Never log this module's input/files. */
+/** Synchronize native Pi auth/defaults from container-global configuration.
+ * Node built-ins only. Never log this module's input/files. */
 import {createHash,randomUUID} from 'node:crypto';
 import {mkdirSync,lstatSync,readFileSync,openSync,writeFileSync,fsyncSync,closeSync,renameSync,unlinkSync,rmdirSync} from 'node:fs';
 import {join,dirname} from 'node:path';
