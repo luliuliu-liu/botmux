@@ -2,17 +2,24 @@
 import { createHash } from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import { mkdirSync,readFileSync,existsSync,realpathSync,unlinkSync } from 'node:fs';
-import {join} from 'node:path';
+import {dirname,join} from 'node:path';
 import {withFileLock} from '../../utils/file-lock.js';
 import {atomicWriteFileSync} from '../../utils/atomic-write.js';
 import {mutateBotsJsonAtomic} from '../../setup/bots-store.js';
 import {piNativeConfigurationDigest,synchronizePiNativeConfiguration} from './pi-native-config.mjs';
-import {agentEnvironmentKeys,containerAgentDirectories,nativeConfigurationPublicDigest,writeContainerAgentConfiguration,readContainerAgentEnvironment,readContainerAgentModel} from './container-agent-files.mjs';
+import {agentEnvironmentKeys,containerAgentDirectories,nativeConfigurationPublicDigest,writeContainerAgentConfiguration,readContainerAgentEnvironment,readContainerAgentModel,managedClaudeEnvironment} from './container-agent-files.mjs';
 import {dshModelPatchPath} from './dsh-model-patch.js';
+import {proxyEnvironment,readProxy} from './container-proxy.mjs';
 
-export type NativeModel={provider:string;baseUrl:string;modelId:string;modelIds?:string[];apiKey?:string;protocol?:string;authMethod?:string};
+export type NativeReasoningLevel='low'|'medium'|'high'|'xhigh'|'max'|'ultra';
+export type NativeReasoningSummary='none'|'auto'|'concise'|'detailed';
+export type NativeModelCapability={modelId:string;inputModalities:Array<'text'|'image'>;contextWindow:number;maxTokens:number;
+  reasoningLevels:NativeReasoningLevel[];defaultReasoningLevel:NativeReasoningLevel|null;
+  supportsReasoningSummaries?:boolean;defaultReasoningSummary?:NativeReasoningSummary};
+export type NativeModel={provider:string;baseUrl:string;modelId:string;modelIds?:string[];modelCapabilities?:NativeModelCapability[];
+  apiKey?:string;protocol?:string;authMethod?:string};
 export type NativeBinding={appId:string;generation:string;appSecret:string;displayName:string;brand:'feishu'|'lark';owner:{allowedUsers:string[];ownerOpenId?:string}};
-export type NativeConfiguration={generation:string;revision:number;agentType:'pi'|'codex'|'claude-code'|'zcode'|'dsh';model:NativeModel;binding:NativeBinding|null};
+export type NativeConfiguration={generation:string;revision:number;agentType:'pi'|'codex'|'claude-code'|'zcode'|'dsh';model:NativeModel;binding:NativeBinding|null;proxy?:import('./container-proxy.mjs').ProxyConfiguration|null};
 type Fleet={supervisorAlive:boolean;rows:Array<{appId:string;alive:boolean;status:string}>};
 type Dependencies={home:string;stop:(appId:string)=>Promise<{ok:boolean}>;start:(appId:string)=>Promise<{ok:boolean}>;fleet:()=>Fleet;busy:()=>Promise<boolean>};
 const read=(path:string,fallback:any)=>existsSync(path)?JSON.parse(readFileSync(path,'utf8')):fallback;
@@ -24,6 +31,8 @@ const rosterDigest=(bots:any[])=>hash(bots.map(bot=>({appId:bot.larkAppId,secret
 function modelDigest(home:string,config:NativeConfiguration){
   const file=config.agentType==='codex'?join(home,'.codex','config.toml'):null;
   return hash({native:config.agentType==='pi'?piNativeConfigurationDigest(home,config.model):file&&existsSync(file)?hash(codexManagedProjection(readFileSync(file,'utf8'))):null,
+    codexCatalog:config.agentType==='codex'&&existsSync(join(home,'.codex',CODEX_CATALOG_FILE))
+      ?hash(readFileSync(join(home,'.codex',CODEX_CATALOG_FILE),'utf8')):null,
     dsh:config.agentType==='dsh'&&existsSync(dshModelPatchPath(home))?hash(readFileSync(dshModelPatchPath(home),'utf8')):null,
     environment:readContainerAgentEnvironment(home,config.agentType),model:readContainerAgentModel(home,config.agentType)});
 }
@@ -32,6 +41,44 @@ const runtimeModel=(config:NativeConfiguration)=>config.model.modelId
   :null;
 const CODEX_ROOT_BEGIN='# botmux-platform-root:begin',CODEX_ROOT_END='# botmux-platform-root:end';
 const CODEX_PROVIDER_BEGIN='# botmux-platform-provider:begin',CODEX_PROVIDER_END='# botmux-platform-provider:end';
+const CODEX_CATALOG_FILE='platform-models.json';
+const NATIVE_REASONING_LEVELS=['low','medium','high','xhigh','max','ultra'] as const;
+const defaultNativeCapability=(modelId:string):NativeModelCapability=>({modelId,inputModalities:['text'],contextWindow:128_000,maxTokens:8192,
+  reasoningLevels:['low','medium','high','xhigh'],defaultReasoningLevel:'medium',
+  supportsReasoningSummaries:false,defaultReasoningSummary:'none'});
+function nativeModelCapabilities(model:NativeModel):NativeModelCapability[]{
+  const ids=model.modelIds?.length?model.modelIds:[model.modelId];
+  const source=model.modelCapabilities??ids.map(defaultNativeCapability);
+  if(source.length!==ids.length||source.some((item,index)=>item.modelId!==ids[index]
+    ||!Array.isArray(item.inputModalities)||!item.inputModalities.includes('text')
+    ||item.inputModalities.some(value=>!['text','image'].includes(value))
+    ||!Number.isSafeInteger(item.contextWindow)||item.contextWindow<1024||item.contextWindow>10_000_000
+    ||!Number.isSafeInteger(item.maxTokens)||item.maxTokens<1||item.maxTokens>item.contextWindow
+    ||!Array.isArray(item.reasoningLevels)||item.reasoningLevels.some(value=>!NATIVE_REASONING_LEVELS.includes(value))
+    ||item.defaultReasoningLevel!==null&&!item.reasoningLevels.includes(item.defaultReasoningLevel)
+    ||item.supportsReasoningSummaries!==undefined&&typeof item.supportsReasoningSummaries!=='boolean'
+    ||item.defaultReasoningSummary!==undefined&&!['none','auto','concise','detailed'].includes(item.defaultReasoningSummary)
+    ||item.supportsReasoningSummaries===false&&item.defaultReasoningSummary!==undefined&&item.defaultReasoningSummary!=='none'))
+    throw Error('invalid_model_capabilities');
+  return source.map(item=>({...item,inputModalities:[...new Set(item.inputModalities)],
+    reasoningLevels:[...new Set(item.reasoningLevels)],
+    supportsReasoningSummaries:item.supportsReasoningSummaries??false,
+    defaultReasoningSummary:item.supportsReasoningSummaries?(item.defaultReasoningSummary??'auto'):'none'}));
+}
+function codexModelCatalog(model:NativeModel){
+  return {models:nativeModelCapabilities(model).map((capability,priority)=>({
+    slug:capability.modelId,display_name:capability.modelId,description:'Platform managed model',
+    default_reasoning_level:capability.defaultReasoningLevel??capability.reasoningLevels[0]??'medium',
+    supported_reasoning_levels:capability.reasoningLevels.map(effort=>({effort,description:effort})),
+    shell_type:'unified_exec',visibility:'list',supported_in_api:true,priority,
+    base_instructions:'You are a coding agent. Follow the user instructions and use the available tools.',
+    support_verbosity:false,default_reasoning_summary:capability.defaultReasoningSummary,
+    truncation_policy:{mode:'tokens',limit:Math.min(10_000,capability.contextWindow)},context_window:capability.contextWindow,
+    experimental_supported_tools:[],tool_mode:'direct',use_responses_lite:false,
+    input_modalities:capability.inputModalities,supports_image_detail_original:capability.inputModalities.includes('image'),
+    supports_reasoning_effort_updates:capability.reasoningLevels.length>0,
+  }))};
+}
 function codexLegacyManagedProjection(text:string){
   return text.match(/# botmux-platform-(?:root|provider):begin[\s\S]*?# botmux-platform-(?:root|provider):end/g)??[];
 }
@@ -43,23 +90,28 @@ function codexManagedProjection(text:string){
   const root=markedBlock(text,CODEX_ROOT_BEGIN,CODEX_ROOT_END);
   const ownedRoot=root?[
     CODEX_ROOT_BEGIN,
-    ...root.split(/\r?\n/).filter(line=>/^\s*(?:model|model_provider|cli_auth_credentials_store)\s*=/.test(line)),
+    ...root.split(/\r?\n/).filter(line=>/^\s*(?:model|model_provider|model_catalog_json|model_supports_reasoning_summaries|cli_auth_credentials_store)\s*=/.test(line)),
     CODEX_ROOT_END,
   ].join('\n'):'';
   const provider=markedBlock(text,CODEX_PROVIDER_BEGIN,CODEX_PROVIDER_END);
   return [ownedRoot,provider].filter(Boolean);
 }
+// The native /model menu persists its selection in config.toml, sometimes
+// outside our marker. Model selection is mutable; provider/auth routing is not.
+function codexRoutingProjection(text:string){
+  return codexManagedProjection(text).map(block=>block.split(/\r?\n/).filter(line=>!/^\s*model\s*=/.test(line)).join('\n'));
+}
 function codexUnmanagedMarkedRoot(text:string){
   const root=markedBlock(text,CODEX_ROOT_BEGIN,CODEX_ROOT_END);
   if(!root)return '';
   return root.split(/\r?\n/).filter(line=>line!==CODEX_ROOT_BEGIN&&line!==CODEX_ROOT_END
-    &&line.trim()&&!/^\s*(?:model|model_provider|cli_auth_credentials_store)\s*=/.test(line)).join('\n');
+    &&line.trim()&&!/^\s*(?:model|model_provider|model_catalog_json|model_supports_reasoning_summaries|cli_auth_credentials_store)\s*=/.test(line)).join('\n');
 }
 function codexManagedProjectionCandidates(text:string){
   const root=markedBlock(text,CODEX_ROOT_BEGIN,CODEX_ROOT_END);
   if(!root)return [hash([])];
   const provider=markedBlock(text,CODEX_PROVIDER_BEGIN,CODEX_PROVIDER_END);
-  const fields=root.split(/\r?\n/).filter(line=>/^\s*(?:model|model_provider|cli_auth_credentials_store)\s*=/.test(line));
+  const fields=root.split(/\r?\n/).filter(line=>/^\s*(?:model|model_provider|model_catalog_json|model_supports_reasoning_summaries|cli_auth_credentials_store)\s*=/.test(line));
   // Older releases hashed the whole block. Codex may later add/change values
   // inside that marker (for example model + reasoning). Recognize the exact
   // sidecar-owned subset, but never accept an unmarked/provider mutation.
@@ -82,10 +134,16 @@ function codexManagedConfiguration(previous:string|null,owned:any,pending:any,fi
   const marked=base.includes(CODEX_ROOT_BEGIN)||base.includes(CODEX_PROVIDER_BEGIN);
   if(marked){
     const candidates=codexManagedProjectionCandidates(base);
-    if(!candidates.includes(owned?.managedDigest)&&!candidates.includes(pending?.nextManagedDigest))throw new Error('codex_global_config_conflict');
+    const routingDigest=hash(codexRoutingProjection(base));
+    if(routingDigest!==owned?.routingDigest&&routingDigest!==pending?.nextRoutingDigest
+      &&!candidates.includes(owned?.managedDigest)&&!candidates.includes(pending?.nextManagedDigest))throw new Error('codex_global_config_conflict');
     const unmanagedRoot=codexUnmanagedMarkedRoot(base);
     base=removeMarkedBlock(removeMarkedBlock(base,CODEX_ROOT_BEGIN,CODEX_ROOT_END),CODEX_PROVIDER_BEGIN,CODEX_PROVIDER_END);
     if(unmanagedRoot)base=`${unmanagedRoot}\n${base.replace(/^\s*\n/,'')}`;
+    // Only remove root-level native selections after verifying platform
+    // ownership. Nested profiles and unrelated settings remain untouched.
+    const table=base.search(/^\s*\[/m),end=table<0?base.length:table;
+    base=base.slice(0,end).replace(/^\s*model\s*=.*(?:\r?\n|$)/gm,'')+base.slice(end);
   }else if(base){
     // Compatibility with the prior full-file writer. Only a byte-identical
     // file recorded by its ownership sidecar may be retired wholesale.
@@ -95,17 +153,24 @@ function codexManagedConfiguration(previous:string|null,owned:any,pending:any,fi
       if(owned.digest!==hash(base))throw new Error('codex_global_config_conflict');
       base='';
     }
-    else if(/^\s*(?:model|model_provider|cli_auth_credentials_store)\s*=/m.test(base)
+  else if(/^\s*(?:model|model_provider|model_catalog_json|model_supports_reasoning_summaries|cli_auth_credentials_store)\s*=/m.test(base)
       ||/^\s*\[model_providers\.platform\]\s*$/m.test(base))throw new Error('codex_global_config_conflict');
   }
   const preservedRoot=base.split(/^\s*\[/m,1)[0];
-  if(/^\s*(?:model|model_provider|cli_auth_credentials_store)\s*=/m.test(preservedRoot)
+  if(/^\s*(?:model|model_provider|model_catalog_json|model_supports_reasoning_summaries|cli_auth_credentials_store)\s*=/m.test(preservedRoot)
     ||/^\s*\[model_providers\.platform\]\s*$/m.test(base))throw new Error('codex_global_config_conflict');
   const {model}=config;
   const root=[
     CODEX_ROOT_BEGIN,
     ...(model.modelId?[`model = ${JSON.stringify(model.modelId)}`]:[]),
-    ...(model.authMethod==='oauth'?['cli_auth_credentials_store = "file"']:['model_provider = "platform"']),
+    ...(model.authMethod==='oauth'?['cli_auth_credentials_store = "file"']:[
+      'model_provider = "platform"',
+      `model_catalog_json = ${JSON.stringify(join(dirname(file),CODEX_CATALOG_FILE))}`,
+      // Codex supports this native setting. Platform providers use it by
+      // default so their Responses-compatible gateway receives reasoning
+      // metadata when a selected model supports a requested summary.
+      'model_supports_reasoning_summaries = true',
+    ]),
     CODEX_ROOT_END,
   ].join('\n')+'\n';
   const provider=model.authMethod==='oauth'?'':[
@@ -124,18 +189,25 @@ function codexManagedConfiguration(previous:string|null,owned:any,pending:any,fi
 }
 
 export function nativeModelEnvironment(home:string,agentType:string,model:NativeModel):Record<string,string>{
+  const environment=nativeModelEnvironmentBase(home,agentType,model);
+  return {...(agentType==='claude-code'?managedClaudeEnvironment(environment):environment),...proxyEnvironment(readProxy(home))};
+}
+function nativeModelEnvironmentBase(home:string,agentType:string,model:NativeModel):Record<string,string>{
   const protocol=model.protocol||'openai-completions',oauth=model.authMethod==='oauth';
+  if(agentType==='claude-code'&&model.provider==='vercel'&&!model.apiKey?.trim())throw Error('vercel_key_required');
   if(agentType==='zcode'){
     if(oauth||protocol!=='zcode-coding-plan'||model.provider!=='zai'||model.baseUrl!=='https://api.z.ai'||model.modelId!==''||(model.modelIds?.length??0)>0||!model.apiKey?.trim())throw Error('invalid_zcode_coding_plan');
     return {ZCODE_CODING_PLAN_API_KEY:model.apiKey};
   }
   if(!/^[A-Za-z0-9._-]+$/.test(model.provider)||typeof model.modelId!=='string'||(!oauth&&!model.modelId)||!/^https?:\/\//.test(model.baseUrl))throw new Error('invalid_model');
   if(oauth&&model.modelId===''){
-    if(agentType==='codex'&&protocol==='openai-responses'||agentType==='claude-code'&&protocol==='anthropic-messages')return {};
+    if(agentType==='codex'&&protocol==='openai-responses')return {};
+    if(agentType==='claude-code'&&protocol==='anthropic-messages')return {...(model.provider==='vercel'?{ANTHROPIC_BASE_URL:'https://ai-gateway.vercel.sh',ANTHROPIC_CUSTOM_HEADERS:`x-ai-gateway-api-key: Bearer ${model.apiKey||''}`}:{})};
     throw new Error('incompatible_model');
   }
   const ids=model.modelIds??[model.modelId];
   if(!Array.isArray(ids)||!ids.length||ids.length>100||!ids.includes(model.modelId)||ids.some(id=>typeof id!=='string'||!id.trim()||id!==id.trim()||id.length>300||/[\u0000-\u001f\u007f]/.test(id)))throw new Error('invalid_models');
+  nativeModelCapabilities(model);
   if(agentType==='pi'){
     if(oauth||!['openai-completions','openai-responses','anthropic-messages'].includes(protocol))throw new Error('incompatible_model');
     return {PI_MODEL_PROVIDER:model.provider,PI_MODEL_ID:model.modelId,PI_MODEL_API_KEY:model.apiKey||''};
@@ -146,7 +218,7 @@ export function nativeModelEnvironment(home:string,agentType:string,model:Native
   }
   if(agentType==='claude-code'){
     if(protocol!=='anthropic-messages')throw new Error('claude_requires_anthropic');
-    return oauth?{}:{ANTHROPIC_BASE_URL:model.baseUrl,ANTHROPIC_API_KEY:model.apiKey||'',ANTHROPIC_MODEL:model.modelId,CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1'};
+    return {...(oauth?(model.provider==='vercel'?{ANTHROPIC_BASE_URL:'https://ai-gateway.vercel.sh',ANTHROPIC_CUSTOM_HEADERS:`x-ai-gateway-api-key: Bearer ${model.apiKey||''}`}:{}) :{ANTHROPIC_BASE_URL:model.baseUrl,ANTHROPIC_API_KEY:model.apiKey||'',ANTHROPIC_MODEL:model.modelId,CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1'})};
   }
   if(agentType==='dsh'){
     if(oauth||!['openai-completions','openai-responses','anthropic-messages'].includes(protocol))throw Error('dsh_requires_api_key_protocol');
@@ -182,7 +254,9 @@ export async function writeNativeAgentModel(home:string,config:NativeConfigurati
     if(official)next['llm-deepseek']={baseURL:model.baseUrl,apiKeyEnv:'PLATFORM_DSH_API_KEY'};
     else next['llm-pi-ai']={providers:{platform:{
       api:model.protocol||'openai-completions',baseURL:model.baseUrl,apiKeyEnv:'PLATFORM_DSH_API_KEY',
-      models:(model.modelIds??[model.modelId]).map(id=>({id})),
+      models:nativeModelCapabilities(model).map(capability=>({id:capability.modelId,name:capability.modelId,
+        reasoning:capability.reasoningLevels.length>0,input:capability.inputModalities,
+        contextWindow:capability.contextWindow,maxTokens:capability.maxTokens})),
     }}};
     // Use the native overlay only; never rewrite the user's settings/profile.
     save(dshModelPatchPath(home),[
@@ -201,9 +275,15 @@ export async function writeNativeAgentModel(home:string,config:NativeConfigurati
     const owned=read(ownership,null),pending=read(transaction,null);
     const next=codexManagedConfiguration(previousText,owned,pending,file,config);
     const nextManagedDigest=hash(codexManagedProjection(next));
-    save(transaction,{schemaVersion:2,file,previousManagedDigest:hash(codexManagedProjection(previousText??'')),nextManagedDigest});
+    const nextRoutingDigest=hash(codexRoutingProjection(next));
+    save(transaction,{schemaVersion:3,file,previousManagedDigest:hash(codexManagedProjection(previousText??'')),nextManagedDigest,nextRoutingDigest});
+    const catalog=join(directory,CODEX_CATALOG_FILE);
+    if(model.authMethod!=='oauth')atomicWriteFileSync(catalog,JSON.stringify(codexModelCatalog(model)),{mode:0o600});
     atomicWriteFileSync(file,next,{mode:0o600});
-    save(ownership,{file,managedDigest:nextManagedDigest});
+    if(model.authMethod==='oauth'){
+      try{unlinkSync(catalog);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    }
+    save(ownership,{file,managedDigest:nextManagedDigest,routingDigest:nextRoutingDigest});
     try{unlinkSync(transaction);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
   }
   writeContainerAgentConfiguration(home,agentType,{env:environment,model:selected});

@@ -42,7 +42,19 @@ function validate(model){
   const url=new URL(model.baseUrl);if(!['http:','https:'].includes(url.protocol)||url.username||url.password)throw new Error('invalid_pi_native_endpoint');
   const ids=model.modelIds??[model.modelId];
   if(!Array.isArray(ids)||!ids.length||ids.length>100||!ids.includes(model.modelId)||ids.some(id=>typeof id!=='string'||!id.trim()||id!==id.trim()||id.length>300||/[\u0000-\u001f\u007f]/.test(id)))throw new Error('invalid_pi_native_models');
-  return ids;
+  const capabilities=model.modelCapabilities??ids.map(modelId=>({modelId,inputModalities:['text'],contextWindow:128000,maxTokens:8192,
+    reasoningLevels:['low','medium','high','xhigh'],defaultReasoningLevel:'medium',
+    supportsReasoningSummaries:false,defaultReasoningSummary:'none'}));
+  if(capabilities.length!==ids.length||capabilities.some((item,index)=>item.modelId!==ids[index]
+    ||!Array.isArray(item.inputModalities)||!item.inputModalities.includes('text')||item.inputModalities.some(value=>!['text','image'].includes(value))
+    ||!Number.isSafeInteger(item.contextWindow)||item.contextWindow<1024||item.contextWindow>10000000
+    ||!Number.isSafeInteger(item.maxTokens)||item.maxTokens<1||item.maxTokens>item.contextWindow
+    ||!Array.isArray(item.reasoningLevels)||item.reasoningLevels.some(value=>!['low','medium','high','xhigh','max','ultra'].includes(value))
+    ||item.defaultReasoningLevel!==null&&!item.reasoningLevels.includes(item.defaultReasoningLevel)
+    ||item.supportsReasoningSummaries!==undefined&&typeof item.supportsReasoningSummaries!=='boolean'
+    ||item.defaultReasoningSummary!==undefined&&!['none','auto','concise','detailed'].includes(item.defaultReasoningSummary)
+    ||item.supportsReasoningSummaries===false&&item.defaultReasoningSummary!==undefined&&item.defaultReasoningSummary!=='none'))throw Error('invalid_pi_native_capabilities');
+  return capabilities;
 }
 export function piNativeConfigurationDigest(home,model){
   try{
@@ -53,7 +65,7 @@ export function piNativeConfigurationDigest(home,model){
   }catch{return null;}
 }
 export async function synchronizePiNativeConfiguration(home,model,{allowWrite=true,lockTimeoutMs=5000}={}){
-  const ids=validate(model),p=paths(home);
+  const capabilities=validate(model),p=paths(home);
   directory(join(home,'.pi'));directory(p.agent);directory(join(home,'.botmux'));directory(dirname(p.owner));
   return locked(p.owner,lockTimeoutMs,()=>locked(p.auth,lockTimeoutMs,()=>locked(p.settings,lockTimeoutMs,()=>{
     const models=objectFile(p.models),auth=objectFile(p.auth),settings=objectFile(p.settings),previous=objectFile(p.owner);
@@ -66,7 +78,9 @@ export async function synchronizePiNativeConfiguration(home,model,{allowWrite=tr
       if(digest(providers[previous.provider]??null)===previous.registryDigest)delete providers[previous.provider];
     }
     const registry={baseUrl:model.baseUrl,api:model.protocol||'openai-completions',apiKey:'$PI_MODEL_API_KEY',
-      models:ids.map(id=>({id,name:id,reasoning:false,input:['text'],contextWindow:128000,maxTokens:8192,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}))};
+      models:capabilities.map(item=>({id:item.modelId,name:item.modelId,reasoning:item.reasoningLevels.length>0,
+        input:item.inputModalities,contextWindow:item.contextWindow,maxTokens:item.maxTokens,
+        cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}))};
     // The secret's single authority is agent-environment.json and every launch
     // path injects PI_MODEL_API_KEY. Pi keeps only the native env reference.
     const credential={type:'api_key',key:'$PI_MODEL_API_KEY'};
@@ -80,6 +94,6 @@ export async function synchronizePiNativeConfiguration(home,model,{allowWrite=tr
     const changed=entries.filter(([path,next,current])=>digest(next)!==digest(current)||((fileStat(path)?.mode??0)&0o777)!==0o600);
     if(changed.length&&!allowWrite)throw new Error('pi_native_configuration_busy');
     for(const [path,value] of changed)atomic(path,value);
-    return {provider:model.provider,modelId:model.modelId,models:ids.length,changed:changed.length>0};
+    return {provider:model.provider,modelId:model.modelId,models:capabilities.length,changed:changed.length>0};
   })));
 }

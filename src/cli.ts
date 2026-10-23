@@ -18186,7 +18186,7 @@ switch (command) {
   case 'start-bot': await cmdStartBot(process.argv.slice(3)); break;
   case 'stop-bot': await cmdStopBot(process.argv.slice(3)); break;
   case '__platform-goal': {
-    if(readFileSync('/etc/botmux-platform-role','utf8').trim()!=='worker')throw new Error('native_worker_image_required');
+    if((await import('./platform/management/container-role.js')).containerRole()!=='worker')throw new Error('native_worker_image_required');
     const {executeWorkerCommand}=await import('./platform/workflow/worker-command.js');
     const controller=new AbortController();
     process.on('SIGTERM',()=>controller.abort('worker_command_cancelled'));
@@ -18199,7 +18199,7 @@ switch (command) {
   case '__platform-worker': {
     // Private image-local bridge. It has no HTTP listener and never accepts
     // a global platform token. Only native Worker images expose this action.
-    if(readFileSync('/etc/botmux-platform-role','utf8').trim()!=='worker')throw new Error('native_worker_image_required');
+    if((await import('./platform/management/container-role.js')).containerRole()!=='worker')throw new Error('native_worker_image_required');
     const input=JSON.parse(readFileSync(0,'utf8'));
     const {readFleetStatus,startBotViaSupervisor}=await import('./core/fleet-runtime.js');
     const busy=async()=>{

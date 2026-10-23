@@ -1,12 +1,12 @@
-import {readFileSync} from 'node:fs';
 import type {IncomingMessage,ServerResponse} from 'node:http';
 import {controlRequestOriginState} from '../../dashboard/control-csrf.js';
+import {containerRole} from './container-role.js';
 
 /** A Worker is a separate browser origin, not a trusted Control UI. Apply the
  * existing native Origin policy to every Control write, including native
  * settings APIs, rather than guarding only our /api/platform additions. */
 export function createControlBrowserBoundary(rolePath='/etc/botmux-platform-role'){
-  let control=false;try{control=readFileSync(rolePath,'utf8').trim()==='control';}catch{}
+  const control=containerRole(rolePath)==='control';
   return (req:IncomingMessage,res:ServerResponse,pathname:string)=>{
     if(!control)return false;
     if(req.method==='GET'&&(pathname==='/'||pathname==='/dashboard')){

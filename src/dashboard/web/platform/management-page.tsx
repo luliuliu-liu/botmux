@@ -7,15 +7,24 @@ import { PlatformBotCreate } from './bot-create.js';
 import { PlatformBotImport } from './bot-import.js';
 import { syncAgentConfiguration } from './agent-configuration.js';
 import { AgentActions, CompactText, Parameter } from './compact-controls.js';
-import {NetworkRules,LoginWorkbench} from './worker-access.js';
+import {LoginWorkbench} from './worker-access.js';
+import {ImageUpgrade} from './image-upgrade.js';
+import {ProxySelect} from './proxies.js';
 import {LocalControlAgent} from './local-control-agent.js';
 
 type Bot={botId:string;displayName:string;appId:string;usage:'local'|'free'|'sandbox';localRevision?:string;localDetachPending?:boolean;localConfigured?:boolean;localOwned?:boolean;localState?:string;bindingRevision?:number;localCliId?:string;ownerConfigured?:boolean;containerId?:string;containerName?:string;containerRevision?:number;containerStatus?:string;detachPending?:boolean;secretConfigured:boolean};
-type Model={profileId:string;displayName:string;provider:string;baseUrl:string;modelId:string;modelIds?:string[];apiKeyConfigured:boolean;enabled:boolean;protocol?:string;authMethod?:string};
-const dynamicModel=(model:Model)=>model.protocol==='zcode-coding-plan';
+type ModelCapability={modelId:string;inputModalities:Array<'text'|'image'>;contextWindow:number;maxTokens:number;reasoningLevels:string[];defaultReasoningLevel:string|null;
+  supportsReasoningSummaries:boolean;defaultReasoningSummary:'none'|'auto'|'concise'|'detailed'};
+type Model={profileId:string;displayName:string;provider:string;baseUrl:string;modelId:string;modelIds?:string[];modelCapabilities?:ModelCapability[];apiKeyConfigured:boolean;enabled:boolean;protocol?:string;authMethod?:string};
+const dynamicModel=(model:Model)=>['zcode-coding-plan','vercel-claude'].includes(model.protocol||'');
 const idsOf=(model:Model)=>dynamicModel(model)?['']:model.modelIds?.length?model.modelIds:[model.modelId];
+const reasoningLevels=['low','medium','high','xhigh','max','ultra'];
+const defaultCapability=(modelId:string):ModelCapability=>({modelId,inputModalities:['text'],contextWindow:128000,maxTokens:8192,
+  reasoningLevels:['low','medium','high','xhigh'],defaultReasoningLevel:'medium',
+  supportsReasoningSummaries:false,defaultReasoningSummary:'none'});
+const capabilitiesOf=(model:Model)=>dynamicModel(model)?[]:idsOf(model).map(modelId=>model.modelCapabilities?.find(item=>item.modelId===modelId)||defaultCapability(modelId));
 export type Container={containerId:string;displayName:string;agentType:string;image:string;sandboxId:string|null;authMethod?:string;modelProfileId:string|null;modelName:string;modelId:string|null;
-  status:string;revision:number;appliedRevision:number;egressHosts:string[];networkMode?:'unrestricted'|'restricted';botId:string|null;botName:string|null;workspaceClaim:string;workspaceKind?:string;workspaceReadOnly?:boolean;detachPending?:boolean;stateClaim:string;lastError:string|null;runtimeKind?:string};
+  previousImage?:string|null;upgradeState?:string|null;requiresLogin?:boolean;proxyProfileId?:string|null;status:string;revision:number;appliedRevision:number;botId:string|null;botName:string|null;workspaceClaim:string;workspaceKind?:string;workspaceReadOnly?:boolean;detachPending?:boolean;stateClaim:string;lastError:string|null;runtimeKind?:string};
 type Agent={id:string;name:string;supported:boolean;version:string|null;protocols?:string[];authMethods?:string[];images:Array<{id:string;image:string;label:string}>};
 type WorkspaceOptions={hostPathEnabled:boolean;hostPathMode?:'unrestricted'|'restricted';tenantHome?:string|null;defaultHostPath?:string|null;hostRoots:string[];workspaces:Array<{kind:'volume'|'hostpath';source:string;readOnly:boolean;useCount:number;shared?:boolean}>};
 type Data={bots:Bot[];models:Model[];containers:Container[];agents:Agent[];workspaceOptions?:WorkspaceOptions};
@@ -32,7 +41,7 @@ export function Modal({title,children,onClose,busy=false}:{title:string;children
 }
 export function ManagementPage({page}:{page:'bots'|'models'|'agents'}){
   const [data,setData]=useState<Data>(initial),[error,setError]=useState(''),[notice,setNotice]=useState(''),[loading,setLoading]=useState(true);
-  const [modal,setModal]=useState<'bot'|'import-bot'|'bind-local'|'delete-bot'|'container'|'model'|'delete-model'|'delete'|'unbind'|'workspaces'|'network'|'logins'|null>(null),[selected,setSelected]=useState<Container|null>(null),[model,setModel]=useState<Model|null>(null),[selectedBot,setSelectedBot]=useState<Bot|null>(null);
+  const [modal,setModal]=useState<'bot'|'import-bot'|'bind-local'|'delete-bot'|'container'|'model'|'delete-model'|'delete'|'unbind'|'workspaces'|'upgrade'|'logins'|null>(null),[selected,setSelected]=useState<Container|null>(null),[model,setModel]=useState<Model|null>(null),[selectedBot,setSelectedBot]=useState<Bot|null>(null);
   const [cloneSourceId,setCloneSourceId]=useState<string|null>(null);
   const mounted=useRef(true);
   const syncing=useRef(false),[syncingId,setSyncingId]=useState<string|null>(null);
@@ -96,20 +105,20 @@ export function ManagementPage({page}:{page:'bots'|'models'|'agents'}){
     ]}/>{bot.detachPending?<a href="#/platform-agents">重试同步</a>:null}</td></tr>)}</tbody></table>{!data.bots.length?<p className="empty">暂无机器人</p>:null}</div>
   </>:page==='models'?<>
     <p className="hint">集中维护模型、服务地址和 API Key。保存连接不会自动修改已运行的 Agent；请到 <a href="#/platform-agents">Agent 管理</a> 切换模型或同步最新配置。</p>
-    <h2>模型连接</h2><div className="pm-table-wrap"><table className="pm-model-table"><thead><tr><th>名称</th><th>Provider / 模型</th><th>认证 / 状态</th><th>操作</th></tr></thead><tbody>{data.models.map(m=><tr key={m.profileId}><td><CompactText text={m.displayName}/><small><CompactText text={m.protocol||'openai-completions'}/></small></td><td><CompactText text={m.provider}/><details><summary>{dynamicModel(m)?'原生动态模型':idsOf(m).length} 个模型 · 展开查看</summary>{idsOf(m).map(id=><small key={id}><CompactText text={`${dynamicModel(m)?'ZCode 自主管理模型列表':id}${!dynamicModel(m)&&id===m.modelId?'（默认）':''}`}/></small>)}</details></td><td>{m.authMethod==='oauth'?'实例内官方登录':m.apiKeyConfigured?'Key 已配置':'未配置'}<small>{m.enabled?'已启用':'已停用'}</small></td><td><AgentActions name={`${m.displayName}（${m.profileId}）`} actions={[
+    <h2>模型连接</h2><div className="pm-table-wrap"><table className="pm-model-table"><thead><tr><th>名称</th><th>Provider / 模型</th><th>认证 / 状态</th><th>操作</th></tr></thead><tbody>{data.models.map(m=><tr key={m.profileId}><td><CompactText text={m.displayName}/><small><CompactText text={m.protocol||'openai-completions'}/></small></td><td><CompactText text={m.provider}/><details><summary>{dynamicModel(m)?'原生动态模型':idsOf(m).length} 个模型 · 展开查看</summary>{dynamicModel(m)?<small>原生 CLI 管理模型列表</small>:capabilitiesOf(m).map(item=><small key={item.modelId}><CompactText text={`${item.modelId}${item.modelId===m.modelId?'（默认）':''} · ${item.inputModalities.join('+')} · ${item.contextWindow.toLocaleString()} ctx · ${item.maxTokens.toLocaleString()} max · ${item.reasoningLevels.join('/')||'无思考档位'} · 摘要 ${item.supportsReasoningSummaries?item.defaultReasoningSummary:'不支持'}`}/></small>)}</details></td><td>{m.authMethod==='oauth'?'实例内官方登录':m.apiKeyConfigured?'Key 已配置':'未配置'}<small>{m.enabled?'已启用':'已停用'}</small></td><td><AgentActions name={`${m.displayName}（${m.profileId}）`} actions={[
       {label:'编辑连接',run:()=>{setCloneSourceId(null);setModel(m);setModal('model');}},
       {label:'克隆',run:()=>clone(m)},
       {label:'删除',danger:true,run:()=>{setModel(m);setModal('delete-model');}},
     ]}/></td></tr>)}</tbody></table>{!data.models.length?<p className="empty">暂无模型连接</p>:null}</div><p className="hint">同一连接可配置多个模型 ID，共用地址、协议和凭据。Codex 使用 Responses，Claude Code 使用 Anthropic Messages；OAuth 请在 Agent 上直接选择原生登录。</p>
   </>:<>
     <LocalControlAgent models={data.models}/>
-    <div className="pm-bot-list-heading"><h2>Agent 实例 <Parameter help="类型、镜像和挂载创建后固定；模型和机器人可修改并同步，执行任务期间不可修改。"> </Parameter></h2><span>{data.containers.length} 个实例</span></div>
+    <div className="pm-bot-list-heading"><h2>Agent 实例 <Parameter help="Agent 类型和挂载固定；镜像可升级，模型、Proxy 和机器人可修改并同步。执行任务期间不可修改。"> </Parameter></h2><span>{data.containers.length} 个实例</span></div>
     <div className="pm-table-wrap"><table className="pm-agent-table"><thead><tr><th>Agent / 镜像</th><th>认证 / 模型</th><th>机器人</th><th><Parameter help="已应用版本与目标版本一致时，容器已确认配置。模型管理更新连接后，在操作菜单同步配置。">同步状态</Parameter></th><th>操作</th></tr></thead><tbody>{data.containers.map(c=><tr key={c.containerId}><td><CompactText text={c.displayName}/><small><CompactText text={`${c.agentType} · ${c.image}`}/></small></td><td><CompactText text={c.modelName}/><small><CompactText text={c.modelId||"CLI 原生默认模型"}/></small></td><td><CompactText text={c.botName||'未绑定'}/></td><td><span className={`pm-status pm-status-${c.status}`}>{syncingId===c.containerId?'同步中…':labels[c.status]||c.status}</span><small data-tip={`已应用 ${c.appliedRevision} / 目标 ${c.revision}`}>版本 {c.appliedRevision} / {c.revision}</small>{c.lastError?<small className="hint-warn"><CompactText text={c.lastError}/></small>:null}</td><td><AgentActions name={c.displayName} disabled={!!syncingId} actions={[
       ...(c.runtimeKind==='native-botmux'?[{label:'打开 Agent 工作台',disabled:c.status!=='ready',run:()=>void openDashboard(c)},
-        ...(c.agentType==='claude-code'||c.networkMode!=='unrestricted'?[{label:'出口规则',disabled:c.status!=='ready',run:()=>{setSelected(c);setModal('network');}}]:[]),
-        ...(c.authMethod==='oauth'?[{label:'原生 OAuth 登录',disabled:c.status!=='ready',run:()=>{setSelected(c);setModal('logins');}}]:[])]:[]),
+        ...((c.requiresLogin||c.authMethod==='oauth')?[{label:'原生 OAuth 登录',disabled:c.status!=='ready',run:()=>{setSelected(c);setModal('logins');}}]:[])]:[]),
       {label:'修改模型 / 配置',run:()=>{setSelected(c);setModal('container');}},
       {label:'同步配置',disabled:c.status!=='ready',run:()=>void sync(c)},
+      {label:'镜像升级 / 回滚',disabled:!['ready','error'].includes(c.status),run:()=>{setSelected(c);setModal('upgrade');}},
       ...(c.status==='error'?[{label:'重试同步',run:()=>void mutate(`/containers/${c.containerId}/reconcile`,'POST',{})}]:[]),
       {label:'删除',danger:true,run:()=>{setSelected(c);setModal('delete');}},
     ]}/></td></tr>)}</tbody></table>{!data.containers.length?<p className="empty">暂无 Agent</p>:null}</div>
@@ -125,8 +134,8 @@ export function ManagementPage({page}:{page:'bots'|'models'|'agents'}){
   {modal==='delete'&&selected?<DeleteContainer container={selected} onClose={()=>setModal(null)} onDone={finish}/>:null}
   {modal==='unbind'&&selectedBot?(selectedBot.usage==='local'?<UnbindLocalBot bot={selectedBot} onClose={()=>setModal(null)} onDone={finish}/>:<UnbindBot bot={selectedBot} onClose={()=>setModal(null)} onDone={finish}/>):null}
   {modal==='workspaces'&&data.workspaceOptions?<WorkspaceSettings options={data.workspaceOptions} onClose={()=>setModal(null)} onDone={finish}/>:null}
-  {modal==='network'&&selected?<NetworkRules container={selected} onClose={()=>{setModal(null);void refresh();}}/>:null}
-  {modal==='logins'?<LoginWorkbench container={selected} containers={data.containers.filter(c=>c.authMethod==='oauth')} onClose={()=>setModal(null)}/>:null}
+  {modal==='upgrade'&&selected?<ImageUpgrade container={selected} onClose={()=>setModal(null)} onDone={()=>{setModal(null);void refresh();}}/>:null}
+  {modal==='logins'?<LoginWorkbench container={selected} containers={data.containers} onClose={()=>setModal(null)}/>:null}
   </section>;
 }
 export function WorkspaceSettings({options,onClose,onDone}:{options:WorkspaceOptions;onClose:()=>void;onDone:(m:string)=>void}){
@@ -206,28 +215,30 @@ export function ContainerForm({data,container,onClose,onDone}:{data:Data;contain
   const [error,setError]=useState(''),[busy,setBusy]=useState(false);const requestId=useRef(crypto.randomUUID());
   const [workspaceType,setWorkspaceType]=useState('volume'),[volumeSource,setVolumeSource]=useState(''),[readOnly,setReadOnly]=useState(false);
   const [agentType,setAgentType]=useState(container?.agentType||'pi');
+  const [imageProfile,setImageProfile]=useState('native');
   const [oauth,setOauth]=useState(container?.authMethod==='oauth');
   const agent=data.agents.find(a=>a.id===agentType);
   const compatible=(m:Model)=>container?.runtimeKind==='pi-rpc'?(m.protocol||'openai-completions')==='openai-completions'&&(m.authMethod||'api-key')==='api-key':
     (agent?.protocols||['openai-completions']).includes(m.protocol||'openai-completions')&&(agent?.authMethods||['api-key']).includes(m.authMethod||'api-key');
-  const admitted=(m:Model)=>!container||container.networkMode==='unrestricted'||container.egressHosts.some(h=>h===new URL(m.baseUrl).hostname||h.startsWith('*.')&&new URL(m.baseUrl).hostname.endsWith(h.slice(1)));
+  const admitted=()=>true;
   const workspaceOptions=data.workspaceOptions;
   const submit=async(event:FormEvent<HTMLFormElement>)=>{event.preventDefault();setBusy(true);setError('');const values=Object.fromEntries(new FormData(event.currentTarget));
     try{const [modelProfileId,chosen]=JSON.parse(String(values.modelSelection));
       const modelId=modelProfileId===null?String(values.oauthModelId||'').trim()||null:chosen;
-      if(container){const observed=await syncAgentConfiguration(platformApi,container,modelProfileId,String(values.botId||'')||null,modelId);onDone(`Agent 模型与配置已同步（版本 ${observed.appliedRevision}），后续任务使用新配置。`);}
+      if(container){const observed=await syncAgentConfiguration(platformApi,container,modelProfileId,String(values.botId||'')||null,modelId,String(values.proxyProfileId||'')||null);onDone(`Agent 模型与配置已同步（版本 ${observed.appliedRevision}），后续任务使用新配置。`);}
       else {const {modelSelection,oauthModelId,...fields}=values;await platformApi('/containers','POST',{...fields,modelProfileId,modelId,authMethod:modelProfileId===null?'oauth':'api-key',
         workspace:workspaceType==='hostpath'?'hostpath':volumeSource?'volume':'new',
         workspaceSource:workspaceType==='hostpath'?values.workspaceSource:volumeSource||undefined,
-        workspaceReadOnly:readOnly,hostPathConfirmed:workspaceType==='hostpath'&&values.hostPathConfirmed==='on',requestId:requestId.current,agentType});onDone('Agent 已创建并完成运行握手');}}
+        workspaceReadOnly:readOnly,dockerAccess:imageProfile==='dev'&&values.dockerAccess==='on',hostPathConfirmed:workspaceType==='hostpath'&&values.hostPathConfirmed==='on',requestId:requestId.current,agentType});onDone('Agent 已创建并完成运行握手');}}
     catch(error){setError(error instanceof Error?error.message:String(error));}finally{setBusy(false);}
   };
   return <Modal title={container?'Agent 配置':'创建 Agent'} onClose={onClose} busy={busy}><form onSubmit={submit}>
     <label><Parameter help="用于列表识别，创建后不可修改。最多 64 字符。">名称</Parameter><input name="displayName" defaultValue={container?.displayName||''} required maxLength={64} disabled={!!container}/></label>
-    <label><Parameter help="Agent 类型和镜像在创建后固定。原生 Worker 保留飞书通信和工作台。">Agent</Parameter><select aria-label="Agent 类型" disabled={!!container} value={agentType} onChange={event=>{setAgentType(event.target.value);setOauth(false);}}>{data.agents.filter(a=>a.supported).map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
-    <label><Parameter help="每个 Worker 只预装所选 Agent，包含完整 Botmux；创建后不可切换镜像。">镜像</Parameter>{container?<input value={container.image} title={container.image} disabled/>:<select key={agentType} name="imageProfile" defaultValue="native">{agent?.images.filter(i=>i.id==='native').map(i=><option key={i.id} value={i.id}>{i.label} · {i.image}</option>)}</select>}</label>
-    <p className="hint">{(container?container.networkMode==='unrestricted':agentType!=='claude-code')?'网络：直连，不限制出口；新建时不启用 egress sidecar。':'网络：启用 egress；创建后可在操作菜单管理出口规则。'}</p>
-    <label><Parameter help="选择 Agent 支持的认证方式：原生 OAuth 不需要模型管理记录；API Key 模型按连接分组。">登录方式 / 模型</Parameter><select key={agentType} aria-label="登录方式 / 模型" name="modelSelection" defaultValue={container?JSON.stringify(container.authMethod==='oauth'?[null,null]:[container.modelProfileId,container.modelId??'']):''} onChange={e=>setOauth(JSON.parse(e.target.value)[0]===null)} required><option value="" disabled>选择原生登录或具体模型</option>{agent?.authMethods?.includes('oauth')?<option value={JSON.stringify([null,null])}>原生 OAuth 登录 · 无需模型连接</option>:null}{data.models.filter(m=>m.authMethod!=='oauth'&&(m.enabled||m.profileId===container?.modelProfileId)&&compatible(m)&&admitted(m)).map(m=><optgroup key={m.profileId} label={`${m.displayName} · ${m.provider}${!m.enabled?'（已停用）':''}`} disabled={!m.enabled}>{idsOf(m).map(id=><option key={id} value={JSON.stringify([m.profileId,id])}>{dynamicModel(m)?'原生动态模型（进入 ZCode /model 选择）':id}{!dynamicModel(m)&&id===m.modelId?' · 默认':''}</option>)}</optgroup>)}</select></label>
+    <label><Parameter help="Agent 类型创建后固定。Worker 保留飞书通信和 Dashboard。">Agent</Parameter><select aria-label="Agent 类型" disabled={!!container} value={agentType} onChange={event=>{setAgentType(event.target.value);setImageProfile('native');setOauth(false);}}>{data.agents.filter(a=>a.supported).map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
+    <label><Parameter help="原生镜像只包含选定 CLI；Dev 镜像包含四种 CLI、编译调试和 Docker 客户端。后续可升级兼容的新镜像。">镜像</Parameter>{container?<input value={container.image} title={container.image} disabled/>:<select name="imageProfile" value={imageProfile} onChange={e=>setImageProfile(e.target.value)}>{agent?.images.map(i=><option key={i.id} value={i.id}>{i.label} · {i.image}</option>)}</select>}</label>
+    {!container&&imageProfile==='dev'?<label className="pm-check"><input name="dockerAccess" type="checkbox"/><Parameter help="挂载宿主 Docker socket，权限等同宿主机管理员；仅可信开发任务开启。普通 Worker 默认不挂载。">允许 Dev Agent 使用宿主 Docker</Parameter></label>:null}
+    <ProxySelect defaultValue={container?.proxyProfileId}/>
+    <label><Parameter help="选择 Agent 支持的认证方式：原生 OAuth 不需要模型管理记录；API Key 模型按连接分组。">登录方式 / 模型</Parameter><select key={agentType} aria-label="登录方式 / 模型" name="modelSelection" defaultValue={container?JSON.stringify(container.authMethod==='oauth'?[null,null]:[container.modelProfileId,container.modelId??'']):''} onChange={e=>setOauth(JSON.parse(e.target.value)[0]===null)} required><option value="" disabled>选择原生登录或具体模型</option>{agentType==='codex'&&agent?.authMethods?.includes('oauth')?<option value={JSON.stringify([null,null])}>原生 OAuth 登录 · 无需模型连接</option>:null}{data.models.filter(m=>m.authMethod!=='oauth'&&(m.enabled||m.profileId===container?.modelProfileId)&&compatible(m)&&admitted()).map(m=><optgroup key={m.profileId} label={`${m.displayName} · ${m.provider}${!m.enabled?'（已停用）':''}`} disabled={!m.enabled}>{idsOf(m).map(id=><option key={id} value={JSON.stringify([m.profileId,id])}>{dynamicModel(m)?(m.protocol==='vercel-claude'?'Vercel + Claude 订阅登录':'原生动态模型（进入 ZCode /model 选择）'):id}{!dynamicModel(m)&&id===m.modelId?' · 默认':''}</option>)}</optgroup>)}</select></label>
     {oauth?<><label><Parameter help="留空不固定模型，由原生 CLI 选择默认值；如需指定，可填写该账号实际支持的模型 ID。此项仅保存到此 Agent，不创建共享连接。">OAuth 模型（可选）</Parameter><input name="oauthModelId" maxLength={300} defaultValue={container?.authMethod==='oauth'?container.modelId||'':''} placeholder="使用 CLI 原生默认模型"/></label><p className="hint">创建完成后，在 Agent 操作菜单选择“原生 OAuth 登录”。凭据只保存在该 Worker；不会写入模型管理或复制到其他实例。</p></>:null}
     <label><Parameter help="可选择空闲机器人。选择“不绑定机器人”会同步解绑但保留容器，确认生效后机器人回到空闲池。">飞书机器人</Parameter><select name="botId" defaultValue={container?.botId||''}><option value="">不绑定机器人</option>{data.bots.filter(b=>b.usage==='free'||b.botId===container?.botId).map(b=><option key={b.botId} value={b.botId}>{b.displayName} · {b.appId}</option>)}</select></label>
     {container?<label><Parameter help="挂载创建后固定。更换挂载需新建 Agent，可复用历史目录或卷。">工作区</Parameter><input disabled title={container.workspaceClaim} value={`${container.workspaceKind||'volume'} · ${container.workspaceClaim}${container.workspaceReadOnly?'（只读）':''}`}/></label>:<>
@@ -252,13 +263,26 @@ export function DeleteModel({model,onClose,onDone}:{model:Model;onClose:()=>void
 export function ModelForm({model,cloneSourceId=null,onClose,onDone}:{model:Model|null;cloneSourceId?:string|null;onClose:()=>void;onDone:(m:string)=>void}){
   const [error,setError]=useState(''),[busy,setBusy]=useState(false);
   const [protocol,setProtocol]=useState(model?.protocol||'openai-completions'),[baseUrl,setBaseUrl]=useState(model?.baseUrl||'');
-  const authMethod='api-key',dynamic=protocol==='zcode-coding-plan';
+  const initialIds=model&&!dynamicModel(model)?idsOf(model):[];
+  const [modelIdsText,setModelIdsText]=useState(initialIds.join('\n'));
+  const [capabilities,setCapabilities]=useState<ModelCapability[]>(model?capabilitiesOf(model):[]);
+  const authMethod='api-key',dynamic=['zcode-coding-plan','vercel-claude'].includes(protocol);
   const submitting=useRef(false);
+  const idsFrom=(text:unknown)=>[...new Set(String(text||'').split(/\r?\n/).map(id=>id.trim()).filter(Boolean))];
+  const reconcile=(ids:string[])=>ids.map(modelId=>capabilities.find(item=>item.modelId===modelId)||defaultCapability(modelId));
+  const changeIds=(text:string)=>{const ids=idsFrom(text);setModelIdsText(text);setCapabilities(current=>ids.map(modelId=>current.find(item=>item.modelId===modelId)||defaultCapability(modelId)));};
+  const updateCapability=(modelId:string,change:Partial<ModelCapability>)=>setCapabilities(current=>current.map(item=>{
+    if(item.modelId!==modelId)return item;
+    const next={...item,...change};
+    if(next.defaultReasoningLevel&&!next.reasoningLevels.includes(next.defaultReasoningLevel))next.defaultReasoningLevel=next.reasoningLevels[0]||null;
+    return next;
+  }));
   return <Modal title={cloneSourceId?'克隆模型连接':model?'编辑模型连接':'添加模型连接'} onClose={onClose} busy={busy}><form onSubmit={async event=>{
     event.preventDefault();if(submitting.current)return;submitting.current=true;const value=Object.fromEntries(new FormData(event.currentTarget));setBusy(true);
-    try{const modelIds=dynamic?[]:[...new Set(String(value.modelIds||'').split(/\r?\n/).map(id=>id.trim()).filter(Boolean))];
+    try{const modelIds=dynamic?[]:idsFrom(value.modelIds);
       if(!dynamic&&(!modelIds.length||modelIds.length>100))throw new Error('请填写 1–100 个模型 ID，每行一个');
-      const payload={displayName:value.displayName,provider:dynamic?'zai':value.provider,baseUrl:dynamic?'https://api.z.ai':baseUrl,modelIds,modelId:dynamic?'':modelIds[0],enabled:value.enabled==='on',protocol,authMethod,...(authMethod==='api-key'&&value.apiKey?{apiKey:value.apiKey}:{})};
+      const modelCapabilities=dynamic?[]:reconcile(modelIds);
+      const payload={displayName:value.displayName,provider:protocol==='vercel-claude'?'vercel':dynamic?'zai':value.provider,baseUrl:protocol==='vercel-claude'?'https://ai-gateway.vercel.sh':dynamic?'https://api.z.ai':baseUrl,modelIds,modelCapabilities,modelId:dynamic?'':modelIds[0],enabled:value.enabled==='on',protocol,authMethod,...(authMethod==='api-key'&&value.apiKey?{apiKey:value.apiKey}:{})};
       if(cloneSourceId)await platformApi(`/models/${encodeURIComponent(cloneSourceId)}/clone`,'POST',{...payload,profileId:value.profileId});
       else await platformApi(`/models/${encodeURIComponent(String(value.profileId))}`,model?'PUT':'POST',payload);
       onDone(cloneSourceId?'模型连接副本已保存。':'模型连接已保存；现有 Agent 保留原模型，请到 Agent 管理切换或同步配置。');}
@@ -266,10 +290,22 @@ export function ModelForm({model,cloneSourceId=null,onClose,onDone}:{model:Model
   }}>{cloneSourceId?<p className="hint">当前仅预填草稿，尚未创建记录。可修改配置 ID 和其它参数；取消不会写入数据库。Key 留空时，保存副本才复制来源的加密 Key，不回显原文。</p>:null}<label><Parameter help="唯一标识，仅支持字母、数字、点、下划线和连字符，创建后不可修改。新建和克隆不能覆盖已存在的 ID。">配置 ID</Parameter><input name="profileId" defaultValue={model?.profileId||''} required readOnly={!!model&&!cloneSourceId} maxLength={100} pattern="[A-Za-z0-9._-]+"/></label>
     <label><Parameter help="展示在模型连接列表和 Agent 的模型选择器中。">名称</Parameter><input name="displayName" defaultValue={model?.displayName||''} required/></label>
     {!dynamic?<label><Parameter help="Pi 使用的模型服务提供方标识，仅支持字母、数字、点、下划线和连字符。">Provider</Parameter><input name="provider" defaultValue={model?.provider||''} required={!dynamic} pattern="[A-Za-z0-9._-]+"/></label>:null}
-    <label><Parameter help="Codex 要求 OpenAI Responses；Claude Code 要求 Anthropic Messages；Pi 支持这些协议，但具体服务端必须真的实现对应 API。">协议</Parameter><select name="protocol" value={protocol} onChange={e=>setProtocol(e.target.value)}><option value="openai-completions">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option><option value="zcode-coding-plan">ZCode · Z.AI Coding Plan API Key</option></select></label>
-    <p className="hint">{dynamic?'配置 Z.AI Coding Plan API Key 即可。模型列表与默认模型由 ZCode 原生维护，可进入终端用 /model 切换。':'这里只维护 API Key 模型连接。原生 OAuth 请直接在创建 Agent 时选择，无需预建连接。'}</p>
-    {!dynamic?<label><Parameter help="模型服务的 API 基础地址，端点主机受容器网络策略限制。">Base URL</Parameter><input name="baseUrl" type="url" value={baseUrl} onChange={e=>setBaseUrl(e.target.value)} required={!dynamic}/></label>:null}
-    {!dynamic?<label><Parameter help="每行一个精确模型 ID，最多 100 个；空行忽略、重复去除。第一行为默认模型，不会改变已有 Agent 的选择。所有模型共用此连接的协议、地址和凭据。">模型 ID（每行一个）</Parameter><textarea name="modelIds" rows={5} defaultValue={model?idsOf(model).join('\n'):''} placeholder={'model-a\nmodel-b'} required={!dynamic}/></label>:null}
+    <label><Parameter help="Codex 要求 OpenAI Responses；Claude Code 要求 Anthropic Messages；Pi 支持这些协议，但具体服务端必须真的实现对应 API。">协议</Parameter><select name="protocol" value={protocol} onChange={e=>setProtocol(e.target.value)}><option value="openai-completions">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option><option value="vercel-claude">Vercel + Claude 订阅登录</option><option value="zcode-coding-plan">ZCode · Z.AI Coding Plan API Key</option></select></label>
+    <p className="hint">{protocol==='vercel-claude'?'保存 Vercel Key 后，同步到 Claude Agent，再在登录工作台完成 Claude 订阅登录。更换 Key 后可重新发起登录。':dynamic?'配置 Z.AI Coding Plan API Key 即可。模型列表与默认模型由 ZCode 原生维护，可进入终端用 /model 切换。':'这里只维护 API Key 模型连接。原生 OAuth 请直接在创建 Agent 时选择，无需预建连接。'}</p>
+    {!dynamic?<label><Parameter help="模型服务的 API 基础地址。">Base URL</Parameter><input name="baseUrl" type="url" value={baseUrl} onChange={e=>setBaseUrl(e.target.value)} required={!dynamic}/></label>:null}
+    {!dynamic?<><label><Parameter help="每行一个精确模型 ID，最多 100 个；空行忽略、重复去除。第一行为默认模型，不会改变已有 Agent 的选择。所有模型共用此连接的协议、地址和凭据。">模型 ID（每行一个）</Parameter><textarea name="modelIds" rows={5} value={modelIdsText} onChange={e=>changeIds(e.target.value)} placeholder={'model-a\nmodel-b'} required/></label>
+      <fieldset className="pm-model-capabilities"><legend>逐模型能力</legend><p className="hint">能力会同步到 Pi 和 Codex 的原生模型目录。Codex 当前不提供最大输出 Token 的 catalog 字段，因此该值只对支持此字段的 Agent 生效。</p>
+      {reconcile(idsFrom(modelIdsText)).map(item=><details key={item.modelId}><summary>{item.modelId} · {item.inputModalities.join('+')} · {item.contextWindow.toLocaleString()} ctx</summary>
+        <div className="pm-capability-grid">
+          <label><Parameter help="Coding Agent 必须支持文本；勾选图片后，Pi/Codex 的原生模型目录会公开 image 输入能力。">输入模态</Parameter><span className="pm-inline-checks"><span><input type="checkbox" checked disabled/> text</span><span><input aria-label={`${item.modelId} image 模态`} type="checkbox" checked={item.inputModalities.includes('image')} onChange={e=>updateCapability(item.modelId,{inputModalities:e.target.checked?['text','image']:['text']})}/> image</span></span></label>
+          <label><Parameter help="模型可处理的输入与输出总 Token 上限。Codex/Pi 原生目录会使用该值。">上下文窗口</Parameter><input aria-label={`${item.modelId} 上下文窗口`} type="number" min={1024} max={10000000} step={1} value={item.contextWindow} onChange={e=>updateCapability(item.modelId,{contextWindow:Number(e.target.value)})}/></label>
+          <label><Parameter help="单次响应最大输出 Token。Pi 原生目录使用该值；Codex 当前 catalog 没有对应字段。">最大输出 Token</Parameter><input aria-label={`${item.modelId} 最大输出 Token`} type="number" min={1} max={item.contextWindow} step={1} value={item.maxTokens} onChange={e=>updateCapability(item.modelId,{maxTokens:Number(e.target.value)})}/></label>
+          <label><Parameter help="模型实际支持的思考档位；全部不选表示该模型不支持调节思考强度。">思考级别</Parameter><span className="pm-inline-checks pm-reasoning-levels">{reasoningLevels.map(level=><span key={level}><input aria-label={`${item.modelId} ${level} 思考级别`} type="checkbox" checked={item.reasoningLevels.includes(level)} onChange={e=>updateCapability(item.modelId,{reasoningLevels:e.target.checked?[...item.reasoningLevels,level].sort((a,b)=>reasoningLevels.indexOf(a)-reasoningLevels.indexOf(b)):item.reasoningLevels.filter(value=>value!==level)})}/>{level}</span>)}</span></label>
+          <label><Parameter help="新会话默认使用的思考级别；无思考档位时只能选择“不设置”。">默认思考级别</Parameter><select aria-label={`${item.modelId} 默认思考级别`} value={item.defaultReasoningLevel||''} onChange={e=>updateCapability(item.modelId,{defaultReasoningLevel:e.target.value||null})}><option value="">不设置</option>{item.reasoningLevels.map(level=><option key={level} value={level}>{level}</option>)}</select></label>
+          <label><Parameter help="模型是否支持 Responses 推理摘要。这和是否支持思考档位是两个独立能力。Codex 的平台配置默认会开启 model_supports_reasoning_summaries；这里决定该模型是否可请求摘要及其默认格式。Pi/DSH 当前原生模型 schema 不支持摘要格式字段。">推理摘要</Parameter><span className="pm-inline-checks"><span><input aria-label={`${item.modelId} 支持推理摘要`} type="checkbox" checked={item.supportsReasoningSummaries} onChange={e=>updateCapability(item.modelId,{supportsReasoningSummaries:e.target.checked,defaultReasoningSummary:e.target.checked?(item.defaultReasoningSummary==='none'?'auto':item.defaultReasoningSummary):'none'})}/> 支持</span></span></label>
+          <label><Parameter help="Codex 新会话默认请求的推理摘要格式。none 关闭，auto 由服务选择，concise/detailed 指定摘要详细度。">默认推理摘要</Parameter><select aria-label={`${item.modelId} 默认推理摘要`} value={item.defaultReasoningSummary} disabled={!item.supportsReasoningSummaries} onChange={e=>updateCapability(item.modelId,{defaultReasoningSummary:e.target.value as ModelCapability['defaultReasoningSummary']})}><option value="none">none</option><option value="auto">auto</option><option value="concise">concise</option><option value="detailed">detailed</option></select></label>
+        </div>
+      </details>)}</fieldset></>:null}
     <label className="pm-check"><input type="checkbox" name="enabled" defaultChecked={model?.enabled??true}/><span>启用此连接（克隆的副本默认停用）</span></label>
     <label><Parameter help="加密保存，不回显。编辑时留空保留原 Key；克隆时留空，在保存副本时复制来源 Key，也可以填写新 Key。">API Key</Parameter><input name="apiKey" type="password" autoComplete="new-password" placeholder={cloneSourceId?'留空在保存时复制来源 Key':model?'留空保留现有 Key':''} required={!model?.apiKeyConfigured}/></label>{error?<p className="hint-warn" role="alert">{error}</p>:null}<footer><button type="button" onClick={onClose} disabled={busy}>取消</button><button className="primary" disabled={busy}>{cloneSourceId?'保存副本':'保存连接'}</button></footer></form></Modal>;
 }

@@ -1,6 +1,6 @@
-import {readFileSync} from 'node:fs';
 import {timingSafeEqual} from 'node:crypto';
 import type {IncomingMessage} from 'node:http';
+import {containerRole} from './container-role.js';
 
 const authenticatedWorkerRequests=new WeakSet<IncomingMessage>();
 
@@ -19,7 +19,7 @@ export function nativeWorkerTerminalLink(req:IncomingMessage,sessionId:string,va
  * Translate a server-only, instance-local token back to native authentication.
  * Control images cannot opt into this using environment variables. */
 export function createNativeWorkerProxyIdentity(token:()=>string|null,rolePath='/etc/botmux-platform-role'){
-  let worker=false;try{worker=readFileSync(rolePath,'utf8').trim()==='worker';}catch{}
+  const worker=containerRole(rolePath)==='worker';
   return (req:IncomingMessage)=>{
     const supplied=req.headers['x-platform-worker-token'];delete req.headers['x-platform-worker-token'];
     if(!worker||typeof supplied!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(supplied))return;

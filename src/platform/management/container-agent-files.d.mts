@@ -1,4 +1,5 @@
 export const agentEnvironmentKeys:Record<string,string[]>;
+export function managedClaudeEnvironment(environment:Record<string,string>):Record<string,string>;
 export function containerAgentDirectories(home:string):{codex:string;'claude-code':string;pi:string;zcode:string;dsh:string};
 export function containerAgentEnvironmentFile(home:string):string;
 export function nativeConfigurationPublicDigest(config:any):string;

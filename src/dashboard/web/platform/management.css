@@ -7,6 +7,15 @@
 .pm-json-editor { font-family: var(--font-mono,monospace); font-size: 12px; line-height: 1.55; min-height: 260px; tab-size: 2; }
 .pm-json-readback { max-height: 200px; overflow: auto; font-size: 12px; white-space: pre-wrap; }
 .pm-profile-fields { border: 1px solid var(--border-soft); border-radius: 12px; padding: 14px; margin: 14px 0; }
+.pm-model-capabilities { border: 1px solid var(--border-soft); border-radius: 12px; padding: 12px 14px; margin: 16px 0; }
+.pm-model-capabilities > details { border-top: 1px solid var(--border-soft); padding: 10px 0; }
+.pm-model-capabilities > details:first-of-type { border-top: 0; }
+.pm-model-capabilities > details > summary { cursor: pointer; font-size: 13px; overflow-wrap: anywhere; }
+.pm-capability-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 0 14px; }
+.pm-capability-grid > label:last-child { grid-column: 1 / -1; }
+.pm-inline-checks { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; min-height: 38px; }
+.pm-inline-checks > span { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
+.pm-dialog .pm-inline-checks input { width: auto; margin: 0; }
 .pm-login-list article { border: 1px solid var(--border-soft); border-radius: 12px; padding: 14px; margin: 14px 0; }
 .pm-login-list article > div { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .pm-login-list small { display: block; color: var(--muted); margin: 6px 0 12px; }
@@ -55,6 +64,8 @@
 .pm-dialog label.pm-check { display: flex; flex-direction: row; align-items: flex-start; gap: 8px; }
 .pm-dialog label.pm-check input { width: auto; flex: 0 0 auto; margin: 3px 0 0; }
 @media(max-width:600px) {
+  .pm-capability-grid { grid-template-columns: 1fr; }
+  .pm-capability-grid > label:last-child { grid-column: auto; }
   .pm-session-person { flex-direction: column; align-items: flex-start; gap: 3px; }
   .pm-session-company { border: 0; padding: 0; }
 }

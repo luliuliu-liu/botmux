@@ -6,14 +6,15 @@ import {pathToFileURL} from 'node:url';
 import {withFileLock} from '../../utils/file-lock.js';
 import {atomicWriteFileSync} from '../../utils/atomic-write.js';
 import {readBotsJsonOrEmpty,mutateBotsJsonAtomic} from '../../setup/bots-store.js';
-import {readContainerAgentEnvironment,readContainerAgentModel,agentEnvironmentKeys} from './container-agent-files.mjs';
+import {readContainerAgentEnvironment,readContainerAgentModel,agentEnvironmentKeys,writeContainerAgentEnvironment} from './container-agent-files.mjs';
+import {proxyFile,proxyEnvironment,proxyEnvironmentKeys} from './container-proxy.mjs';
 import {writeNativeAgentModel} from './native-worker-config.js';
 export class LocalControlError extends Error{constructor(readonly status:number,message:string){super(message);}}
 type Result={status:number;data:any};
 type Dependencies={botsJsonPath:string;request:(path:string,method?:string,body?:unknown)=>Promise<Result>;
  stop:(id:string)=>Promise<{ok:boolean}>;start:(id:string)=>Promise<{ok:boolean}>;isStopped:(id:string)=>Promise<boolean>;busy:(ids:string[])=>Promise<boolean>;
  changeCli?:(id:string,cli:string)=>Promise<Result>};
-const types=['pi','codex','claude-code'];
+const types=['pi','codex','claude-code','zcode'];
 export function createLocalControlAgent(deps:Dependencies){
  const home=dirname(dirname(deps.botsJsonPath)),directory=join(home,'.botmux','platform');mkdirSync(directory,{recursive:true,mode:0o700});
  const controlId=process.env.BOTMUX_PLATFORM_GATEWAY_ID||'local-gateway';
@@ -22,7 +23,7 @@ export function createLocalControlAgent(deps:Dependencies){
  const meta=(type:string)=>existsSync(file(type))?JSON.parse(readFileSync(file(type),'utf8')):null;
  const allBots=()=>readBotsJsonOrEmpty(deps.botsJsonPath);
  const credential=(type:string)=>existsSync(type==='codex'?join(home,'.codex','auth.json'):type==='claude-code'?join(home,'.claude','.credentials.json'):join(home,'.pi','agent','auth.json'));
- const requireType=(type:string)=>{if(!types.includes(type))throw new LocalControlError(400,'本地镜像仅支持 Pi、Codex、Claude Code');};
+ const requireType=(type:string)=>{if(!types.includes(type))throw new LocalControlError(400,'本地镜像支持 Pi、Codex、Claude Code、ZCode');};
  const ownerPath=join(directory,'local-oauth-owner.json');
  let owner:any=existsSync(ownerPath)?JSON.parse(readFileSync(ownerPath,'utf8')):null,oauth:any,restoring:Promise<void>|undefined;
  const saveOwner=()=>atomicWriteFileSync(ownerPath,JSON.stringify(owner),{mode:0o600});
@@ -47,16 +48,42 @@ export function createLocalControlAgent(deps:Dependencies){
  }
  async function ensureNoLogin(){if(owner){await loginManager();await restoring;if(oauth.busy())throw new LocalControlError(409,'本地原生登录仍在进行，请先完成或取消登录');}}
  return {
+  async upgrade(input?:any){
+   if(input===undefined){const result=await deps.request('/control-upgrade');return result.data;}
+   if(input.confirmRestart!==true)throw new LocalControlError(400,'请确认重启 Dev Agent');
+   return withFileLock(join(directory,'local-agent-operation'),async()=>{
+    await ensureNoLogin();const ids=allBots().map(bot=>bot.larkAppId);
+    if(await deps.busy(ids))throw new LocalControlError(409,'Agent 正忙，空闲后再升级');
+    for(const id of ids)if(!(await deps.stop(id)).ok)throw new LocalControlError(409,'Bot 停止未确认');
+    const result=await deps.request('/control-upgrade','POST',input);
+    if(result.status!==202){for(const id of ids)await deps.start(id);throw new LocalControlError(result.status,result.data.message||'升级请求未确认');}
+    return result.data;
+   });
+  },
+  async proxy(input?:any){
+   if(input===undefined){const result=await deps.request('/control-proxy');if(result.status!==200)throw new LocalControlError(result.status,'无法读取代理配置');return result.data;}
+   return withFileLock(join(directory,'local-agent-operation'),async()=>{
+    await ensureNoLogin();const ids=allBots().map(bot=>bot.larkAppId);
+    if(await deps.busy(ids))throw new LocalControlError(409,'Agent 正忙，请空闲后同步代理');
+    const prepared=await deps.request('/control-proxy','PUT',input);if(prepared.status!==200)throw new LocalControlError(prepared.status,prepared.data.message||'代理配置未准备完成');
+    for(const id of ids)if(!(await deps.stop(id)).ok)throw new LocalControlError(409,'Bot 停止尚未确认');
+    const configuration=prepared.data.proxy,environment=proxyEnvironment(configuration);
+    atomicWriteFileSync(proxyFile(home),JSON.stringify(configuration),{mode:0o600});
+    for(const type of types){const current=readContainerAgentEnvironment(home,type);if(current)writeContainerAgentEnvironment(home,type,{...Object.fromEntries(Object.entries(current).filter(([key])=>!proxyEnvironmentKeys.includes(key))),...environment});}
+    for(const id of ids)if(!(await deps.start(id)).ok)throw new LocalControlError(409,'代理已落盘，Bot 恢复待确认');
+    const ack=await deps.request('/control-proxy','POST',{revision:prepared.data.revision,proxyRevision:configuration?.revision??0});if(ack.status!==200)throw new LocalControlError(ack.status,'代理同步确认失败');return ack.data;
+   });
+  },
   async assertNoLogin(){await ensureNoLogin();},
   async status(){
    const result=await deps.request(prefix);if(result.status!==200)throw new LocalControlError(503,'无法读取本地 Agent 的管理状态');
-   return {name:'本地 Control Agent',controlId,bots:allBots().map(b=>({appId:b.larkAppId,displayName:b.displayName||b.name||b.larkAppId,cliId:b.cliId||'claude-code'})),agents:types.map(agentType=>{
+   return {name:'Dev Agent · Control',controlId,bots:allBots().map(b=>({appId:b.larkAppId,displayName:b.displayName||b.name||b.larkAppId,cliId:b.cliId||'claude-code'})),agents:types.map(agentType=>{
     const desired=result.data.agents.find((r:any)=>r.agent_type===agentType),local=meta(agentType),currentModel=readContainerAgentModel(home,agentType),env=readContainerAgentEnvironment(home,agentType);
     return {agentType,revision:desired?.revision??0,appliedRevision:desired?.applied_revision??0,requestId:desired?.request_id,
-     authMethod:desired?.auth_method??local?.authMethod??(agentType==='pi'||env&&Object.keys(env).length?'api-key':'oauth'),
-     modelProfileId:desired?.model_profile_id??local?.modelProfileId??null,modelId:desired?.selected_model_id??local?.modelId??'',
+     authMethod:desired?.auth_method??local?.authMethod??(['pi','zcode'].includes(agentType)||env&&Object.keys(env).length?'api-key':'oauth'),
+     requiresLogin:desired?.model_protocol==='vercel-claude'||desired?.auth_method==='oauth',modelProfileId:desired?.model_profile_id??local?.modelProfileId??null,modelId:desired?.selected_model_id??local?.modelId??'',
      currentModel,modelName:desired?.model_name??null,credentialPresent:credential(agentType),
-     status:desired?desired.revision===desired.applied_revision&&local?.revision===desired.revision?'synced':'pending':'unmanaged'};
+     status:desired?desired.revision!==desired.applied_revision?'pending':local?.revision===desired.revision?'synced':'restore':'unmanaged'};
    })};
   },
   async apply(type:string,input:any){requireType(type);
@@ -100,6 +127,7 @@ export function createLocalControlAgent(deps:Dependencies){
    return withFileLock(join(directory,'local-agent-operation'),async()=>{
     await loginManager();await restoring;
     if(input.action==='start'){
+     if(type==='claude-code'&&!readContainerAgentEnvironment(home,type)?.ANTHROPIC_CUSTOM_HEADERS?.startsWith('x-ai-gateway-api-key: Bearer '))throw new LocalControlError(409,'请先选择并同步 Vercel + Claude 订阅连接');
      const current=meta(type);if(current?.authMethod!=='oauth')throw new LocalControlError(409,'请先选择并同步原生 OAuth 登录方式');
      if(oauth.busy())throw new LocalControlError(409,'已有本地登录正在进行，请先完成或取消');
      if(typeof input.profileId!=='string'||!/^[0-9a-f-]{36}$/.test(input.profileId))throw new LocalControlError(400,'请选择登录工作台的浏览器配置');

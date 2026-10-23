@@ -3,13 +3,32 @@ import {existsSync,lstatSync,mkdirSync,readFileSync,writeFileSync,renameSync,unl
 import {join,dirname} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 
+import {proxyEnvironmentKeys} from './container-proxy.mjs';
 export const agentEnvironmentKeys={
   pi:['PI_MODEL_PROVIDER','PI_MODEL_ID','PI_MODEL_API_KEY'],
   codex:['PLATFORM_MODEL_API_KEY','OPENAI_API_KEY','OPENAI_AUTH_TOKEN','CODEX_API_KEY','OPENAI_BASE_URL'],
-  'claude-code':['ANTHROPIC_BASE_URL','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_MODEL','CLAUDE_CODE_OAUTH_TOKEN','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'],
+  'claude-code':['ANTHROPIC_BASE_URL','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_MODEL','CLAUDE_CODE_OAUTH_TOKEN','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC','HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy'],
   zcode:['ZCODE_CODING_PLAN_API_KEY','ZCODE_DATA_BASE_DIR','ZCODE_BUILTIN_PROVIDER_CONFIG_FILE'],
   dsh:['DEEPSEEK_API_KEY','PLATFORM_DSH_API_KEY','DEEPSEEK_BASE_URL','DSH_HOME'],
 };
+for(const keys of Object.values(agentEnvironmentKeys))keys.push(...proxyEnvironmentKeys);
+agentEnvironmentKeys['claude-code'].push('ANTHROPIC_CUSTOM_HEADERS','DISABLE_UPDATES','DISABLE_AUTOUPDATER','CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS');
+/** Managed images own CLI upgrades; login shells deliberately do not inherit
+ * daemon environment. Keep this policy at the container launch boundary, not
+ * in upstream host-terminal's security-sensitive inheritance policy. */
+export function managedClaudeEnvironment(environment){
+ const env={...environment,DISABLE_UPDATES:'1',DISABLE_AUTOUPDATER:'1'};
+ // Model connections store the provider root. Claude Code's wire protocol
+ // requires Vercel's dedicated compatibility surface, including OAuth mode.
+ if(['https://ai-gateway.vercel.sh','https://ai-gateway.vercel.sh/'].includes(env.ANTHROPIC_BASE_URL))
+  env.ANTHROPIC_BASE_URL='https://ai-gateway.vercel.sh/claude-code';
+ // Vercel sessions with inline MCP tool_addition blocks have failed at
+ // messages.N.content. Use native compatibility mode: load tools upfront,
+ // without rewriting requests or dropping tools, thinking, or OAuth headers.
+ if(['https://ai-gateway.vercel.sh/claude-code','https://ai-gateway.vercel.sh/claude-code/'].includes(env.ANTHROPIC_BASE_URL))
+  env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS='1';
+ return env;
+}
 export const containerAgentDirectories=home=>({codex:join(home,'.codex'),'claude-code':join(home,'.claude'),pi:join(home,'.pi','agent'),zcode:join(home,'.zcode'),dsh:join(home,'.dsh')});
 export const containerAgentEnvironmentFile=home=>join(home,'.botmux','platform','agent-environment.json');
 /** Secret-free, canonical identity shared by Botmux apply and Native Runtime
@@ -19,8 +38,10 @@ export function nativeConfigurationPublicDigest(config){
     generation:config.generation,revision:config.revision,agentType:config.agentType,
     model:{
       provider:config.model?.provider,baseUrl:config.model?.baseUrl,modelId:config.model?.modelId,
-      modelIds:config.model?.modelIds??[],protocol:config.model?.protocol??null,authMethod:config.model?.authMethod??null,
+      modelIds:config.model?.modelIds??[],modelCapabilities:config.model?.modelCapabilities??[],
+      protocol:config.model?.protocol??null,authMethod:config.model?.authMethod??null,
     },
+    proxy:config.proxy??null,
     binding:config.binding?{
       appId:config.binding.appId,generation:config.binding.generation,displayName:config.binding.displayName,
       brand:config.binding.brand,owner:{

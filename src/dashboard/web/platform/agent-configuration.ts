@@ -2,8 +2,8 @@ export type AgentConfiguration={containerId:string;status:string;revision:number
 type Api=(path:string,method:string,body:unknown)=>Promise<any>;
 /** A successful HTTP response alone is not proof that the runtime applied it.
  * Model-only updates must not rotate an unchanged Bot binding generation. */
-export async function syncAgentConfiguration(api:Api,current:AgentConfiguration,modelProfileId:string|null,botId=current.botId,modelId=modelProfileId===current.modelProfileId?current.modelId:undefined){
-  const result=await api(`/containers/${current.containerId}`,'PUT',{revision:current.revision,modelProfileId,
+export async function syncAgentConfiguration(api:Api,current:AgentConfiguration,modelProfileId:string|null,botId=current.botId,modelId=modelProfileId===current.modelProfileId?current.modelId:undefined,proxyProfileId?:string|null){
+  const result=await api(`/containers/${current.containerId}`,'PUT',{revision:current.revision,modelProfileId,...(proxyProfileId===undefined?{}:{proxyProfileId}),
     ...(modelProfileId===null?{authMethod:'oauth',modelId:modelId||null}:{}),
     ...(modelId===undefined?{}:{modelId}),...(botId!==current.botId?{botId}:{})});
   const observed=result.container as AgentConfiguration|undefined;

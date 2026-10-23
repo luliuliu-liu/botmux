@@ -1,12 +1,12 @@
 import {readFileSync} from 'node:fs';
 import {homedir} from 'node:os';
-import {agentEnvironmentKeys} from './container-agent-files.mjs';
+import {agentEnvironmentKeys,managedClaudeEnvironment} from './container-agent-files.mjs';
 import {readContainerAgentEnvironment,readContainerAgentModel} from './container-agent-files.mjs';
 
 /** Immutable image marker, not an agent/Bot-configurable environment flag.
  * Host installations and upstream multi-Bot installations are unchanged. */
 export function containerGlobalAgentMode(rolePath='/etc/botmux-platform-role'):boolean{
-  try{return ['control','worker'].includes(readFileSync(rolePath,'utf8').trim());}catch{return false;}
+  try{return ['control','worker','dev'].includes(readFileSync(rolePath,'utf8').trim());}catch{return false;}
 }
 const globalMode=containerGlobalAgentMode();
 export function containerAgentGlobalConfiguration<T>(input:T,enabled=globalMode,home=homedir()):T{
@@ -20,9 +20,14 @@ export function containerAgentGlobalConfiguration<T>(input:T,enabled=globalMode,
     );
     result.env={...local,...globalEnvironment};
   }
+  if(agent==='claude-code')result.env=managedClaudeEnvironment((result.env??{}) as Record<string,string>);
   const globalModel=readContainerAgentModel(home,String(record.cliId));
   if(globalModel===null)delete result.model;else result.model=globalModel;
   if(record.cliId!=='codex')return result as T;
+  // Codex persists /model and effort in the container's native config.toml.
+  // Replaying the platform's last selected model as --model would override
+  // that global preference only for Botmux, diverging from a bare terminal.
+  delete result.model;delete result.reasoningEffort;
   // The entire container is the authority boundary, not the communication Bot.
   result.codexAuthSync='shared';
   delete result['codexInstancePool'];delete result['cliInstanceBinding'];

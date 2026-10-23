@@ -10,7 +10,8 @@ vi.mock('../src/dashboard/web/dashboard-components.js',()=>({
 vi.mock('../src/dashboard/web/platform/feishu-session-panel.js',()=>({FeishuSessionPanel:()=>null}));
 vi.mock('../src/dashboard/web/platform/bot-create.js',()=>({PlatformBotCreate:()=>null}));
 import { ManagementPage,ContainerForm,ModelForm,DeleteModel,UnbindBot,UnbindLocalBot,WorkspaceSettings,BindLocalBot,DeleteBot } from '../src/dashboard/web/platform/management-page.js';
-import {NetworkRules,LoginWorkbench} from '../src/dashboard/web/platform/worker-access.js';
+import {LoginWorkbench} from '../src/dashboard/web/platform/worker-access.js';
+import {ProxySelect} from '../src/dashboard/web/platform/proxies.js';
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
 const current={containerId:'agent-1',displayName:'Agent One',agentType:'pi',image:'pi:test',sandboxId:'sandbox',status:'ready',revision:1,appliedRevision:1,modelProfileId:'old',modelName:'Old',modelId:'model-1',egressHosts:['example.com'],botId:'bot-1',botName:'Bot',workspaceClaim:'workspace',stateClaim:'state',lastError:null};
 const models=['old','new'].map(profileId=>({profileId,displayName:profileId,provider:'test',baseUrl:'https://example.com/v1',modelId:profileId,apiKeyConfigured:true,enabled:true}));
@@ -20,6 +21,7 @@ const renderers:TestRenderer.ReactTestRenderer[]=[];
 let fetcher:ReturnType<typeof vi.fn>,failure=false;
 beforeEach(()=>{vi.useFakeTimers();failure=false;fetcher=vi.fn(async(url:string,init?:any)=>{
   const path=url.replace('/api/platform','');
+  if(path==='/proxies')return {ok:true,json:async()=>({proxies:[]})};
   if(path==='/local-agent')return {ok:true,json:async()=>({name:'本地 Control Agent',controlId:'local-gateway',agents:[],bots:[]})};
   if(init?.method==='PUT')return {ok:!failure,status:failure?409:200,json:async()=>failure?{message:'Agent 正在执行任务'}:{container:{...current,modelProfileId:JSON.parse(init.body).modelProfileId,modelId:JSON.parse(init.body).modelId??current.modelId,revision:2,appliedRevision:2}}};
   return {ok:true,json:async()=>path==='/catalog'?{agents:[{id:'pi',name:'Pi',supported:true,version:'0.85.1',images:[{id:'runtime',label:'运行镜像',image:'pi:test'}]}]}:path==='/workspaces'?workspaceOptions:{[path.slice(1)]:data[path.slice(1) as keyof typeof data]}};
@@ -77,27 +79,15 @@ describe('model and Agent management UI',()=>{
     expect(r.root.findByProps({name:'oauthModelId'}).props.required).toBeUndefined();
     vi.stubGlobal('FormData',class{*[Symbol.iterator](){yield ['modelSelection','[null,null]'];yield ['oauthModelId',''];yield ['displayName','OAuth'];yield ['imageProfile','native'];}});
     await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){},currentTarget:{}}));
-    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toMatchObject({authMethod:'oauth',modelProfileId:null,modelId:null,agentType:'codex'});expect(done).toHaveBeenCalled();
+    expect(JSON.parse(fetcher.mock.calls.find(([,init])=>init?.method==='POST')![1].body)).toMatchObject({authMethod:'oauth',modelProfileId:null,modelId:null,agentType:'codex'});expect(done).toHaveBeenCalled();
   });
   it('does not offer OAuth in the model management form',async()=>{
     const r=await mount(React.createElement(ModelForm,{model:null,onClose:()=>{},onDone:()=>{}}));
     expect(r.root.findAllByProps({name:'authMethod'})).toHaveLength(0);
     expect(r.root.findAllByType('option').some(o=>o.props.value==='oauth')).toBe(false);
   });
-  it('requires network disruption confirmation and keeps failed readback visible',async()=>{
-    const configuration={schemaVersion:1,networkPolicy:{defaultAction:'deny',egress:[]}};
-    fetcher.mockResolvedValueOnce({ok:true,json:async()=>({revision:1,appliedRevision:1,inSync:true,configuration,observed:configuration})});
-    const r=await mount(React.createElement(NetworkRules,{container:current,onClose:()=>{}}));
-    expect(button(r,'保存并应用').props.disabled).toBe(true);
-    await act(async()=>r.root.findByProps({type:'checkbox'}).props.onChange({target:{checked:true}}));
-    fetcher.mockResolvedValueOnce({ok:true,json:async()=>({revision:2,appliedRevision:1,inSync:false,configuration,observed:configuration})});
-    fetcher.mockResolvedValueOnce({ok:false,json:async()=>({message:'网络策略未确认完全生效'})});
-    await act(async()=>button(r,'保存并应用').props.onClick());
-    expect(fetcher.mock.calls.slice(-2).map(([url,init])=>[url,init.method])).toEqual([['/api/platform/containers/agent-1/network','PUT'],['/api/platform/containers/agent-1/network/apply','POST']]);
-    expect(JSON.stringify(r.toJSON())).toContain('网络策略未确认完全生效');expect(JSON.stringify(r.toJSON())).toContain('待应用 / 实际规则有差异');
-  });
   it('opens login workbench without creating credentials, a browser or storage until explicitly requested',async()=>{
-    fetcher.mockImplementation(async(url:string)=>({ok:true,json:async()=>url.endsWith('/browser-profiles')?{profiles:[]}:{logins:[]}}));
+    fetcher.mockImplementation(async(url:string)=>({ok:true,json:async()=>url.endsWith('/browser-profiles')?{profiles:[]}:url.endsWith('/containers')?{containers:[]}:{logins:[]}}));
     const r=await mount(React.createElement(LoginWorkbench,{container:null,containers:[],onClose:()=>{}}));
     expect(button(r,'Worker 发起登录').props.disabled).toBe(true);
     await act(async()=>button(r,'新建浏览器配置').props.onClick());
@@ -106,21 +96,62 @@ describe('model and Agent management UI',()=>{
     expect(JSON.stringify(r.toJSON())).toContain('OAuth 凭据只保留在目标 Worker');
   });
   it('edits the selected browser profile proxy instead of deployment environment',async()=>{
-    const profile={profileId:'11111111-1111-4111-8111-111111111111',displayName:'SSO',storageKind:'volume',storageSource:'agent-browser-profile-11111111-1111-4111-8111-111111111111',proxyUrl:null,revision:1};
+    const profile={profileId:'11111111-1111-4111-8111-111111111111',displayName:'SSO',storageKind:'volume',storageSource:'agent-browser-profile-11111111-1111-4111-8111-111111111111',proxyProfileId:null,revision:1};
     fetcher.mockImplementation(async(url:string,init?:any)=>{
       if(url.endsWith('/browser-profiles')&&(!init||init.method==='GET'))return {ok:true,json:async()=>({profiles:[profile]})};
       if(url.endsWith('/logins'))return {ok:true,json:async()=>({logins:[]})};
-      if(url.includes('/browser-profiles/')&&init?.method==='PUT')return {ok:true,json:async()=>({profile:{...profile,proxyUrl:'http://proxy.example:7890',revision:2}})};
+      if(url.endsWith('/containers'))return {ok:true,json:async()=>({containers:[]})};
+      if(url.includes('/browser-profiles/')&&init?.method==='PUT')return {ok:true,json:async()=>({profile:{...profile,proxyProfileId:'vpn',revision:2}})};
       return {ok:true,json:async()=>({})};
     });
     const r=await mount(React.createElement(LoginWorkbench,{container:null,containers:[],onClose:()=>{}}));
     await act(async()=>r.root.findAllByType('select').find(s=>s.findAllByType('option').some(o=>o.props.value===profile.profileId))!.props.onChange({target:{value:profile.profileId}}));
-    const proxy=r.root.findAllByType('input').find(i=>i.props.placeholder==='http://host.docker.internal:7890')!;
-    await act(async()=>proxy.props.onChange({target:{value:'http://proxy.example:7890'}}));
-    await act(async()=>button(r,'保存登录网络').props.onClick());
-    expect(fetcher.mock.calls.some(([url,init])=>url===`/api/platform/browser-profiles/${profile.profileId}`&&init.method==='PUT'&&
-      JSON.parse(init.body).proxyUrl==='http://proxy.example:7890')).toBe(true);
-    expect(JSON.stringify(r.toJSON())).toContain('代理不会影响 Worker');
+    const proxy=r.root.findByProps({name:'proxyProfileId'});
+    await act(async()=>proxy.props.onChange({target:{value:'vpn'}}));
+    await act(async()=>button(r,'保存并同步').props.onClick());
+    expect(fetcher.mock.calls.some(([url,init])=>url===`/api/platform/browser-profiles/${profile.profileId}`&&init.method==='PUT'&&JSON.parse(init.body).proxyProfileId==='vpn')).toBe(true);
+  });
+  it('keeps Vercel Claude API-key connections available in the native login workbench',async()=>{
+    const claude={...current,displayName:'Claude',agentType:'claude-code',runtimeKind:'native-botmux',authMethod:'api-key',requiresLogin:true,revision:3,appliedRevision:3};
+    const fallback=fetcher.getMockImplementation()!;
+    fetcher.mockImplementation(async(url:string,init?:any)=>url.endsWith('/containers')?{ok:true,json:async()=>({containers:[claude]})}:url.endsWith('/browser-profiles')?{ok:true,json:async()=>({profiles:[]})}:url.endsWith('/logins')?{ok:true,json:async()=>({logins:[]})}:fallback(url,init));
+    const r=await mount(React.createElement(ManagementPage,{page:'agents'}));
+    await act(async()=>r.root.findByProps({'aria-label':'Claude 的操作',type:'button'}).props.onClick());
+    await act(async()=>button(r,'原生 OAuth 登录').props.onClick());
+    expect(r.root.findByType(LoginWorkbench).props.containers).toContainEqual(claude);
+    expect(r.root.findByProps({'aria-label':'登录目标 Agent'}).findAllByType('option').map(o=>o.props.value)).toContain(claude.containerId);
+  });
+  it('refreshes the target revision before login and never sends an undefined revision for Vercel Claude',async()=>{
+    const claude={...current,agentType:'claude-code',authMethod:'api-key',requiresLogin:true};
+    let revision=3;
+    fetcher.mockImplementation(async(url:string,init?:any)=>({ok:true,json:async()=>url.endsWith('/containers')?{containers:[{...claude,revision,appliedRevision:revision}]}:url.endsWith('/browser-profiles')?{profiles:[{profileId:'profile-1',displayName:'Browser',storageKind:'volume',revision:1}]}:url.endsWith('/login')?{loginId:'login-1',containerId:claude.containerId,state:'starting'}:{logins:[]}}));
+    const r=await mount(React.createElement(LoginWorkbench,{container:claude,containers:[claude],onClose:()=>{}}));
+    await act(async()=>r.root.findAllByType('select').find(s=>s.findAllByType('option').some(o=>o.props.value==='profile-1'))!.props.onChange({target:{value:'profile-1'}}));
+    revision=4;
+    await act(async()=>button(r,'Worker 发起登录').props.onClick());
+    const request=fetcher.mock.calls.find(([url,init])=>url===`/api/platform/containers/${claude.containerId}/login`&&init.method==='POST');
+    expect(JSON.parse(request![1].body)).toEqual({revision:4,profileId:'profile-1'});
+  });
+  it('does not start native login when the refreshed target has disappeared',async()=>{
+    const claude={...current,agentType:'claude-code',authMethod:'api-key',requiresLogin:true};let removed=false;
+    fetcher.mockImplementation(async(url:string)=>({ok:true,json:async()=>url.endsWith('/containers')?{containers:removed?[]:[claude]}:url.endsWith('/browser-profiles')?{profiles:[{profileId:'profile-1',displayName:'Browser',storageKind:'volume',revision:1}]}:{logins:[]}}));
+    const r=await mount(React.createElement(LoginWorkbench,{container:claude,containers:[claude],onClose:()=>{}}));
+    await act(async()=>r.root.findAllByType('select').find(s=>s.findAllByType('option').some(o=>o.props.value==='profile-1'))!.props.onChange({target:{value:'profile-1'}}));
+    removed=true;
+    await act(async()=>button(r,'Worker 发起登录').props.onClick());
+    expect(fetcher.mock.calls.some(([url])=>url.endsWith('/login'))).toBe(false);
+    expect(JSON.stringify(r.toJSON())).toContain('目标 Agent 不存在');
+  });
+  it('retains the saved proxy while options load asynchronously and allows an explicit direct selection',async()=>{
+    let resolve!:(result:any)=>void;fetcher.mockImplementation(()=>new Promise(r=>{resolve=r;}));
+    const r=await mount(React.createElement(ProxySelect,{defaultValue:'us-global'}));
+    expect(r.root.findByType('select').props.value).toBe('us-global');
+    expect(r.root.findAllByType('option').find(o=>o.props.value==='us-global')?.children.join('')).toContain('正在加载代理配置');
+    await act(async()=>resolve({ok:true,json:async()=>({proxies:[{profileId:'us-global',displayName:'US',enabled:true,revision:3,configuration:{mode:'global'}}]})}));
+    expect(r.root.findByType('select').props.value).toBe('us-global');
+    expect(r.root.findByType('select').props.defaultValue).toBeUndefined();
+    await act(async()=>r.root.findByType('select').props.onChange({target:{value:''}}));
+    expect(r.root.findByType('select').props.value).toBe('');
   });
   it('groups Agent choices by connection and expands every configured model',async()=>{
     const r=await mount(React.createElement(ContainerForm,{data:{...data,models:[{...models[0],modelIds:['model-1','model-2']}]} as any,container:current,onClose:()=>{},onDone:()=>{}}));
@@ -134,6 +165,23 @@ describe('model and Agent management UI',()=>{
     await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){},currentTarget:{}}));
     const payload=JSON.parse(fetcher.mock.calls[0][1].body);
     expect(payload).toMatchObject({modelIds:['a','b'],modelId:'a',enabled:false});expect(payload).not.toHaveProperty('apiKey');expect(done).toHaveBeenCalled();
+  });
+  it('edits and submits per-model modalities, token limits and reasoning levels',async()=>{
+    const done=vi.fn(),r=await mount(React.createElement(ModelForm,{model:{...models[0],modelId:'vision',modelIds:['vision'],
+      modelCapabilities:[{modelId:'vision',inputModalities:['text'],contextWindow:128000,maxTokens:8192,reasoningLevels:['low','medium'],defaultReasoningLevel:'medium'}]} as any,onClose:()=>{},onDone:done}));
+    await act(async()=>r.root.findByProps({'aria-label':'vision image 模态'}).props.onChange({target:{checked:true}}));
+    await act(async()=>r.root.findByProps({'aria-label':'vision 上下文窗口'}).props.onChange({target:{value:'256000'}}));
+    await act(async()=>r.root.findByProps({'aria-label':'vision 最大输出 Token'}).props.onChange({target:{value:'32000'}}));
+    await act(async()=>r.root.findByProps({'aria-label':'vision high 思考级别'}).props.onChange({target:{checked:true}}));
+    await act(async()=>r.root.findByProps({'aria-label':'vision 默认思考级别'}).props.onChange({target:{value:'high'}}));
+    await act(async()=>r.root.findByProps({'aria-label':'vision 支持推理摘要'}).props.onChange({target:{checked:true}}));
+    await act(async()=>r.root.findByProps({'aria-label':'vision 默认推理摘要'}).props.onChange({target:{value:'detailed'}}));
+    vi.stubGlobal('FormData',class{*[Symbol.iterator](){yield ['profileId','old'];yield ['displayName','Vision'];yield ['provider','test'];yield ['modelIds','vision'];yield ['enabled','on'];yield ['apiKey',''];}});
+    await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){},currentTarget:{}}));
+    const payload=JSON.parse(fetcher.mock.calls[0][1].body);
+    expect(payload.modelCapabilities).toEqual([{modelId:'vision',inputModalities:['text','image'],contextWindow:256000,maxTokens:32000,
+      reasoningLevels:['low','medium','high'],defaultReasoningLevel:'high',supportsReasoningSummaries:true,
+      defaultReasoningSummary:'detailed'}]);expect(done).toHaveBeenCalled();
   });
   it('hides model actions behind the menu and prefills a cancellable clone draft without any writes',async()=>{
     const r=await mount(React.createElement(ManagementPage,{page:'models'}));
@@ -200,11 +248,11 @@ describe('model and Agent management UI',()=>{
     vi.stubGlobal('FormData',class{*[Symbol.iterator](){yield ['modelSelection',JSON.stringify(['new','new'])];yield ['botId','bot-1'];}});
     await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){},currentTarget:{}}));
     expect(done).toHaveBeenCalledWith(expect.stringContaining('已同步'));
-    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({revision:1,modelProfileId:'new',modelId:'new'});
+    expect(JSON.parse(fetcher.mock.calls.find(([,init])=>init?.method==='PUT')![1].body)).toEqual({revision:1,modelProfileId:'new',modelId:'new',proxyProfileId:null});
   });
   it('does not hide compatible model endpoints for an unrestricted Agent',async()=>{
     const r=await mount(React.createElement(ContainerForm,{data:{...data,models:[{...models[1],baseUrl:'https://new-endpoint.example/v1'}]} as any,container:{...current,networkMode:'unrestricted',egressHosts:[]},onClose:()=>{},onDone:()=>{}}));
-    expect(JSON.stringify(r.toJSON())).toContain('网络：直连，不限制出口');
+    expect(JSON.stringify(r.toJSON())).toContain('不使用 Proxy · 直连');
     expect(r.root.findAllByType('option').some(o=>o.props.value===JSON.stringify(['new','new']))).toBe(true);
   });
   it('offers only storage types first, then a new/existing volume or confirmed hostPath directory',async()=>{
@@ -240,10 +288,11 @@ describe('model and Agent management UI',()=>{
   });
   it('collapses each supported Agent by default, truncates metadata and hides actions until opened',async()=>{
     const r=await mount(React.createElement(ManagementPage,{page:'agents'}));
-    expect(r.root.findByType('details').props.open).toBeUndefined();expect(r.root.findByType('summary').findAllByType('button')).toHaveLength(0);
+    for(const details of r.root.findAllByType('details'))expect(details.props.open).toBeUndefined();
+    expect(r.root.findAllByType('summary').at(-1)!.findAllByType('button')).toHaveLength(0);
     expect(r.root.findAllByProps({'data-tip':'pi · pi:test'})).toHaveLength(1);expect(button(r,'删除')).toBeUndefined();
     await act(async()=>r.root.findByProps({'aria-label':'Agent One 的操作',type:'button'}).props.onClick());
-    expect(r.root.findAllByProps({role:'menuitem'})).toHaveLength(3);
+    expect(r.root.findAllByProps({role:'menuitem'})).toHaveLength(4);
     await act(async()=>button(r,'修改模型 / 配置').props.onClick());expect(r.root.findAllByProps({role:'menu'})).toHaveLength(0);
     expect(r.root.findAll(node=>typeof node.props['data-tip']==='string').length).toBeGreaterThan(0);
   });

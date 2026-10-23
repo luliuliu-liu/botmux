@@ -8,18 +8,24 @@ const roots:string[]=[];afterEach(()=>{for(const r of roots.splice(0))rmSync(r,{
 function fixture(){
  const home=mkdtempSync(join(tmpdir(),'local-control-'));roots.push(home);mkdirSync(join(home,'.botmux'));
  const path=join(home,'.botmux','bots.json');writeFileSync(path,JSON.stringify([{larkAppId:'pi-bot',cliId:'pi',larkAppSecret:'private-bot',allowedUsers:['owner'],env:{PROJECT_MODE:'keep',PI_MODEL_API_KEY:'old'}},{larkAppId:'codex-bot',cliId:'codex',larkAppSecret:'other'}]));
- const state={busy:false,failAck:false,failStart:false,calls:[] as string[],prepared:0};
+ const state={busy:false,failAck:false,failStart:false,calls:[] as string[],prepared:0,rows:[] as any[]};
  const agent=createLocalControlAgent({botsJsonPath:path,busy:async()=>state.busy,isStopped:async()=>true,
   stop:async id=>{state.calls.push('stop:'+id);return {ok:true};},start:async id=>{state.calls.push('start:'+id);return {ok:!state.failStart};},
   changeCli:async id=>{state.calls.push('cli:'+id);return {status:200,data:{ok:true}};},
   request:async(p,m,body:any)=>{
    if(m==='POST'&&p.endsWith('/ack')){state.calls.push('ack');return state.failAck?{status:503,data:{}}:{status:200,data:{applied:true}};}
    if(m==='POST'){state.prepared++;return {status:200,data:{revision:1,requestId:body.requestId,modelProfileId:'team',model:{provider:'team',baseUrl:'https://model.example/v1',modelId:'chosen',modelIds:['chosen'],protocol:'openai-completions',authMethod:'api-key',apiKey:'private-model'}}};}
-   return {status:200,data:{agents:[]}};
+   return {status:200,data:{agents:state.rows}};
   }});
  return {home,path,state,agent,input:{revision:0,requestId:'00000000-0000-4000-8000-000000000001',modelProfileId:'team',modelId:'chosen',authMethod:'api-key',confirmRestart:true}};
 }
 describe('local Control Agent management',()=>{
+ it('does not lock model selection when confirmed DB state needs restoring into a fresh container',async()=>{
+  const f=fixture();f.state.rows=[{agent_type:'claude-code',revision:3,applied_revision:3,auth_method:'oauth'}];
+  expect((await f.agent.status()).agents.find(a=>a.agentType==='claude-code')?.status).toBe('restore');
+  f.state.rows[0].applied_revision=2;
+  expect((await f.agent.status()).agents.find(a=>a.agentType==='claude-code')?.status).toBe('pending');
+ });
  it('writes global native model, preserves IM identities, restarts only affected CLI and acknowledges last',async()=>{
   const f=fixture();expect(await f.agent.apply('pi',f.input)).toMatchObject({applied:true,revision:1,restartedBots:1});
   expect(f.state.calls).toEqual(['stop:pi-bot','start:pi-bot','ack']);
