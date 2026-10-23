@@ -81,7 +81,7 @@ More: [Roles & teams](https://deepcoldy.github.io/botmux/en/roles) · [File sand
 
 ## Supported CLIs & Agents
 
-Platform Workers also support `zcode`: a TUI-only build using a Z.AI Coding Plan API Key and native `/model` selection. The adapter lives in `src/platform/management/zcode-tui-adapter.ts`; Botmux session UUIDs are not passed as native ZCode resume IDs.
+Platform Workers also support `zcode`: a TUI-only build using a Z.AI Coding Plan API Key and native `/model` selection.
 
 Switch with `cliId` in `bots.json`. **20+ adapters**, spanning local CLIs (process-isolated, reachable via `tmux attach`) and API / cloud agents (e.g. Mira, riff — reached over API / remote, not a local process; mojo is API-driven but executes tools on the bot host by default, set cloud: true for the remote sandbox). Representative ones:
 
