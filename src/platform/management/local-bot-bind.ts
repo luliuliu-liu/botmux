@@ -38,7 +38,7 @@ export function createLocalBotBinder(deps:{botsJsonPath:string;request:(path:str
  };
  return {
   async bind(id:string,input:any){
-   if(input.confirmRestart!==true||!['pi','codex','claude-code'].includes(input.cliId))throw new LocalBindError(400,'请确认 CLI 并允许同步、启动此 Bot');
+   if(input.confirmRestart!==true||!['pi','codex','claude-code','traex'].includes(input.cliId))throw new LocalBindError(400,'请确认 CLI 并允许同步、启动此 Bot');
    return withLocalInventoryLock(()=>withFileLock(operation,async()=>{
     await deps.assertNoLogin?.();
     const previous=roster().find(b=>b.larkAppId===id);

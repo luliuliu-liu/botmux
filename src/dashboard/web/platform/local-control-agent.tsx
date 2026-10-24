@@ -6,8 +6,8 @@ type Model={profileId:string;displayName:string;provider:string;modelId:string;m
 type Agent={agentType:string;revision:number;appliedRevision:number;requestId?:string;authMethod:string;modelProfileId:string|null;modelId:string;currentModel:string|null;modelName:string|null;credentialPresent:boolean;status:string;requiresLogin?:boolean};
 type Bot={appId:string;displayName:string;cliId:string};
 type Local={name:string;controlId:string;agents:Agent[];bots:Bot[]};
-const names:Record<string,string>={pi:'Pi',codex:'Codex','claude-code':'Claude Code',zcode:'ZCode'};
-const protocols:Record<string,string[]>={pi:['openai-completions','openai-responses','anthropic-messages'],codex:['openai-responses'],'claude-code':['anthropic-messages','vercel-claude'],zcode:['zcode-coding-plan']};
+const names:Record<string,string>={pi:'Pi',codex:'Codex','claude-code':'Claude Code',zcode:'ZCode',traex:'TRAE'};
+const protocols:Record<string,string[]>={pi:['openai-completions','openai-responses','anthropic-messages'],codex:['openai-responses'],'claude-code':['anthropic-messages','vercel-claude'],zcode:['zcode-coding-plan'],traex:['openai-responses']};
 function ControlProxy(){
  const [state,setState]=useState<any>(),[value,setValue]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
  useEffect(()=>{void platformApi('/control-proxy').then(result=>{setState(result);setValue(result.proxyProfileId||'');}).catch(e=>setError(String(e)));},[]);
@@ -43,7 +43,7 @@ export function LocalControlAgent({models}:{models:Model[]}){
 function LocalModelForm({agent,models,onClose,onDone}:{agent:Agent;models:Model[];onClose:()=>void;onDone:(s:string)=>void}){
  const candidates=models.filter(m=>m.enabled&&m.apiKeyConfigured&&protocols[agent.agentType]?.includes(m.protocol||'openai-completions'));
  const inherited=candidates.flatMap(m=>(m.protocol==='vercel-claude'||m.protocol==='zcode-coding-plan'?['']:m.modelIds||[m.modelId]).map(id=>({profile:m.profileId,id,label:m.provider+'/'+id}))).filter(m=>m.label===agent.currentModel);
- const existing=agent.modelProfileId?[agent.modelProfileId,agent.modelId]:agent.agentType==='codex'&&agent.authMethod==='oauth'&&agent.status!=='unmanaged'?[null,null]:inherited.length===1?[inherited[0]!.profile,inherited[0]!.id]:null;
+ const existing=agent.modelProfileId?[agent.modelProfileId,agent.modelId]:['codex','traex'].includes(agent.agentType)&&agent.authMethod==='oauth'&&agent.status!=='unmanaged'?[null,null]:inherited.length===1?[inherited[0]!.profile,inherited[0]!.id]:null;
  const initial=existing?JSON.stringify(existing):'';
  const [selection,setSelection]=useState(initial),[oauthModel,setOauthModel]=useState(agent.authMethod==='oauth'?agent.modelId:''),[confirmed,setConfirmed]=useState(false),[error,setError]=useState(''),[busy,setBusy]=useState(false);
  const requestId=useRef(agent.status==='pending'?agent.requestId:crypto.randomUUID()),submitting=useRef(false),pending=agent.status==='pending';
@@ -54,7 +54,7 @@ function LocalModelForm({agent,models,onClose,onDone}:{agent:Agent;models:Model[
   }catch(e){setError(e instanceof Error?e.message:String(e));}finally{submitting.current=false;setBusy(false);}
  }
  return <Modal title={`本地 ${names[agent.agentType]} 全局配置`} onClose={onClose} busy={busy}><form onSubmit={submit}>
-  <label>认证 / 模型<select aria-label="本地认证 / 模型" value={selection} required disabled={busy||pending} onChange={e=>setSelection(e.target.value)}><option value="" disabled>请选择模型连接或原生登录</option>{agent.agentType==='codex'?<option value="[null,null]">原生 OAuth · 不使用共享模型连接</option>:null}{candidates.map(m=><optgroup key={m.profileId} label={`${m.displayName} · ${m.profileId}`}>{(m.protocol==='vercel-claude'||m.protocol==='zcode-coding-plan'?['']:m.modelIds||[m.modelId]).map(id=><option key={id} value={JSON.stringify([m.profileId,id])}>{id||'原生动态模型 · 登录后选择'}</option>)}</optgroup>)}</select></label>
+  <label>认证 / 模型<select aria-label="本地认证 / 模型" value={selection} required disabled={busy||pending} onChange={e=>setSelection(e.target.value)}><option value="" disabled>请选择模型连接或原生登录</option>{['codex','traex'].includes(agent.agentType)?<option value="[null,null]">原生 OAuth · 不使用共享模型连接</option>:null}{candidates.map(m=><optgroup key={m.profileId} label={`${m.displayName} · ${m.profileId}`}>{(m.protocol==='vercel-claude'||m.protocol==='zcode-coding-plan'?['']:m.modelIds||[m.modelId]).map(id=><option key={id} value={JSON.stringify([m.profileId,id])}>{id||'原生动态模型 · 登录后选择'}</option>)}</optgroup>)}</select></label>
   {oauth?<label>OAuth 模型（可选）<input value={oauthModel} onChange={e=>setOauthModel(e.target.value)} disabled={busy||pending} placeholder="留空使用 CLI 原生默认模型"/></label>:null}
   <p className="hint">配置按 CLI 共享。同类型的所有本地 Bot 和直接终端使用相同配置。切换 API Key / OAuth 不删除原生登录凭据。</p>
   {pending?<p className="hint-warn">上次同步未确认，需重试原配置；旧模型引用在确认前继续受保护。</p>:null}

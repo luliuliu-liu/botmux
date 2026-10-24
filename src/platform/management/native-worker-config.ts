@@ -19,7 +19,7 @@ export type NativeModelCapability={modelId:string;inputModalities:Array<'text'|'
 export type NativeModel={provider:string;baseUrl:string;modelId:string;modelIds?:string[];modelCapabilities?:NativeModelCapability[];
   apiKey?:string;protocol?:string;authMethod?:string};
 export type NativeBinding={appId:string;generation:string;appSecret:string;displayName:string;brand:'feishu'|'lark';owner:{allowedUsers:string[];ownerOpenId?:string}};
-export type NativeConfiguration={generation:string;revision:number;agentType:'pi'|'codex'|'claude-code'|'zcode'|'dsh';model:NativeModel;binding:NativeBinding|null;proxy?:import('./container-proxy.mjs').ProxyConfiguration|null};
+export type NativeConfiguration={generation:string;revision:number;agentType:'pi'|'codex'|'claude-code'|'zcode'|'dsh'|'traex';model:NativeModel;binding:NativeBinding|null;proxy?:import('./container-proxy.mjs').ProxyConfiguration|null};
 type Fleet={supervisorAlive:boolean;rows:Array<{appId:string;alive:boolean;status:string}>};
 type Dependencies={home:string;stop:(appId:string)=>Promise<{ok:boolean}>;start:(appId:string)=>Promise<{ok:boolean}>;fleet:()=>Fleet;busy:()=>Promise<boolean>};
 const read=(path:string,fallback:any)=>existsSync(path)?JSON.parse(readFileSync(path,'utf8')):fallback;
@@ -194,6 +194,10 @@ export function nativeModelEnvironment(home:string,agentType:string,model:Native
 }
 function nativeModelEnvironmentBase(home:string,agentType:string,model:NativeModel):Record<string,string>{
   const protocol=model.protocol||'openai-completions',oauth=model.authMethod==='oauth';
+  if(agentType==='traex'){
+    if(protocol!=='openai-responses'||!oauth&&(!model.modelId||!model.apiKey||!/^https?:\/\//.test(model.baseUrl)))throw Error('traex_requires_responses');
+    return {TRAE_HOME:join(home,'.trae'),TRAECLI_HOME:join(home,'.trae','cli'),...oauth?{}:{PLATFORM_TRAEX_API_KEY:model.apiKey!}};
+  }
   if(agentType==='claude-code'&&model.provider==='vercel'&&!model.apiKey?.trim())throw Error('vercel_key_required');
   if(agentType==='zcode'){
     if(oauth||protocol!=='zcode-coding-plan'||model.provider!=='zai'||model.baseUrl!=='https://api.z.ai'||model.modelId!==''||(model.modelIds?.length??0)>0||!model.apiKey?.trim())throw Error('invalid_zcode_coding_plan');
@@ -230,6 +234,21 @@ function nativeModelEnvironmentBase(home:string,agentType:string,model:NativeMod
 export async function writeNativeAgentModel(home:string,config:NativeConfiguration){
   const {model,agentType}=config;
   const environment=nativeModelEnvironment(home,agentType,model),selected=runtimeModel(config);
+  if(agentType==='traex'){
+    const directory=join(home,'.trae');mkdirSync(directory,{recursive:true,mode:0o700});
+    const file=join(directory,'traecli.toml'),begin='# platform-traex:begin',end='# platform-traex:end';
+    let previous=existsSync(file)?readFileSync(file,'utf8'):'';
+    if(previous.includes(begin)!==previous.includes(end))throw Error('traex_configuration_conflict');
+    previous=previous.replace(/# platform-traex:begin[\s\S]*?# platform-traex:end\n?/g,'');
+    previous=previous.replace(/# platform-traex-provider:begin[\s\S]*?# platform-traex-provider:end\n?/g,'');
+    const boundary=previous.search(/^\s*\[/m),root=boundary<0?previous:previous.slice(0,boundary),tables=boundary<0?'':previous.slice(boundary);
+    const clean=root.replace(/^\s*(?:model|model_provider)\s*=.*(?:\r?\n|$)/gm,'');
+    const managed=model.authMethod==='oauth'?'':`${begin}\nmodel = ${JSON.stringify(model.modelId)}\nmodel_provider = "platform"\n${end}\n`;
+    const provider=model.authMethod==='oauth'?'':`\n# platform-traex-provider:begin\n[model_providers.platform]\nname = "Platform"\nbase_url = ${JSON.stringify(model.baseUrl)}\nenv_key = "PLATFORM_TRAEX_API_KEY"\nwire_api = "responses"\nrequires_openai_auth = false\n# platform-traex-provider:end\n`;
+    const userTables=tables.replace(/# platform-traex-provider:begin[\s\S]*?# platform-traex-provider:end\n?/g,'');
+    if(/^\s*\[model_providers\.platform\]/m.test(userTables))throw Error('traex_provider_conflict');
+    atomicWriteFileSync(file,managed+clean+'\n'+userTables+provider,{mode:0o600});
+  }
   if(agentType==='pi'){
     await synchronizePiNativeConfiguration(home,model);
   }

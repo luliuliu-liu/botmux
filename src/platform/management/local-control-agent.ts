@@ -14,7 +14,7 @@ type Result={status:number;data:any};
 type Dependencies={botsJsonPath:string;request:(path:string,method?:string,body?:unknown)=>Promise<Result>;
  stop:(id:string)=>Promise<{ok:boolean}>;start:(id:string)=>Promise<{ok:boolean}>;isStopped:(id:string)=>Promise<boolean>;busy:(ids:string[])=>Promise<boolean>;
  changeCli?:(id:string,cli:string)=>Promise<Result>};
-const types=['pi','codex','claude-code','zcode'];
+const types=['pi','codex','claude-code','zcode','traex'];
 export function createLocalControlAgent(deps:Dependencies){
  const home=dirname(dirname(deps.botsJsonPath)),directory=join(home,'.botmux','platform');mkdirSync(directory,{recursive:true,mode:0o700});
  const controlId=process.env.BOTMUX_PLATFORM_GATEWAY_ID||'local-gateway';
@@ -22,7 +22,7 @@ export function createLocalControlAgent(deps:Dependencies){
  const file=(type:string)=>join(directory,`local-agent-${type}.json`);
  const meta=(type:string)=>existsSync(file(type))?JSON.parse(readFileSync(file(type),'utf8')):null;
  const allBots=()=>readBotsJsonOrEmpty(deps.botsJsonPath);
- const credential=(type:string)=>existsSync(type==='codex'?join(home,'.codex','auth.json'):type==='claude-code'?join(home,'.claude','.credentials.json'):join(home,'.pi','agent','auth.json'));
+ const credential=(type:string)=>existsSync(type==='traex'?join(home,'.trae','cli','auth.json'):type==='codex'?join(home,'.codex','auth.json'):type==='claude-code'?join(home,'.claude','.credentials.json'):join(home,'.pi','agent','auth.json'));
  const requireType=(type:string)=>{if(!types.includes(type))throw new LocalControlError(400,'本地镜像支持 Pi、Codex、Claude Code、ZCode');};
  const ownerPath=join(directory,'local-oauth-owner.json');
  let owner:any=existsSync(ownerPath)?JSON.parse(readFileSync(ownerPath,'utf8')):null,oauth:any,restoring:Promise<void>|undefined;
@@ -123,7 +123,7 @@ export function createLocalControlAgent(deps:Dependencies){
    });
   },
   async login(type:string,input:any){requireType(type);
-   if(!['codex','claude-code'].includes(type)||!['start','inspect','cancel','callback','dashboard'].includes(input.action))throw new LocalControlError(400,'原生登录操作无效');
+   if(!['codex','claude-code','traex'].includes(type)||!['start','inspect','cancel','callback','dashboard'].includes(input.action))throw new LocalControlError(400,'原生登录操作无效');
    return withFileLock(join(directory,'local-agent-operation'),async()=>{
     await loginManager();await restoring;
     if(input.action==='start'){

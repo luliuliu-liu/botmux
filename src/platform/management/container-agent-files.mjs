@@ -5,6 +5,7 @@ import {createHash,randomUUID} from 'node:crypto';
 
 import {proxyEnvironmentKeys} from './container-proxy.mjs';
 export const agentEnvironmentKeys={
+  traex:['PLATFORM_TRAEX_API_KEY','TRAE_HOME','TRAECLI_HOME','TRAECLI_PERSONAL_ACCESS_TOKEN'],
   pi:['PI_MODEL_PROVIDER','PI_MODEL_ID','PI_MODEL_API_KEY'],
   codex:['PLATFORM_MODEL_API_KEY','OPENAI_API_KEY','OPENAI_AUTH_TOKEN','CODEX_API_KEY','OPENAI_BASE_URL'],
   'claude-code':['ANTHROPIC_BASE_URL','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_MODEL','CLAUDE_CODE_OAUTH_TOKEN','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC','HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy'],

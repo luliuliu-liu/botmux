@@ -352,7 +352,7 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
   const resolveBotEnv = (botId: string | undefined): Record<string, string> | undefined =>
     resolveBotConfig(botId ?? args.botSelector, bots).env;
 
-  const { runNode } = createEphemeralPool({ resolveLarkAppSecret, resolveBotEnv: appId => bots.find(bot => bot.larkAppId === appId)?.env });
+  const { runNode } = createEphemeralPool({ resolveLarkAppSecret, resolveBot: appId => bots.find(bot => bot.larkAppId === appId) });
   const resolveGate = createFileGate({ awaitDecision: makeAwaitDecision(args.autoApproveGates) });
 
   let dag: V3Dag;

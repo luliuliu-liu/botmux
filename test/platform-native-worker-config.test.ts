@@ -20,6 +20,18 @@ function fixture(){
   return {home,state,apply,configuration,bots};
 }
 describe('native worker authority',()=>{
+  it('Traex API Key and OAuth share one native global home without leaking the key to TOML',async()=>{
+    const f=fixture();f.configuration.agentType='traex';
+    f.configuration.model={provider:'fixture',baseUrl:'http://127.0.0.1:9000/v1',protocol:'openai-responses',authMethod:'api-key',modelId:'fixture-model',apiKey:'fixture-secret'};
+    await f.apply(f.configuration);
+    const file=join(f.home,'.trae','traecli.toml');
+    expect(readFileSync(file,'utf8')).toContain('env_key = "PLATFORM_TRAEX_API_KEY"');
+    expect(readFileSync(file,'utf8')).not.toContain('fixture-secret');
+    expect(readContainerAgentEnvironment(f.home,'traex')?.PLATFORM_TRAEX_API_KEY).toBe('fixture-secret');
+    await f.apply({...f.configuration,revision:2,model:{provider:'trae',baseUrl:'https://api.enterprise.trae.cn',protocol:'openai-responses',authMethod:'oauth',modelId:''}});
+    expect(readFileSync(file,'utf8')).not.toContain('model_providers.platform');
+    expect(readContainerAgentEnvironment(f.home,'traex')?.PLATFORM_TRAEX_API_KEY).toBeUndefined();
+  });
   it('ZCode key connection rejects static models and arbitrary providers/endpoints',()=>{
     const model={provider:'zai',baseUrl:'https://api.z.ai',protocol:'zcode-coding-plan',authMethod:'api-key',apiKey:'fixture-key',modelId:'',modelIds:[]};
     expect(nativeModelEnvironment('/state','zcode',model)).toEqual({ZCODE_CODING_PLAN_API_KEY:'fixture-key'});

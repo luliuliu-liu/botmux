@@ -168,9 +168,9 @@ export function createPlatformDashboardApi(deps:{
       if(suffix==='/control-upgrade'&&['GET','POST'].includes(req.method||'')){jsonRes(res,req.method==='POST'?202:200,await localAgent.upgrade(req.method==='POST'?await read():undefined));return true;}
       if(suffix==='/control-proxy'&&['GET','PUT'].includes(req.method||'')){jsonRes(res,200,await localAgent.proxy(req.method==='PUT'?await read():undefined));return true;}
       if(suffix==='/local-agent'&&req.method==='GET'){jsonRes(res,200,await localAgent.status());return true;}
-      const localModel=suffix.match(/^\/local-agent\/(pi|codex|claude-code|zcode)$/);
+      const localModel=suffix.match(/^\/local-agent\/(pi|codex|claude-code|zcode|traex)$/);
       if(localModel&&req.method==='PUT'){const input=await read();jsonRes(res,200,await withLocalInventoryLock(()=>localAgent.apply(localModel[1]!,input)));return true;}
-      const localLogin=suffix.match(/^\/local-agent\/(codex|claude-code)\/login$/);
+      const localLogin=suffix.match(/^\/local-agent\/(codex|claude-code|traex)\/login$/);
       if(localLogin&&req.method==='POST'){
         const result=await localAgent.login(localLogin[1]!,await read());
         if(result.dashboardLoginId){
