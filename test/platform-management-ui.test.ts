@@ -42,9 +42,11 @@ describe('model and Agent management UI',()=>{
     fetcher.mockImplementation(async(url:string,init?:any)=>url.endsWith('/local-agent')?{ok:true,json:async()=>({agents:[{agentType:'codex',revision:2,appliedRevision:2,authMethod:'oauth',modelName:null,currentModel:null,status:'synced',credentialPresent:true}],bots:[{appId:'cli_fixture',displayName:'Fixture',cliId:'codex'}]})}:url.endsWith('/control-proxy')?{ok:true,json:async()=>({revision:1,appliedRevision:1,proxyProfileId:null})}:url.endsWith('/control-upgrade')?{ok:true,json:async()=>({currentImage:'dev-agent:fixture'})}:fallback(url,init));
     const r=await mount(React.createElement(LocalControlAgent,{models:[]}));
     expect(r.root.findAllByType('details')).toHaveLength(0);expect(r.root.findAllByType('tbody')[0].findAllByType('tr')).toHaveLength(1);
-    expect(button(r,'切换 CLI')).toBeDefined();expect(button(r,'修改 Proxy')).toBeDefined();expect(button(r,'镜像升级')).toBeDefined();
+    expect(button(r,'切换 CLI')).toBeDefined();
     expect(r.root.findAllByType('table')).toHaveLength(1);
-    await act(async()=>button(r,'修改 Proxy').props.onClick());expect(r.root.findAllByType('dialog')).toHaveLength(1);
+    await act(async()=>r.root.findByProps({'aria-label':'Dev Agent 运行环境 的操作',type:'button'}).props.onClick());
+    expect(r.root.findAllByProps({role:'menuitem'}).map(b=>b.children.join(''))).toEqual(['修改 Proxy','镜像升级']);
+    await act(async()=>r.root.findAllByProps({role:'menuitem'})[0].props.onClick());expect(r.root.findAllByType('dialog')).toHaveLength(1);
     expect(fetcher.mock.calls.every(([,init])=>init.method==='GET')).toBe(true);
   });
   it('creates a manual browser without model, Bot or login-session parameters',async()=>{
