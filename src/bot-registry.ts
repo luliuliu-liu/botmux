@@ -6,6 +6,7 @@ import { readGlobalConfig } from './global-config.js';
 import { getTurnResultRuntime } from './core/turn-result-runtime.js';
 import { parseSandboxNetworkPolicy } from './core/sandbox-network-policy.js';
 import * as Lark from '@larksuiteoapi/node-sdk';
+import {containerAgentGlobalConfiguration} from './platform/management/container-agent-policy.js';
 import { normalizeCodexInstancePool, registerCodexInstanceBot, clearCodexInstanceBots, validateCodexInstanceRoster } from './services/codex-instance-pool.js';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -3589,7 +3590,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
 
   const configs: BotConfig[] = [];
   for (let i = 0; i < parsed.length; i++) {
-    const entry = parsed[i];
+    const entry = containerAgentGlobalConfiguration(parsed[i]);
     const codexInstancePool = normalizeCodexInstancePool(entry.codexInstancePool, entry);
     if (!entry.larkAppId || typeof entry.larkAppId !== 'string') {
       throw new Error(`Bot config [${i}]: larkAppId is required and must be a string`);

@@ -165,6 +165,7 @@ export type { GoalAnswer, GoalAsk } from './event-contract.js';
  *
  * The runtime rejects a run whose nodes resolve to any other CLI at start
  * time.
+ * Pi, ZCode and dsh use the platform file-backed objective prompt.
  */
 export const V3_SUPPORTED_CLIS: readonly CliId[] = [
   'claude-code',
@@ -172,6 +173,9 @@ export const V3_SUPPORTED_CLIS: readonly CliId[] = [
   'seed',
   'traex',
   'relay',
+  'pi',
+  'zcode',
+  'dsh',
   'minimax',
 ];
 
@@ -220,6 +224,9 @@ export interface BotSnapshot {
   larkAppId: string;
   cliId: CliId;
   cliPathOverride?: string;
+  /** Native Codex data/auth ownership policy. Kept separate from arbitrary
+   * per-bot env because CODEX_HOME is intentionally a reserved key. */
+  codexAuthSync?: import('../../services/codex-auth-sync.js').CodexAuthSyncMode;
   /** Frozen configured launch prefix.  Workflow workers must use
    *  the same gateway/runtime selection as ordinary bot sessions. */
   wrapperCli?: string;
@@ -273,6 +280,12 @@ export interface RunNodeRequest {
   outputDir: string;
   /** Already includes the GOAL_ENV keys; pool merges into the worker env. */
   env: Record<string, string>;
+  /**
+   * Live per-bot CLI environment from bots.json (for example a model API key).
+   * This is an in-memory spawn input only: it must never be persisted in the
+   * run envelope, bot snapshot, journal, or attempt files.
+   */
+  workerEnv?: Record<string, string>;
   /** The run's authenticated chat binding (recorded by the daemon at run
    *  birth).  The pool threads it into the worker init so the CLI child sees
    *  the standard BOTMUX_* identity env (real chatId / ownerOpenId / …)

@@ -22,6 +22,9 @@ export type NavItem = {
 export const BOT_DEFAULTS_ALIASES: readonly string[] = ['机器人配置', '机器人设置', 'bot settings', 'bot configuration'];
 
 export const NAV_ITEMS: NavItem[] = [
+  {id:'platform-bots',href:'#/platform-bots',label:'Bot 管理',manage:true,icon:<><rect x="2" y="5" width="12" height="8" rx="2"/><path d="M8 5V2M1 8v3M15 8v3M5 13v1M11 13v1"/><circle cx="5.5" cy="9" r=".6"/><circle cx="10.5" cy="9" r=".6"/></>},
+  {id:'platform-configuration',href:'#/platform-configuration',label:'密钥与配置管理',aliases:['模型管理','Proxy 管理','凭证管理'],manage:true,icon:<><circle cx="5.5" cy="5.5" r="3.5"/><path d="M8 8l6 6M11 11l2-2M13 13l2-2"/></>},
+  {id:'platform-agents',href:'#/platform-agents',label:'Agent 管理',manage:true,icon:<><rect x="2" y="1.5" width="12" height="5" rx="1.5"/><rect x="2" y="9.5" width="5" height="5" rx="1"/><rect x="9" y="9.5" width="5" height="5" rx="1"/><path d="M8 6.5v1.5M4.5 9.5V8h7v1.5M4 4h1M7 4h5"/></>},
   {
     id: 'overview',
     href: '#/',
@@ -119,7 +122,7 @@ export const NAV_GROUPS: Array<{ id: string; labelKey: string; items: string[] }
   { id: 'collab', labelKey: 'nav.group.collab', items: ['sessions', 'decision-board', 'agent-workbench', 'groups', 'schedules', 'workflows'] },
   { id: 'workforce', labelKey: 'nav.group.workforce', items: ['roles', 'skills', 'customization', 'message-listeners', 'doc-watches', 'bot-defaults', 'agents'] },
   { id: 'analytics', labelKey: 'nav.group.analytics', items: ['monitoring', 'insights', 'feedback'] },
-  { id: 'manage', labelKey: 'nav.group.manage', items: ['terminal', 'connectors', 'team', 'plugins', 'whiteboards', 'settings'] },
+  { id: 'manage', labelKey: 'nav.group.manage', items: ['platform-agents','platform-configuration','terminal', 'connectors', 'team', 'plugins', 'whiteboards', 'settings'] },
 ];
 
 /**

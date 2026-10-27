@@ -22,6 +22,8 @@ import {
 } from './skills/shared.js';
 import { useSkillsData } from './skills/use-skills-data.js';
 import { toast } from './toast.js';
+import {SkillSyncDialog} from './platform/skill-sync-dialog.js';
+import {ui} from './ui.js';
 import { requestJson } from './dashboard-api.js';
 import type {
   BotRow,
@@ -400,6 +402,7 @@ export function InstalledSkillsLibrary(props: {
   status: StatusMessage;
   onUpdate(name: string): void;
   onRequestRemove(names: string[]): void;
+  onRequestSync?: (names:string[]) => void;
   /** search prefill arriving from a cross-tab navigation */
   externalQuery?: string | null;
   /** exact-name filter arriving from a cross-tab navigation (clearable) */
@@ -772,6 +775,7 @@ export function InstalledSkillsLibrary(props: {
             <strong>{tr('skills.selectedCount', { count: selected.size })}</strong>
             {hiddenSelectedCount > 0 ? <small>{tr('skills.selectedHidden', { count: hiddenSelectedCount })}</small> : null}
           </span>
+          {props.onRequestSync?<button type="button" className="primary" data-action="sync-selected-skills" disabled={selected.size===0||props.removingNames.size>0} onClick={()=>props.onRequestSync?.([...selected])}>同步到 Worker</button>:null}
           <button
             type="button"
             className="danger"
@@ -887,6 +891,7 @@ export function SkillsPage() {
     setSkills, setBots, setTrustProjectSkills, setDelivery,
   } = useSkillsData({ apiUnavailableText: tr('skills.apiUnavailable') });
   const [activeTab, setActiveTab] = useState<'packs' | 'library' | 'bots' | 'delivery'>('library');
+  const [syncSkills,setSyncSkills]=useState<string[]|null>(null);
   // Cross-tab navigation: a chip click in one table jumps to another tab with
   // context (search prefill / focused entity). The target tab consumes the
   // intent once so it doesn't re-apply on later visits.
@@ -1551,6 +1556,7 @@ export function SkillsPage() {
             </button>
           </div>
 
+          {syncSkills&&ui.platformManaged?<SkillSyncDialog names={syncSkills} onClose={()=>setSyncSkills(null)}/>:null}
           {activeTab === 'packs' && (
             <SkillPacksTab
               skills={skills}
@@ -1607,6 +1613,7 @@ export function SkillsPage() {
               installedStatus={installedStatus}
               onUpdateSkill={name => void updateSkill(name)}
               onRequestRemove={requestSkillRemoval}
+              onRequestSync={ui.platformManaged?setSyncSkills:undefined}
               onCancelRemoval={cancelSkillRemoval}
               onConfirmRemoval={force => void confirmSkillRemoval(force)}
               navIntent={navIntent?.tab === 'library' ? navIntent : null}

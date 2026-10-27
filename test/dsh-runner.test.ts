@@ -163,6 +163,13 @@ describe('dsh-runner', () => {
     // The legacy ~/.botmux/dsh path must not be created anymore.
     expect(existsSync(join(h.home, '.botmux', 'dsh'))).toBe(false);
   });
+  it('renders live public SDK text only after the current turn receipt, without replacing the authoritative final',async()=>{
+    h=spawnRunner('progress');await waitFor(()=>h.stdout.includes('›'),{label:'ready'});
+    h.child.stdin.write(makeFrame('hi'));
+    await waitFor(()=>parseMarkers(h.stdout).some(m=>m.kind==='final'),{label:'final'});
+    expect(h.stdout).toContain('live-sdk-partial');expect(h.stdout).not.toContain('stale-before-receipt');expect(h.stdout).not.toContain('foreign-progress');
+    expect(parseMarkers(h.stdout).find(m=>m.kind==='final')!.payload.content).toBe('你好，我是 dsh。');
+  });
 
   it('passes the question bridge patch to the dsh profile launch', async () => {
     h = spawnRunner('happy', ['--bridge-patch', '/tmp/botmux-bridge.yml']);

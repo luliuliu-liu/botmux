@@ -270,6 +270,15 @@ const ROUTES: RouteDef[] = [
   },
   // ── READ ──────────────────────────────
   {
+    method:'GET',pathRe:/^\/__daemon\/sessions\/([^/]+)\/card-view-link$/,
+    handle:async(m,ctx,deps)=>{
+      const sid=m[1]!,owner=deps.ownerOf(sid);
+      if(!owner||ctx.callerAppId!==undefined&&owner!==ctx.callerAppId)return {status:404,body:{error:'session_not_found'}};
+      const result=await deps.proxyToDaemon(owner,`/api/sessions/${encodeURIComponent(sid)}/card-view-link`,{method:'GET'});
+      return {status:result.status,body:await readUpstream(result)};
+    },
+  },
+  {
     method: 'GET',
     pathRe: /^\/__daemon\/sessions-list$/,
     handle: async (_m, ctx, deps) => {

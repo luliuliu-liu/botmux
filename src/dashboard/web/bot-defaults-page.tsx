@@ -2,6 +2,7 @@ import { CodexProfilePicker } from './codex-profile-picker.js';
 import { REPLY_FOOTER_KEYS, normalizeReplyFooter } from '../../services/reply-footer.js';
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { FeishuLoginEntry } from './platform/feishu-login-entry.js';
 import { cloneSourceDefaultsFrom, openBotOnboarding } from './bot-onboarding.js';
 import { StreamingCardPinToggle } from './streaming-card-pin-toggle.js';
 import { BlockedUsersEditor } from './blocked-users-editor.js';
@@ -883,6 +884,7 @@ export function BotDefaultsPage() {
         <div>
           <p className="eyebrow">{tr('nav.botDefaults')}</p>
           <h1>{tr('botDefaults.title')}</h1>
+          {ui.platformWorker ? <p className="hint bd-platform-notice">此工作台保留本地通信和会话配置。机器人绑定与模型请在 Control Agent 的 Agent 管理中修改。</p> : ui.platformManaged ? <p className="hint bd-platform-notice">此页管理本地机器人配置。新建机器人请前往 <a href="#/platform-bots">管理 → Bot 管理</a>。</p> : null}
         </div>
         <div className="page-heading-actions">
           <RefreshIconButton id="bd-refresh" label={tr('botDefaults.refresh')} busy={refreshing} disabled={refreshing} onClick={() => void reload()} />
@@ -890,7 +892,7 @@ export function BotDefaultsPage() {
             <DropdownMenu<string>
               className="clone-bot-menu"
               ariaLabel={tr('botOnboarding.clone')}
-              disabled={onboardingBusy}
+              disabled={onboardingBusy || ui.platformManaged || ui.platformWorker}
               label={tr('botOnboarding.clone')}
               value=""
               options={bots.map(bot => ({
@@ -912,7 +914,7 @@ export function BotDefaultsPage() {
           {ui.authed ? (
             <CreateActionButton
               className="page-primary-action add-bot-btn"
-              disabled={onboardingBusy}
+              disabled={onboardingBusy || ui.platformManaged || ui.platformWorker}
               onClick={() => {
                 setOnboardingBusy(true);
                 void openBotOnboarding().finally(() => setOnboardingBusy(false));
@@ -1104,7 +1106,7 @@ function BotDefaultsCard(props: {
         >
           <BdTabGrid>
             <section className="bd-tile" id={botDefaultsSectionDomId('agent')}>
-              <BotAgentSection bot={bot} sessionFallback={cli} cliState={cliState} patchBot={patchBot} lock={props.linkedAgent} />
+              {ui.platformWorker?<><h3>Agent · {cli}</h3><p>{bot.model||'默认模型'}</p><p className="hint">当前为容器级全局配置；修改模型请使用 Control Agent 的模型管理 / Agent 管理。</p></>:<BotAgentSection bot={bot} sessionFallback={cli} cliState={cliState} patchBot={patchBot} lock={props.linkedAgent} />}
             </section>
             <section className="bd-tile" id={botDefaultsSectionDomId('working-dir')}>
               <WorkingDirSection bot={bot} patchBot={patchBot} putCardPref={putCardPref} lock={props.linkedAgent} />
@@ -1807,7 +1809,7 @@ function BotAvatarControl(props: { bot: BotDefaultsRow; name: string; patchBot: 
       <small className={statusClass(status, 'bd-avatar-status')} data-avatar-status>
         {status.text}
         {loginVisible ? (
-          <button type="button" className="bd-feishu-login" data-action="feishu-login-avatar" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</button>
+          <FeishuLoginEntry action="feishu-login-avatar" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</FeishuLoginEntry>
         ) : null}
       </small>
     ) : null}
@@ -1949,7 +1951,7 @@ function BotProfileIdentity(props: { bot: BotDefaultsRow; cli: string; patchBot:
         ) : null}
       </div>
       <small className={statusClass(status, 'bd-name-status')} data-name-status>{status?.text ?? ''}</small>
-      <button type="button" className="bd-feishu-login" data-action="feishu-login" hidden={!loginVisible} onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</button>
+      <FeishuLoginEntry action="feishu-login" hidden={!loginVisible} onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</FeishuLoginEntry>
       {loginOpen ? (
         <FeishuLoginModal
           onClose={() => setLoginOpen(false)}
@@ -2125,11 +2127,11 @@ function BotDescriptionControl(props: { bot: BotDefaultsRow }) {
           </svg>
         </button>
       </div>
-      {status ? (
+      {status && !(ui.platformManaged && loginVisible) ? (
         <small className={statusClass(status, 'bd-description-status')} data-description-status>
           {status.text}
           {loginVisible ? (
-            <button type="button" className="bd-feishu-login" data-action="feishu-login-description" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</button>
+            <FeishuLoginEntry action="feishu-login-description" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</FeishuLoginEntry>
           ) : null}
         </small>
       ) : null}
@@ -2149,7 +2151,7 @@ function BotDescriptionControl(props: { bot: BotDefaultsRow }) {
               <small className={statusClass(status, 'bd-description-modal-status')} data-description-modal-status>
                 {status.text}
                 {loginVisible ? (
-                  <button type="button" className="bd-feishu-login" data-action="feishu-login-description-modal" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</button>
+                  <FeishuLoginEntry action="feishu-login-description-modal" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</FeishuLoginEntry>
                 ) : null}
               </small>
             ) : null}
@@ -2209,7 +2211,7 @@ function BotDescriptionControl(props: { bot: BotDefaultsRow }) {
   );
 }
 
-function FeishuLoginModal(props: { onClose(): void; onSuccess(): void }) {
+export function FeishuLoginModal(props: { onClose(): void; onSuccess(): void }) {
   const tr = useT();
   const { onClose, onSuccess } = props;
   const timerRef = useRef<number | null>(null);
@@ -3236,7 +3238,7 @@ export function BotAgentSection(props: {
               value={model}
               onChange={setModel}
               options={autoModelEnabled && selectedCliId === 'traex' ? ['auto', ...modelCandidates] : modelCandidates}
-              disabled={agentBusy || modelDisabledByCli || (selectedCliId === 'traex' && autoModelEnabled)}
+              disabled={bot.containerAgentGlobalMode === true || agentBusy || modelDisabledByCli || (selectedCliId === 'traex' && autoModelEnabled)}
               busy={detectingModels}
               dataInput="agentModel"
               ariaLabel={tr('botDefaults.agentModel')}
@@ -3249,6 +3251,7 @@ export function BotAgentSection(props: {
                 : undefined}
             />
           </label>
+          {bot.containerAgentGlobalMode ? <small>模型由当前 Agent 类型的容器级全局配置提供；请在模型管理 / Agent 管理中修改。</small> : null}
         </div>
       )}
       {selectedCliId === 'traex' && !bot.wrapperCli && !option?.cliLaunchMode ? (
@@ -4280,14 +4283,14 @@ function CodexAuthSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
           <select
             data-input="codexAuthSync"
             value={authMode}
-            disabled={authBusy}
+            disabled={authBusy || bot.containerAgentGlobalMode === true}
             onChange={event => void saveAuthMode(event.currentTarget.value as 'shared' | 'isolated')}
           >
             <option value="shared">{tr('botDefaults.codexAuthSyncShared')}</option>
             <option value="isolated">{tr('botDefaults.codexAuthSyncIsolated')}</option>
           </select>
         </label>
-        <small>{tr('botDefaults.codexAuthSyncHelp')}</small>
+        <small>{bot.containerAgentGlobalMode ? tr('botDefaults.codexAuthGlobalContainerHelp') : tr('botDefaults.codexAuthSyncHelp')}</small>
         <StatusSpan status={authStatus} attr={{ 'data-codex-auth-sync-status': '' }} />
       </div>
     </section>
@@ -7702,14 +7705,13 @@ export function SessionGroupTagRow(props: { bot: BotDefaultsRow }) {
             {repairFeedback.kind === 'login_required' ? (
               // 「不阻塞」的落点：授权照常开，这里只提示还差一次扫码。点它 → 弹现成
               // 的 FeishuLoginModal，扫完自动重跑修复。
-              <button
-                type="button"
+              <FeishuLoginEntry
                 className="bd-sg-repair-link"
-                data-action="session-group-tag-repair-login"
+                action="session-group-tag-repair-login"
                 onClick={() => setLoginOpen(true)}
               >
                 {tr('botDefaults.sgTagRepairNeedLogin')}
-              </button>
+              </FeishuLoginEntry>
             ) : repairFeedback.kind === 'error' ? (
               <span>{tr('botDefaults.sgTagRepairFailed', { reason: repairFeedback.message })}</span>
             ) : (

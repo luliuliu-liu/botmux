@@ -39,6 +39,7 @@ import { createDshAdapter } from './dsh.js';
 import { createDshTuiAdapter } from './dsh-tui.js';
 import { createMojoAdapter } from './mojo.js';
 import { createMinimaxAdapter } from './minimax.js';
+import {createZcodeAdapter} from '../../platform/management/zcode-tui-adapter.js';
 import { createRemoteRunnerAdapter } from './remote-runner.js';
 
 /**
@@ -96,6 +97,7 @@ const RAW_CLI_EXECUTABLES: Readonly<Record<CliId, string | undefined>> = {
   // MiniMax Code — native exec stream-json, wrapped by minimax-runner.
   minimax: 'mcode',
   'remote-runner': 'botmux-remote-runner',
+  zcode: 'zcode',
   codem: 'codem',
 };
 
@@ -350,6 +352,7 @@ export function createCliAdapterSync(id: CliId, pathOverride?: string, opts?: Cl
     case 'dsh-tui': return createDshTuiAdapter(pathOverride);
     case 'mojo': return createMojoAdapter(pathOverride);
     case 'minimax': return createMinimaxAdapter(pathOverride);
+    case 'zcode': return createZcodeAdapter(pathOverride);
     case 'remote-runner': return createRemoteRunnerAdapter(pathOverride);
     default: throw new Error(`Unknown CLI adapter: ${id}`);
   }

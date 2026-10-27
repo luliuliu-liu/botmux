@@ -89,14 +89,13 @@ interface ScenarioRun {
  *  keeps repainting (its blinking cursor) so quiescence is never reached. */
 function fakeCliScript(): string {
   return [
-    '#!/bin/sh',
-    'if [ "$CHATTY" = 1 ]; then',
-    "  ( while :; do printf '\\033[?25l .'; sleep 0.2; done ) &",
-    'fi',
-    'while IFS= read -r line; do',
-    '  printf \'%s %s\\n\' "$(date +%s%3N)" "$line" >> "$HOME/cli-input.log"',
-    'done',
-    'wait',
+    '#!/usr/bin/env node',
+    // A real CLI leaf, not a shell: the production bare-shell guard must stay
+    // enabled. Date.now also avoids BSD date's unsupported %N on macOS.
+    'const {appendFileSync}=require("node:fs");',
+    'const {createInterface}=require("node:readline");',
+    'if(process.env.CHATTY==="1")setInterval(()=>process.stdout.write("\\x1b[?25l ."),200).unref();',
+    'createInterface({input:process.stdin,terminal:false}).on("line",line=>appendFileSync(process.env.HOME+"/cli-input.log",Date.now()+" "+line+"\\n"));',
     '',
   ].join('\n');
 }

@@ -102,6 +102,7 @@ type PluginDashboardNavEntry = {
 };
 
 const MANAGE_ROUTES = [
+  'platform-bots', 'platform-configuration', 'platform-models', 'platform-proxies', 'platform-agents', 'opensandbox',
   'roles',
   'role-profiles',
   'bot-defaults',
@@ -118,6 +119,7 @@ const MANAGE_ROUTES = [
   'whiteboards',
   'terminal',
 ];
+
 
 
 let pinnedPluginNavItems: NavItem[] = [];
@@ -161,6 +163,9 @@ function labelOf(item: NavItem): string {
 
 function isActiveNav(item: NavItem, hash: string): boolean {
   const current = hash || '#/';
+  // Platform subpages share their parent's global navigation highlight.
+  if (item.id === 'platform-agents' && /^#\/(platform-bots|opensandbox)(?:[?/]|$)/.test(current)) return true;
+  if (item.id === 'platform-configuration' && /^#\/platform-(models|proxies)(?:[?/]|$)/.test(current)) return true;
   if (item.id === 'plugins' && pinnedPluginNavItems.some(plugin => (
     plugin.href === current || current.startsWith(`${plugin.href}?`) || current.startsWith(`${plugin.href}/`)
   ))) {
@@ -187,7 +192,7 @@ function sidebarNavItems(): NavItem[] {
     // 网页终端在 Desktop/Mobile 客户端壳里归原生会话面管（见 dashboardShellAllowsWebTerminal）。
     if (item.id === 'terminal') return !clientShell && ui.hostTerminal;
     if (item.id === 'decision-board') return decisionBoardNavVisible;
-    return true;
+    return ui.platformManaged || !['platform-bots','platform-configuration','platform-models','platform-proxies','platform-agents','opensandbox'].includes(item.id);
   });
   if (pinnedPluginNavItems.length === 0) return builtInItems;
   const pluginIndex = builtInItems.findIndex(item => item.id === 'plugins');
@@ -1703,6 +1708,11 @@ async function loadWorkbenchCapabilities(): Promise<void> {
 }
 
 async function loadAuthState(): Promise<void> {
+  const platformProbe = origFetch('/api/platform/capabilities').then(async response => {
+    const capabilities=response.ok?await response.json():{};
+    ui.platformManaged = capabilities.enabled === true;
+    ui.platformWorker = capabilities.worker === true;
+  }).catch(() => { ui.platformManaged = false;ui.platformWorker=false; });
   lastAuthProbeAt = Date.now();
   // 能力探测与 /api/settings 并行：两者互不依赖，也都在首次 route() 之前完成。
   const capabilitiesProbe = loadWorkbenchCapabilities();
@@ -1743,6 +1753,7 @@ async function loadAuthState(): Promise<void> {
     }
   } catch { /* keep defaults */ }
   await capabilitiesProbe;
+  await platformProbe;
 }
 
 async function loadPinnedPluginNavItems(): Promise<void> {

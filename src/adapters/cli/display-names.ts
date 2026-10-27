@@ -6,6 +6,7 @@ import type { CliId } from './types.js';
  * fails to compile until it has a name here.
  */
 export const CLI_DISPLAY_NAMES: Readonly<Record<CliId, string>> = {
+  zcode: 'ZCode',
   'claude-code': 'Claude',
   'seed': 'Seed',
   'relay': 'Relay',

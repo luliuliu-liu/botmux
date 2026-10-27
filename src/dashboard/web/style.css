@@ -1,3 +1,4 @@
+@import url('./platform-management.css');
 /* Base tokens — the default look (incl. the "数字员工工作台" redesign from
    PR #123) is layered later in this file. Skins override these per [data-skin]. */
 :root {

@@ -178,6 +178,16 @@ describe('installed Skills library', () => {
     act(() => root.findByProps({ 'data-action': 'clear-installed-search-empty' }).props.onClick());
     expect(root.findAllByProps({ 'data-skill': 'review' })).toHaveLength(1);
   });
+  it('offers optional Worker sync next to native removal and sends only selected installed names',()=>{
+    const sync=vi.fn(),remove=vi.fn(),renderer=renderLibrary({onRequestSync:sync,onRequestRemove:remove}),root=renderer.root;
+    expect(root.findAllByProps({'data-action':'sync-selected-skills'})).toHaveLength(0);
+    act(()=>root.findByProps({'data-action':'select-installed-skills'}).props.onClick());
+    expect(root.findByProps({'data-action':'sync-selected-skills'}).props.disabled).toBe(true);
+    act(()=>root.findByProps({className:'skills-select-all-results'}).findByType('input').props.onChange());
+    act(()=>root.findByProps({'data-action':'sync-selected-skills'}).props.onClick());
+    expect(new Set(sync.mock.calls[0][0])).toEqual(new Set(['deploy-api','deploy-web','review']));
+    expect(remove).not.toHaveBeenCalled();expect(root.findAllByProps({'data-action':'remove-selected-skills'})).toHaveLength(1);
+  });
 
   it('selects only the current filtered results and preserves hidden selections when the query changes', () => {
     const onRequestRemove = vi.fn();

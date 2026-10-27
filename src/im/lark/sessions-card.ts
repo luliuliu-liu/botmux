@@ -595,6 +595,16 @@ export function buildSessionTerminalUrl(row: SessionRow): string | null {
   return null;
 }
 
+async function sessionCardTerminalUrl(client:DaemonClient,row:SessionRow):Promise<string|null>{
+  if(row.status==='closed')return null;
+  try{
+    const result=await client.request({method:'GET',path:`/__daemon/sessions/${encodeURIComponent(row.sessionId)}/card-view-link`,retries:0});
+    const body=result.body as {url?:unknown};
+    if(result.status===200&&typeof body?.url==='string')return body.url;
+  }catch{/* The card remains usable without a terminal button. */}
+  return null;
+}
+
 function formatRelativeForDetail(fromMs: number, nowMs: number): string {
   const diff = nowMs - fromMs;
   if (!Number.isFinite(diff) || diff < 0) return 'just now';
@@ -707,7 +717,7 @@ export async function handleSessionsCardAction(
       pageSize: navPageSize,
       sourcePage: navPage,
       scope: navScope,
-      terminalUrl: buildSessionTerminalUrl(row),
+      terminalUrl: await sessionCardTerminalUrl(client,row),
       feishuChatLink: row.feishuChatLink ?? null,
     });
     return { card: { type: 'raw', data: JSON.parse(cardJson) as Record<string, unknown> } };
@@ -794,7 +804,7 @@ export async function handleSessionsCardAction(
       pageSize: navPageSize,
       sourcePage: navPage,
       scope: navScope,
-      terminalUrl: buildSessionTerminalUrl(synth),
+      terminalUrl: await sessionCardTerminalUrl(client,synth),
       feishuChatLink: synth.feishuChatLink ?? null,
     });
     const card = JSON.parse(cardJson) as Record<string, unknown>;
@@ -941,7 +951,7 @@ export async function handleSessionsCardAction(
       pageSize: navPageSize,
       sourcePage: navPage,
       scope: navScope,
-      terminalUrl: buildSessionTerminalUrl(after),
+      terminalUrl: await sessionCardTerminalUrl(client,after),
       feishuChatLink: after.feishuChatLink ?? null,
     });
     return { card: { type: 'raw', data: JSON.parse(cardJson) as Record<string, unknown> } };

@@ -38,6 +38,7 @@ import { isReservedPerBotEnvKey, nextPerBotEnv, parsePerBotEnvText, sanitizePerB
 import { applyEnvOps, botEnvLayer, envLayerWithinBudget, isSessionEnvName, parseEnvOps, type EnvLayer, type EnvOp, type EnvOpsError } from '../core/session-env.js';
 import { sessionEnvLockContextForBot } from '../core/session-env-resolve.js';
 import { normalizeEnvPolicy } from '../core/env-policy.js';
+import {containerGlobalAgentMode,splitContainerAgentEnvironment} from '../platform/management/container-agent-policy.js';
 import { normalizeFeedbackPolicy } from './feedback-policy.js';
 import { normalizeOncallGroupPolicy } from './oncall-group-policy.js';
 import { normalizeNoProgressNotifyPolicy } from './no-progress-notify-policy.js';
@@ -327,6 +328,9 @@ export async function applyPerBotEnvChange(
 ): Promise<{ ok: true; envKeys: string[] } | { ok: false; reason: string }> {
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
+  if(containerGlobalAgentMode()&&Object.keys(splitContainerAgentEnvironment(bot.config.cliId,change.incoming).global).length){
+    return {ok:false,reason:'container_agent_environment_managed'};
+  }
   const r = await rmwBotEntry<Record<string, string> | null | 'layer_too_large'>(larkAppId, (entry) => {
     const prevLayer = botEnvLayer(entry);
     const prev = sanitizePerBotEnv(entry.env);
@@ -435,6 +439,12 @@ async function applyConfigFieldInternal(
   if (spec.kind === 'allowedUsers') return { ok: false, reason: 'use_setBotAllowedUsers' };
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
+  if(spec.configKey==='env'&&containerGlobalAgentMode()){
+    const normalized=sanitizePerBotEnv(value);
+    if(Object.keys(splitContainerAgentEnvironment(bot.config.cliId,normalized).global).length){
+      return {ok:false,reason:'container_agent_environment_managed'};
+    }
+  }
   if (spec.configKey === 'envPolicy' && value !== null) {
     try { value = normalizeEnvPolicy(value); } catch { return { ok: false, reason: 'invalid_env_policy' }; }
   }

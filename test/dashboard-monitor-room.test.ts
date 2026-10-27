@@ -76,6 +76,12 @@ describe('session terminal href', () => {
     expect(sessionTerminalHref({ sessionId: 'abc', webPort: 3001 }, platform)).toBeNull();
   });
 
+  it('uses the authenticated same-origin front proxy on HTTP Worker dashboards', () => {
+    const worker={protocol:'http:',origin:'http://w-022ef24b-5dec-4273-b08b-d4d759664f67.localhost:7891',hostname:'w-022ef24b-5dec-4273-b08b-d4d759664f67.localhost'};
+    expect(sessionTerminalHref({sessionId:'a b',webPort:3001,proxyPort:8800},worker)).toBe(`${worker.origin}/s/a%20b`);
+    expect(sessionTerminalHref({sessionId:'abc',webPort:3001},worker)).toBe(`${worker.origin}/s/abc`);
+  });
+
   it('resolves a Riff read-only terminal to the local worker log port, never the writable sandbox URL', () => {
     // riffAccessUrl is the AIO Sandbox WRITE capability (a bearer URL). The
     // read-only href must align with the Feishu card「Web终端=日志页」and open

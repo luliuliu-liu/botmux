@@ -35,6 +35,7 @@ async function copyStatic() {
   await Promise.all([
     cp(join(webSrc, 'index.html'), join(outDir, 'index.html')),
     cp(join(webSrc, 'style.css'), join(outDir, 'style.css')),
+    cp(join(webSrc, 'platform/management.css'), join(outDir, 'platform-management.css')),
     cp(join(webSrc, 'design-tokens.css'), join(outDir, 'design-tokens.css')),
     // 「终端」页的 xterm 样式：页面懒加载时以 /assets/xterm.css 挂进来（JS 走 esbuild 分包）。
     cp(require.resolve('@xterm/xterm/css/xterm.css'), join(outDir, 'xterm.css')),

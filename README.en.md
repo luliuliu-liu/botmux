@@ -90,6 +90,8 @@ Designed for multi-agent dispatch pipelines (lead-bot delegating tasks to sub-bo
 
 Switch with `cliId` in `bots.json`. **20+ adapters**, spanning local CLIs (process-isolated, reachable via `tmux attach`) and API / cloud agents:
 
+Platform Workers also support `zcode`: a TUI-only build using a Z.AI Coding Plan API Key and native `/model` selection.
+
 `claude-code` · `codex` · `gemini` · `cursor` · `opencode` · `opencode2` · `mimocode` · `antigravity` · `copilot` · `grok` · `kimi` · `codem` ([CodeM](docs/codem.md)) · `kiro-cli` · `reasonix` · `dsh` · `aiden` · `coco` (TRAE) · `traex` · `mtr` · `hermes` · `ebsd` ([Configuration Guide](docs/ebsd.md)) · `mira` · `riff` (cloud agent) · `mojo` · `remote-runner` ([Remote Runner Protocol](docs/remote-runner.md)) · `minimax` ([MiniMax Code](docs/minimax-code.md)) …
 
 - **Session-level CLI Selection**: Select a registered CLI for an upcoming session with `/cli <cliId>`.

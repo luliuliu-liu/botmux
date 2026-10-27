@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   PI_INITIAL_PROMPT_COMMAND,
@@ -48,6 +48,16 @@ export function piInitialPromptFilePath(sessionDataDir: string, sessionId: strin
   return join(piInitialPromptDir(sessionDataDir, sessionId), 'initial.prompt.md');
 }
 
+/** Resolve an explicitly supplied extension from a real filesystem path.
+ * A stale override is intentionally treated as unavailable so Pi never gets
+ * a fatal --extension argument.
+ */
+export function piInitialPromptExtensionPath(): string | undefined {
+  const configured = process.env.BOTMUX_PI_INITIAL_PROMPT_EXTENSION?.trim();
+  if (configured) return existsSync(configured) ? configured : undefined;
+  return undefined;
+}
+
 export function preparePiInitialPromptArg(opts: {
   prompt: string;
   sessionId: string;
@@ -77,11 +87,28 @@ export function preparePiInitialPromptArg(opts: {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const filePath = piInitialPromptFilePath(sessionDataDir, opts.sessionId);
   writeFileSync(filePath, opts.prompt, { encoding: 'utf8', mode: 0o600 });
-  // Pi 是独立进程，必须使用真实磁盘文件，不能传 Bun 内部的 /$bunfs 路径。
-  const extensionPath = join(dir, 'pi-initial-prompt-extension.mjs');
-  writeFileSync(extensionPath, PI_INITIAL_PROMPT_EXTENSION_SOURCE, {
-    encoding: 'utf8', mode: 0o600,
-  });
+  const configuredExtension = process.env.BOTMUX_PI_INITIAL_PROMPT_EXTENSION?.trim();
+  const resolvedExtension = piInitialPromptExtensionPath();
+  // An explicit stale override is fail-open: do not hand Pi a fatal
+  // --extension path. The worker can still deliver the prompt through its
+  // regular input queue.
+  if (configuredExtension && !resolvedExtension) {
+    return {
+      initialPromptArg: `@${filePath}`,
+      filePath,
+      readonlyRoot: dir,
+      cleanupDir: dir,
+    };
+  }
+  // Pi is a separate process, so the extension must be a real filesystem
+  // file. In compiled Bun binaries, materialize the generated source per
+  // session instead of passing a /$bunfs path.
+  const extensionPath = resolvedExtension ?? join(dir, 'pi-initial-prompt-extension.mjs');
+  if (!resolvedExtension) {
+    writeFileSync(extensionPath, PI_INITIAL_PROMPT_EXTENSION_SOURCE, {
+      encoding: 'utf8', mode: 0o600,
+    });
+  }
   return {
     initialPromptArg: `@${filePath}`,
     filePath,
