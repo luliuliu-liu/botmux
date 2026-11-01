@@ -25,6 +25,7 @@ import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import type { CliAdapter } from '../adapters/cli/types.js';
 import { botHomePath } from '../adapters/cli/read-isolation.js';
 import { buildBotmuxShellHints, buildManagedLarkToolPromptBlocks } from '../adapters/cli/shared-hints.js';
+import {interactiveConventionPrompt} from '../platform/workflow/conventions.js';
 import { usesLarkToolBinding } from './lark-tool-binding.js';
 import { effectiveReplyDelivery, type ReplyDelivery } from './reply-delivery.js';
 import {
@@ -1378,7 +1379,7 @@ type NewTopicOpts = {
   selfMention?: { name?: string | null; openId?: string | null };
 };
 
-type NewTopicBlockKey = 'routing' | 'skill' | 'identity' | 'credentials' | 'sessionId' | 'role'
+type NewTopicBlockKey = 'environment' | 'routing' | 'skill' | 'identity' | 'credentials' | 'sessionId' | 'role'
   | 'summaryMemory' | 'whiteboard' | 'groupJoin' | 'chatContextPolicy' | 'chatContext' | 'groupHistory'
   | 'userMessage' | 'sender' | 'substitute' | 'senderNote' | 'attachments'
   | 'mentions' | 'availableBots';
@@ -1591,6 +1592,7 @@ function buildNewTopicBlocks(
   // fork path (prepareSessionSkillPrompt), which also writes the manifest and
   // resolves delivery — keeping a single injection site avoids double-rendering.
 
+  const environment=adapter.injectsSessionContext?'':interactiveConventionPrompt();if(environment)blocks.push({key:'environment',text:environment});
   return blocks;
 }
 

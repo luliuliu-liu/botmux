@@ -1,0 +1,16 @@
+import {ConfigHelp} from './compact-controls.js';
+import {useEffect,useRef,useState} from 'react';
+import {Modal,platformApi} from './management-page.js';
+
+type Credential={credentialId:string;displayName:string;kind:string;endpoint:string};
+type Profile={profileId:string;displayName:string;gitName:string;gitEmail:string;credentialId:string;githubAccount:string|null;fingerprint:string;registrationState:string;registrationError:string|null;revision:number};
+export function CliLoginDialog({target,onClose}:{target:string;onClose:()=>void}){
+ const [profiles,setProfiles]=useState<Profile[]>([]),[credentials,setCredentials]=useState<Credential[]>([]),[rows,setRows]=useState<any[]>([]),[selection,setSelection]=useState<Record<string,string>>({}),[busy,setBusy]=useState(''),[error,setError]=useState('');
+ const [capabilities,setCapabilities]=useState<{github:boolean;docker:boolean}|null>(null);
+ // A load for an earlier target, or one finishing after close, must not land in this view.
+ const generation=useRef(0);
+ const refresh=async()=>{const request=++generation.current;const [a,b,c]=await Promise.all([platformApi('/github-git-profiles'),platformApi('/credentials'),platformApi('/cli-logins/'+target)]);if(request!==generation.current)return;setProfiles(a.profiles);setCredentials(b.credentials);setRows(c.logins);setCapabilities(c.capabilities??null);};
+ useEffect(()=>{const request=generation.current+1;void refresh().catch(e=>{if(generation.current===request)setError(String(e));});return()=>{generation.current++;};},[target]);
+ const login=(cli:string)=>{const r=rows.find(x=>x.cli===cli),id=selection[cli]||r?.desiredId;if(!id)return;setBusy(cli);setError('');void platformApi(`/cli-logins/${target}/${cli}`,'POST',{id,revision:r?.revision??0}).then(refresh).catch(async e=>{await refresh().catch(()=>{});setError(String(e));}).finally(()=>setBusy(''));};
+ return <Modal title="登录 CLI" onClose={onClose} busy={!!busy}><ConfigHelp label="配置说明">选择密钥管理中的配置；登录只影响此 Agent。</ConfigHelp>{!capabilities?<p>目标 Agent 尚未确认 CLI 登录能力，请检查运行状态或升级镜像。</p>:null}{[...(capabilities?.github?['github']:[]),...(capabilities?.docker?['docker']:[])].map(cli=>{const r=rows.find(x=>x.cli===cli),options=cli==='github'?profiles.filter(p=>p.registrationState==='registered').map(p=>({id:p.profileId,name:`${p.displayName} · ${p.githubAccount}`})):credentials.filter(c=>c.kind==='docker').map(c=>({id:c.credentialId,name:`${c.displayName} · ${c.endpoint}`}));return <div key={cli} className="pm-info-note"><strong>{cli==='github'?'gh / Git':'Docker CLI'}</strong><label>登录配置<select value={selection[cli]||r?.desiredId||''} onChange={e=>setSelection({...selection,[cli]:e.target.value})}><option value="">选择配置</option>{options.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</select></label><small>{r?(r.synced?'已应用':'待同步')+' · '+(r.verification==='verified'?'登录时已验证':r.verification==='failed'?'认证未确认':'尚未验证'):'尚未配置'}</small>{r?.lastError?<p role="alert">{r.lastError}</p>:null}<button type="button" disabled={!!busy||!(selection[cli]||r?.desiredId)} onClick={()=>login(cli)}>{busy===cli?'登录中…':'登录'}</button></div>;})}{error?<p className="hint-warn" role="alert">{error}</p>:null}<footer><button disabled={!!busy} onClick={onClose}>关闭</button></footer></Modal>;
+}

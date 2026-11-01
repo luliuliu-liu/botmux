@@ -50,6 +50,10 @@ export const WORKFLOW_WORKER_ENV_KEYS = [
   'BOTMUX_GOAL_OUTPUT_DIR',
   'BOTMUX_GOAL_MANIFEST_PATH',
   'BOTMUX_GOAL_ATTEMPT_DIR',
+  'BOTMUX_JOB_WORK_DIR',
+  'BOTMUX_RUN_SHARED_DIR',
+  'BOTMUX_JOB_TOOLS_DIR',
+  'BOTMUX_RUNTIME_ROLE',
   'BOTMUX_V3_GOAL',
 ] as const;
 
@@ -226,6 +230,12 @@ export function stripCompanionStartupEnv(env: NodeJS.ProcessEnv): void {
 }
 
 export const REDACTED_CHILD_ENV_KEYS = [
+  // Global authority belongs to the Control Agent's management processes,
+  // never to a model CLI (also removed from tmux server/pane environments).
+  'CONTROL_PLANE_SYNC_KEY',
+  'CONTROL_PLANE_CONFIG_KEY',
+  'WORKFLOW_DATABASE_URL',
+  'SANDBOX_API_KEY',
   'LARK_APP_ID',
   'LARK_APP_SECRET',
   'GITHUB_TOKEN',

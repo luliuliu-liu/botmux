@@ -1,3 +1,4 @@
+import {validateRequiredPaths,type RequiredInputPath} from '../../platform/workflow/input-path-schema.js';
 /**
  * v3 DAG definition — schema, loader, validator, topological order.
  *
@@ -240,6 +241,7 @@ export interface V3Node {
   goal?: string;
   /** Which bot/CLI runs this node.  MVP dogfoods a single CLI, but the field
    *  is per-node so a mixed-backend DAG is a non-breaking extension. */
+  agentSelection?: {poolId:string;requirement:string;candidateIds:string[];reason:string;requiredMountNames?:string[];requiredPaths?:RequiredInputPath[]};
   bot?: string;
   /** Normalized incoming edges.  Authored as `string | {from, when?}`;
    *  validateDag normalizes to `V3DependRef[]` (edge-activation design §1.1).
@@ -302,6 +304,14 @@ export interface V3Node {
 
 /** A `V3Node` narrowed to a goal node — `goal` is guaranteed present.  This is
  *  what crosses into `runNode` (the pool only ever runs goal nodes in MVP). */
+function parseAgentSelection(value:unknown,override:unknown):NonNullable<V3Node['agentSelection']>{
+ const v=value as any,id=(s:unknown)=>typeof s==='string'&&/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(s);
+ if(!v||!id(v.poolId)||typeof v.requirement!=='string'||!v.requirement.trim()||v.requirement.length>8000||!Array.isArray(v.candidateIds)||v.candidateIds.length>100||v.candidateIds.some((s:unknown)=>!id(s))||typeof v.reason!=='string'||!v.reason.trim()||v.reason.length>8000||Object.keys(v).some(k=>!['poolId','requirement','candidateIds','reason','requiredMountNames','requiredPaths'].includes(k)))throw Error('invalid_agent_selection');
+ if((override as any)?.model!==undefined)throw Error('pool_member_model_is_fixed');
+ if(v.requiredMountNames!==undefined&&(!Array.isArray(v.requiredMountNames)||v.requiredMountNames.length>32||v.requiredMountNames.some((n:unknown)=>typeof n!=='string'||!(/^[a-z0-9][a-z0-9-]{0,63}$/).test(n))))throw Error('invalid_mount_requirement');
+ const requiredPaths=validateRequiredPaths(v.requiredPaths);
+ return {...(v.requiredPaths===undefined?{}:{requiredPaths}),...(v.requiredMountNames===undefined?{}:{requiredMountNames:[...new Set(v.requiredMountNames)] as string[]}),poolId:v.poolId,requirement:v.requirement,candidateIds:[...new Set(v.candidateIds)] as string[],reason:v.reason};
+}
 export interface V3GoalNode extends V3Node {
   type: 'goal';
   goal: string;
@@ -457,6 +467,7 @@ export function validateDag(raw: unknown): V3Dag {
           type,
           goal: typeof n.goal === 'string' ? n.goal : undefined,
           bot: typeof n.bot === 'string' ? n.bot : undefined,
+          ...(n.agentSelection!==undefined?{agentSelection:parseAgentSelection(n.agentSelection,n.override)}:{}),
           depends,
           triggerRule,
           inputs,
@@ -576,6 +587,7 @@ export function validateDag(raw: unknown): V3Dag {
       type,
       goal: typeof n.goal === 'string' ? n.goal : undefined,
       bot: typeof n.bot === 'string' ? n.bot : undefined,
+          ...(n.agentSelection!==undefined?{agentSelection:parseAgentSelection(n.agentSelection,n.override)}:{}),
       depends,
       triggerRule,
       override,
@@ -1221,6 +1233,7 @@ function normLoopFields(
       type: 'goal',
       goal: typeof b.goal === 'string' ? b.goal : undefined,
       bot: typeof b.bot === 'string' ? b.bot : undefined,
+      ...(b.agentSelection!==undefined?{agentSelection:parseAgentSelection(b.agentSelection,b.override)}:{}),
       depends: bdepends,
       override: boverride,
       inputs: binputs,

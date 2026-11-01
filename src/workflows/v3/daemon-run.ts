@@ -1,3 +1,6 @@
+import {verifyDagApproval} from './authoring-approval.js';
+import {resolveExecutionBackend} from './execution-backend.js';
+import type {ResourceWait} from './execution-backend.js';
 import { chatBoundWorkflowWriteOptions } from './botmux-host-policy.js';
 /**
  * Daemon-driven v3 run — the Feishu-product execution path (vs `cli-run.ts`'s
@@ -74,6 +77,7 @@ import {
 } from './human-gate.js';
 import {
   readJournal,
+  journalExists,
   appendEvent,
   withJournalMutationSync,
   type StoredEvent,
@@ -377,6 +381,7 @@ export function preflightV3RunStart(runDir: string): V3RunStartPreflight {
       };
     }
     try {
+      verifyDagApproval(runDir);
       const loaded = loadAuthorizedV3Run(runDir, {
         allowedSources: ['ad_hoc', 'saved_definition', 'legacy_v3'],
       });
@@ -788,6 +793,7 @@ export interface V3DaemonRunDeps {
   /** Manifest validator — injectable for tests. Default = real readAndValidateManifest wrapper. */
   validateManifest?: ValidateManifest;
   /** Post (or re-post) a humanGate approval card for a pending gate to the bound topic. */
+  postResourceCard?: (binding:RunChatBinding,wait:ResourceWait,runId:string)=>Promise<void>;
   postGateCard: (binding: RunChatBinding, gate: V3PendingGate, runId: string) => Promise<void>;
   /** Post a blocked-node retry card.  Optional — when absent (or no binding),
    *  a blocked outcome falls through to `onTerminal` like failed/succeeded. */
@@ -839,7 +845,7 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
   // — duplicate "done/failed" messages. Capture now, short-circuit after runWorkflow.
   const journalPath = join(runDir, 'journal.ndjson');
   const wasAlreadyTerminal =
-    existsSync(journalPath) &&
+    journalExists(journalPath) &&
     ['succeeded', 'failed', 'cancelled'].includes(materialize(readJournal(journalPath)).runStatus);
 
   const bots = (deps.loadBots ?? loadBotConfigs)();
@@ -865,6 +871,10 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
   });
 
   const resolveBotSnapshot = (botId: string | undefined) => botToSnapshot(resolveBotConfig(botId, bots));
+  // Provider credentials are live spawn inputs, not part of the frozen
+  // BotSnapshot/run envelope. Resolve them by the same selector only when a
+  // worker is about to launch; the ephemeral pool keeps them in memory.
+  const resolveBotEnv = (botId: string | undefined) => resolveBotConfig(botId, bots).env;
 
   const runNode = (deps.makeRunNode ?? defaultMakeRunNode)(resolveLarkAppSecret);
   const dag = context.dag;
@@ -876,6 +886,7 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
     runNode,
     validateManifest,
     resolveBotSnapshot,
+    resolveBotEnv,
     hostExecutors: createDefaultHostExecutorRegistry(imWriteOptions, replyWriteOptions),
     hostReconcilers: createDefaultProviderReconcilers(imWriteOptions, replyWriteOptions),
   };
@@ -899,6 +910,10 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
     return outcome;
   }
 
+  if(outcome.reason==='awaitingResources'){
+    if(binding&&deps.postResourceCard)for(const wait of outcome.resourceWaits)if(wait.waitReason==='capability')await deps.postResourceCard(binding,wait,runId);
+    return outcome;
+  }
   if (outcome.reason === 'awaitingGate') {
     if (!binding) {
       // No chat binding (e.g. not born via grill) → can't post a card.  The
@@ -907,6 +922,7 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
         `v3 daemon run "${runId}" is awaiting gate(s) but has no chatBinding — cannot post approval card`,
       );
     }
+    if(binding&&deps.postResourceCard)for(const wait of outcome.resourceWaits??[])if(wait.waitReason==='capability')await deps.postResourceCard(binding,wait,runId);
     for (const gate of outcome.pendingWaits) {
       await deps.postGateCard(binding, gate, runId);
     }
@@ -974,7 +990,7 @@ export function resolveV3GateClick(
 ): V3GateClickOutcome {
   const runDir = safeRunDir(baseDir, runId);
   const journalPath = join(runDir, 'journal.ndjson');
-  if (!existsSync(journalPath)) return { kind: 'stale-run', reason: 'missing' };
+  if (!journalExists(journalPath)) return { kind: 'stale-run', reason: 'missing' };
   assertV3RunIntegrityForMutation(runDir);
   const snap = materialize(readJournal(journalPath));
   if (snap.runStatus !== 'running') return { kind: 'stale-run', reason: 'terminal' };
@@ -1153,7 +1169,7 @@ export function requestV3Retry(
 ): V3RetryOutcome {
   const runDir = safeRunDir(baseDir, runId);
   const journalPath = join(runDir, 'journal.ndjson');
-  if (!existsSync(journalPath)) return { kind: 'stale-run', reason: 'missing' };
+  if (!journalExists(journalPath)) return { kind: 'stale-run', reason: 'missing' };
   assertV3RunIntegrityForMutation(runDir);
 
   const events = readJournal(journalPath);
@@ -1286,7 +1302,7 @@ export function requestRevisitGrant(
 ): V3RevisitGrantOutcome {
   const runDir = safeRunDir(baseDir, runId);
   const journalPath = join(runDir, 'journal.ndjson');
-  if (!existsSync(journalPath)) return { kind: 'stale-run', reason: 'missing' };
+  if (!journalExists(journalPath)) return { kind: 'stale-run', reason: 'missing' };
   assertV3RunIntegrityForMutation(runDir);
 
   // Reject a half-filled pair before touching state (never widen to run grant).
@@ -1358,7 +1374,7 @@ export function requestV3LoopGrant(
 ): V3LoopGrantOutcome {
   const runDir = safeRunDir(baseDir, runId);
   const journalPath = join(runDir, 'journal.ndjson');
-  if (!existsSync(journalPath)) return { kind: 'stale-run', reason: 'missing' };
+  if (!journalExists(journalPath)) return { kind: 'stale-run', reason: 'missing' };
   assertV3RunIntegrityForMutation(runDir);
 
   const events = readJournal(journalPath);
@@ -1430,6 +1446,7 @@ export interface V3GateRunnerDeps {
   baseDir?: string;
   /** Post (or re-post) a gate's approval card to its topic.  The daemon builds
    *  the card + sends via Lark (kept here so this module has no `im/` import). */
+  postResourceCard?:V3DaemonRunDeps['postResourceCard'];
   postCard: (binding: RunChatBinding, gate: V3PendingGate, runId: string) => Promise<void>;
   /** Post (or re-post) a blocked node's retry card. */
   postBlockedCard?: (binding: RunChatBinding, info: V3BlockedInfo, runId: string) => Promise<void>;
@@ -1462,6 +1479,7 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
   const inFlight = new Set<string>();
   const rerunRequested = new Set<string>();
   const activeControllers = new Map<string, AbortController>();
+  const resourcePollGates=new Set<string>();
 
   const invokeLifecycleHook = (
     hook: ((runId: string) => void | Promise<void>) | undefined,
@@ -1511,20 +1529,22 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
                 // Re-fold under the SAME lease before releasing ownership so
                 // the request cannot be stranded between runtime and transport.
                 do {
-                  await driveV3Run(runId, {
+                  const result=await driveV3Run(runId, {
                     baseDir,
                     loadBots: deps.loadBots,
                     makeRunNode: deps.makeRunNode,
                     validateManifest: deps.validateManifest,
                     maxParallel: deps.maxParallel,
                     cancelSignal: controller.signal,
-                    postGateCard: (binding, gate, rid) => deps.postCard(binding, gate, rid),
+                    postResourceCard:deps.postResourceCard,
+                    postGateCard: async(binding,gate,rid)=>{const key=rid+'/'+gate.waitId;const managed=resolveExecutionBackend(join(baseDir,rid))?.resourceManaged?.();if(managed&&resourcePollGates.has(key))return;await deps.postCard(binding,gate,rid);if(managed)resourcePollGates.add(key);},
                     postBlockedCard: deps.postBlockedCard,
                     postLoopGrantCard: deps.postLoopGrantCard,
                     postRevisitGrantCard: deps.postRevisitGrantCard,
                     onTerminal: (rid, outcome, binding) =>
                       deps.notifyTerminal ? deps.notifyTerminal(binding, rid, outcome) : Promise.resolve(),
                   });
+                  if(result.reason==='awaitingResources'||result.reason==='awaitingGate'&&result.resourceWaits?.length){const timer=setTimeout(()=>driveDetached(runId),3000);timer.unref();}
                 } while (currentRunStatus(baseDir, runId) === 'cancelling');
               }, { maxWaitMs: V3_DRIVE_LEASE_MAX_WAIT_MS });
               leaseSettled = true;
@@ -1624,7 +1644,7 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
 function currentRunStatus(baseDir: string, runId: string): ReturnType<typeof materialize>['runStatus'] | undefined {
   try {
     const journalPath = join(safeRunDir(baseDir, runId), 'journal.ndjson');
-    if (!existsSync(journalPath)) return undefined;
+    if (!journalExists(journalPath)) return undefined;
     return materialize(readJournal(journalPath)).runStatus;
   } catch {
     // The actual drive path reports integrity/journal errors. This helper is
@@ -1655,7 +1675,7 @@ export function reconcileV3PendingGates(baseDir: string = defaultBaseDir(), owne
     try {
       if (!statSync(runDir).isDirectory()) continue;
       const journalPath = join(runDir, 'journal.ndjson');
-      if (!existsSync(journalPath)) continue;
+      if (!journalExists(journalPath)) continue;
       // Recovery may recreate a missing wait or heal a resolved wait by
       // appending gateResolved. Apply the same authorization boundary as live
       // clicks before cold-attach can mutate or repost anything for this run.

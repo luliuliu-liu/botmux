@@ -104,6 +104,13 @@ export interface V3ProgressView {
     webPort?: number;
     viewToken?: string;
   };
+  /** Current settled node's persisted session. Separate from the live field
+   * so existing consumers cannot mistake archived output for a running task. */
+  terminalReplay?: {
+    sessionId: string;
+    webPort?: number;
+    viewToken: string;
+  };
   /** Last usable journal timestamp, falling back to run.json.createdAt. */
   updatedAt: string;
 }
@@ -302,6 +309,7 @@ export function projectV3Progress(input: V3ProgressProjectionInput): V3ProgressV
   // event from an obsolete retry attempt cannot keep a card deep-link alive.
   // Only outer-node sessions are surfaced (inner loop bodies stay private).
   let terminal: V3ProgressView['terminal'];
+  let terminalReplay: V3ProgressView['terminalReplay'];
   for (const event of events) {
     if (event.type !== 'nodeSessionReady' || !outerIds.has(event.nodeId)) continue;
     const nodeState = snapshot.nodes.get(event.nodeId);
@@ -321,6 +329,12 @@ export function projectV3Progress(input: V3ProgressProjectionInput): V3ProgressV
         ...(event.sessionInfo.webPort ? { webPort: event.sessionInfo.webPort } : {}),
         viewToken: event.sessionInfo.viewToken,
       };
+    }
+    if (nodeState && ['done','failed','blocked','cancelled'].includes(nodeState.status) &&
+      effectiveInstanceMatches && currentAttempt === event.attemptId && event.ptyLogPath &&
+      event.sessionInfo.sessionId && event.sessionInfo.viewToken) {
+      terminalReplay = { sessionId: event.sessionInfo.sessionId, viewToken: event.sessionInfo.viewToken,
+        ...(event.sessionInfo.webPort ? { webPort: event.sessionInfo.webPort } : {}) };
     }
   }
 
@@ -355,6 +369,7 @@ export function projectV3Progress(input: V3ProgressProjectionInput): V3ProgressV
       ? { uncertainHostEffectCount: snapshot.uncertainHostEffects.length }
       : {}),
     ...(terminal ? { terminal } : {}),
+    ...(terminalReplay ? { terminalReplay } : {}),
     updatedAt: lastTs === undefined ? envelope.createdAt : new Date(lastTs).toISOString(),
   };
 }

@@ -647,6 +647,22 @@ describe('projectV3Progress', () => {
     });
   });
 
+  it('retains a separate replay link for a settled current attempt with a persisted log', () => {
+    const events = [
+      at(1, { type: 'runStarted', runId: 'progress-run' }),
+      at(2, { type: 'nodeDispatched', nodeId: 'research', instanceId: 'research#001', attemptId: 'research#001/attempts/001' }),
+      at(3, { type: 'nodeSessionReady', nodeId: 'research', instanceId: 'research#001', attemptId: 'research#001/attempts/001',
+        sessionInfo: { sessionId: 'archived-session', webPort: 8765, viewToken: 'read-only' }, ptyLogPath: '/private/attempt/pty.log' }),
+      at(4, { type: 'nodeSucceeded', nodeId: 'research', instanceId: 'research#001', attemptId: 'research#001/attempts/001', manifestPath: '/private/attempt/manifest.json' }),
+    ];
+    const view = projectV3Progress({ envelope: envelope(), dag: dag(), events });
+    expect(view.terminal).toBeUndefined();
+    expect(view.terminalReplay).toEqual({ sessionId: 'archived-session', webPort: 8765, viewToken: 'read-only' });
+    expect(JSON.stringify(view.terminalReplay)).not.toContain('/private');
+    const retried = [...events, at(5, { type: 'nodeRetryRequested', nodeId: 'research', instanceId: 'research#001', nextAttemptId: 'research#001/attempts/002', by: 'fixture' })];
+    expect(projectV3Progress({ envelope: envelope(), dag: dag(), events: retried }).terminalReplay).toBeUndefined();
+  });
+
   it('omits terminal when no nodeSessionReady event fired', () => {
     const view = projectV3Progress({ envelope: envelope(), dag: dag(), events: [] });
     expect(view.terminal).toBeUndefined();

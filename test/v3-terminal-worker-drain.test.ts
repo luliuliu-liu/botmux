@@ -10,6 +10,9 @@ import { appendEvent, readJournal, type StoredEvent, type V3Event } from '../src
 import { runWorkflow, type V3RuntimeDeps } from '../src/workflows/v3/runtime.js';
 import { decideNext } from '../src/workflows/v3/orchestrator.js';
 import { materialize } from '../src/workflows/v3/state.js';
+import { openV3WorkerAttempts } from '../src/workflows/v3/attempt-ledger.js';
+import { openV3HostEffects } from '../src/workflows/v3/host-effect-ledger.js';
+import type { HostExecutorRegistry, ProviderReconciler } from '../src/workflows/v3/runtime-host-contract.js';
 import {
   armV3AttemptWorkerFence,
   activateV3AttemptWorkerFence,
@@ -394,6 +397,107 @@ describe('v3 non-cancel terminal worker quiescence', () => {
     } finally {
       peerClose.resolve();
       if (firstDrive) await Promise.allSettled([firstDrive]);
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('runBlocked waits for both an open host effect and a peer outer close', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-blocked-host-worker-ledgers-'));
+    const peerStarted = deferred(), peerClose = deferred(), peerAborted = deferred();
+    const hostStarted = deferred(), hostClose = deferred(), reconcileStarted = deferred();
+    let drive: Promise<Awaited<ReturnType<typeof runWorkflow>>> | undefined;
+    let settled = false;
+    // 只模拟 provider，不产生飞书消息或其它真实 host 副作用。
+    const hostExecutors: HostExecutorRegistry = new Map([['feishu-send', {
+      parseInput: (input: unknown) => input,
+      executor: {
+        provider: 'controlled-provider',
+        idempotencyTtlMs: 3_600_000,
+        canonicalInput: (input: unknown) => input,
+        invoke: async () => {
+          hostStarted.resolve();
+          await hostClose.promise;
+          return { output: { receipt: 'closed' }, externalRefs: { receipt: 'closed' } };
+        },
+      },
+    }]]);
+    const reconciler: ProviderReconciler = {
+      provider: 'controlled-provider',
+      requiresEffectInput: true,
+      canonicalInput: (input) => input,
+      idempotentSubmit: async () => {
+        reconcileStarted.resolve();
+        await hostClose.promise;
+        return { ok: true, externalRefs: { receipt: 'closed' } };
+      },
+    };
+    try {
+      const dag = validateDag({
+        runId: 'blocked-host-worker-ledgers',
+        nodes: [
+          { id: 'blocker', type: 'goal', goal: 'block' },
+          { id: 'peer', type: 'goal', goal: 'wait for outer close' },
+          { id: 'send', type: 'host', executor: 'feishu-send', input: {
+            larkAppId: { $ref: 'context.larkAppId' },
+            chatId: { $ref: 'context.chatId' },
+            content: 'fixture',
+          }, humanGate: { prompt: 'approve?' } },
+        ],
+      });
+      const journalPath = join(base, dag.runId, 'journal.ndjson');
+      drive = runWorkflow(dag, {
+        runNode: async (req) => {
+          if (req.node.id === 'peer') {
+            peerStarted.resolve();
+            req.cancelSignal?.addEventListener('abort', () => peerAborted.resolve(), { once: true });
+            await peerClose.promise;
+            return { status: 'cancelled', manifestPath: req.env.BOTMUX_GOAL_MANIFEST_PATH! };
+          }
+          await hostStarted.promise;
+          return { ...fail(req, true), status: 'ok' as const };
+        },
+        validateManifest,
+        resolveBotSnapshot,
+        hostExecutors,
+        hostExecutorPolicy: () => {},
+        hostReconcilers: new Map([['controlled-provider', reconciler]]),
+        resolveGate: async () => {
+          await peerStarted.promise;
+          return { resolution: 'approved', by: 'fixture' };
+        },
+      }, {
+        ...runtimeOptions(base),
+        executionContext: { params: {}, context: { larkAppId: 'cli_test', chatId: 'oc_test' } },
+      });
+      void drive.then(() => { settled = true; }, () => { settled = true; });
+      await waitFor(() => readJournal(journalPath).some((event) => event.type === 'nodeBlocked' && event.nodeId === 'blocker'));
+      await reconcileStarted.promise;
+      expect(openV3HostEffects(readJournal(journalPath))).toEqual([expect.objectContaining({ nodeId: 'send' })]);
+      expect(openV3WorkerAttempts(readJournal(journalPath))).toEqual([expect.objectContaining({ nodeId: 'peer' })]);
+      expect(readJournal(journalPath).some((event) => event.type === 'runBlocked')).toBe(false);
+      expect(settled).toBe(false);
+
+      hostClose.resolve();
+      await peerAborted.promise;
+      expect(openV3HostEffects(readJournal(journalPath))).toEqual([]);
+      expect(openV3WorkerAttempts(readJournal(journalPath))).toHaveLength(1);
+      expect(readJournal(journalPath).some((event) => event.type === 'runBlocked')).toBe(false);
+      expect(settled).toBe(false);
+
+      peerClose.resolve();
+      await expect(drive).resolves.toMatchObject({ reason: 'terminal', runStatus: 'blocked' });
+      const events = readJournal(journalPath);
+      const terminalAt = events.findIndex((event) => event.type === 'runBlocked');
+      expect(events.filter((event) => event.type === 'runBlocked')).toHaveLength(1);
+      const beforeTerminal = events.slice(0, terminalAt);
+      expect(beforeTerminal).toContainEqual(expect.objectContaining({ type: 'hostEffectIntent', nodeId: 'send' }));
+      expect(beforeTerminal).toContainEqual(expect.objectContaining({ type: 'nodeSucceeded', nodeId: 'send' }));
+      expect(beforeTerminal).toContainEqual(expect.objectContaining({ type: 'nodeAttemptDrained', nodeId: 'peer', reason: 'terminalPeer' }));
+      expect(openV3WorkerAttempts(beforeTerminal)).toEqual([]);
+      expect(openV3HostEffects(beforeTerminal)).toEqual([]);
+    } finally {
+      hostClose.resolve(); peerClose.resolve();
+      if (drive) await Promise.allSettled([drive]);
       rmSync(base, { recursive: true, force: true });
     }
   });

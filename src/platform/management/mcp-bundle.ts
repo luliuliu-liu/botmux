@@ -1,0 +1,6 @@
+import {createHash} from 'node:crypto';
+import {validateMcpConfig,type McpConfig} from './mcp-schema.js';
+export type McpBundle={schema:'platform-mcp-bundle-v1';revision:number;requestId:string;digest:string;servers:Array<{id:string;revision:number;configuration:McpConfig}>};
+const canonical=(v:any):string=>Array.isArray(v)?'['+v.map(canonical).join(',')+']':v&&typeof v==='object'?'{'+Object.keys(v).filter(k=>v[k]!==undefined).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}':JSON.stringify(v);
+export const mcpDigest=(v:any)=>createHash('sha256').update(canonical(v)).digest('hex');
+export function validateMcpBundle(input:any):McpBundle{if(!input||input.schema!=='platform-mcp-bundle-v1'||!Number.isSafeInteger(input.revision)||input.revision<1||typeof input.requestId!=='string'||!input.requestId||!Array.isArray(input.servers)||input.servers.length>100||Buffer.byteLength(JSON.stringify(input))>8*1024*1024)throw Error('invalid_mcp_bundle');const servers=input.servers.map((s:any)=>{if(typeof s.id!=='string'||!Number.isSafeInteger(s.revision))throw Error('invalid_mcp_server');return {id:s.id,revision:s.revision,configuration:validateMcpConfig(s.configuration)};});if(new Set(servers.map((s:any)=>s.configuration.name)).size!==servers.length||mcpDigest(servers)!==input.digest)throw Error('mcp_bundle_digest_mismatch');return {...input,servers};}

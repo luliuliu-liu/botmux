@@ -42,6 +42,7 @@ interface SkillLibraryTabProps {
   installedStatus: StatusMessage;
   onUpdateSkill: (name: string) => void;
   onRequestRemove: (names: string[]) => void;
+  onRequestSync?: (names:string[]) => void;
   onCancelRemoval: () => void;
   onConfirmRemoval: (force: boolean) => void;
   /** cross-tab navigation context (consumed once on arrival) */
@@ -140,6 +141,7 @@ export function SkillLibraryTab(props: SkillLibraryTabProps) {
       )}
 
       <props.InstalledLibrary
+        onRequestSync={props.onRequestSync}
         skills={props.skills}
         busySkill={props.skillBusy}
         removingNames={props.removingNames}

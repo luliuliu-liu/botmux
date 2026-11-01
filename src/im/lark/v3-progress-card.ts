@@ -39,11 +39,13 @@ export function buildV3ProgressCard(
   const chrome = statusChrome(view.status);
   const completed = view.counts.done + view.counts.skipped + view.counts.cancelled;
   const webDetailUrl = options.webDetailUrl ?? v3ProgressRunDetailUrl(view.runId);
-  const terminalUrl = view.terminal
-    ? buildV3TerminalUrl(view.terminal.sessionId, {
+  const displayedTerminal = view.terminal ?? view.terminalReplay;
+  const terminalUrl = displayedTerminal
+    ? buildV3TerminalUrl(displayedTerminal.sessionId, {
         host: config.dashboard.externalHost,
-        webPort: view.terminal.webPort,
-        viewToken: view.terminal.viewToken,
+        webPort: displayedTerminal.webPort,
+        dashboardPort:displayedTerminal.webPort||view.terminalReplay?config.dashboard.port:undefined,
+        viewToken: displayedTerminal.viewToken,
       })
     : null;
   const source = sourceLabel(view.source);
@@ -164,7 +166,7 @@ export function buildV3ProgressCard(
       actions: [
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: '终端（手机可看）' },
+          text: { tag: 'plain_text', content: view.terminal ? '终端（手机可看）' : '终端回放（手机可看）' },
           type: 'primary',
           multi_url: {
             url: terminalUrl,

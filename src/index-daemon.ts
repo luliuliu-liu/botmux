@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './platform/workflow/install.js';
 import { config as dotenvConfig } from 'dotenv';
 import { join } from 'node:path';
 import { homedir } from 'node:os';

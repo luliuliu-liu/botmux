@@ -35,9 +35,13 @@ async function copyStatic() {
   await Promise.all([
     cp(join(webSrc, 'index.html'), join(outDir, 'index.html')),
     cp(join(webSrc, 'style.css'), join(outDir, 'style.css')),
+    cp(join(webSrc, 'platform/management.css'), join(outDir, 'platform-management.css')),
     cp(join(webSrc, 'design-tokens.css'), join(outDir, 'design-tokens.css')),
     // 「终端」页的 xterm 样式：页面懒加载时以 /assets/xterm.css 挂进来（JS 走 esbuild 分包）。
     cp(require.resolve('@xterm/xterm/css/xterm.css'), join(outDir, 'xterm.css')),
+    // Workflow 终端回放 iframe 用 classic script 加载 UMD 版，与仪表盘同源，不依赖外网 CDN。
+    cp(require.resolve('@xterm/xterm/lib/xterm.js'), join(outDir, 'xterm.umd.js')),
+    cp(require.resolve('@xterm/addon-fit/lib/addon-fit.js'), join(outDir, 'xterm-addon-fit.umd.js')),
     cp(join(webSrc, 'brand-logo.png'), join(outDir, 'brand-logo.png')),
     cp(join(webSrc, 'favicon.png'), join(outDir, 'favicon.png')),
     cp(join(webSrc, 'apple-touch-icon.png'), join(outDir, 'apple-touch-icon.png')),

@@ -1772,7 +1772,7 @@ botmux workflow spec-finalize <runId>
 
 > 这是我理解的需求和拆解，对吗？确认我就编排成可执行流程。
 
-用户确认 → \`botmux workflow approve-spec <runId>\`；要改 → 直接改 spec.md 再 \`botmux workflow spec-finalize <runId>\` 重新校验（spec_ready 状态可原地重定稿，不用退回）。
+需求整理完成 → \`botmux workflow approve-spec <runId>\`（记录为 Agent 确认；不声称真人批准）；要改 → 直接改 spec.md 再 \`botmux workflow spec-finalize <runId>\` 重新校验（spec_ready 状态可原地重定稿，不用退回）。
 
 ### 6. 编排 DAG
 \`\`\`bash
@@ -1785,7 +1785,11 @@ botmux workflow architect <runId>
 
 > 编排好的流程是这样，对吗？确认就开跑。
 
-用户确认 → \`botmux workflow approve-dag <runId> [--working-dir <任务目录>]\`。可选 \`--working-dir\` 在首次 Gate-2 批准时冻结所有节点的工作目录；省略时使用各机器人的配置目录。已发布 run 重试复用原快照，后传目录不覆盖已有运行。然后 \`botmux workflow start <runId>\` 交 daemon 驱动开跑（**别用 \`botmux v3 run\`**——那是 dev 终端路径，没有飞书审批卡）。daemon 路径下，节点的 \`risk_gate\`（humanGate）执行期会在本话题**弹审批卡**，用户点「通过/拒绝」才继续；daemon 重启也能恢复待审批的卡。要改：需求要改 → \`botmux workflow revise-spec <runId>\`（退回 grilling，原 DAG 作废）重走 grill→spec→architect；需求没变、只是流程不满意 → \`botmux workflow revise-dag <runId>\`（退回 spec_approved）重跑 architect 重编。
+调用 \`botmux workflow diff <runId>\` 展示差异，再 \`botmux workflow approve-dag <runId>\` 请求发起人审批卡；新托管 chat run 必须等真人点卡，CLI 不能自批。工作目录来自托管运行时与成员实际挂载；对读取 /host/name 的节点声明 requiredMountNames 和 requiredPaths（相对路径和 file/directory）。已发布 run 重试复用原快照，后传目录不覆盖已有运行。卡片批准后 \`botmux workflow preflight <runId>\` 校验结构化 requiredPaths，再 \`botmux workflow start <runId>\` 交 daemon 驱动开跑（**别用 \`botmux v3 run\`**——那是 dev 终端路径，没有飞书审批卡）。daemon 路径下，节点的 \`risk_gate\`（humanGate）执行期会在本话题**弹审批卡**，用户点「通过/拒绝」才继续；daemon 重启也能恢复待审批的卡。要改：需求要改 → \`botmux workflow revise-spec <runId>\`（退回 grilling，原 DAG 作废）重走 grill→spec→architect；需求没变、只是流程不满意 → \`botmux workflow revise-dag <runId>\`（退回 spec_approved）重跑 architect 重编。
+
+### 8. 最终报告交付
+报告类结果默认是飞书文档：编排一个顶层最终 goal 声明并生成 report.md。Worker 只交付验收产物；Control 的持久发布器用固定用户账号与报告目录创建文档、核验发起人可读并在原话题回帖简短摘要和链接。
+通过 \`botmux workflow status <runId>\` 核对 reportDelivery；计算 succeeded 不等于文档已交付。若等待登录、配置、权限或回帖，保留 report.md 并显示“文档待交付”，只恢复发布，复用已有 documentId。不要自行再建文档、复制到临时目录发附件，或用长正文替代默认文档。用户明确选择其他格式时遵从；进度更新和简单问答直接回复消息。
 
 ## 关键纪律
 - 全程飞书一问一答，用 botmux send 对话。

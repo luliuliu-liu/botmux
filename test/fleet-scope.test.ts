@@ -4,6 +4,7 @@
  * session's own close / CLI restart (which stops its scope) would SIGKILL every
  * daemon and worker with it. Any OTHER unit the operator chose must keep it.
  */
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
@@ -113,8 +114,8 @@ describe.runIf(process.platform === 'linux' && !!userSystemdBusEnv())('against t
   function runInScope(unit: string): Promise<{ before: string; outcome: unknown; after: string }> {
     const { command, prefixArgs } = tsRunnerPrefix();
     const { args } = tsEvalArgs(`
-      const { moveSupervisorIntoFleetScope } = await import(${JSON.stringify(new URL('../src/core/fleet-scope.ts', import.meta.url).pathname)});
-      const { readProcessSystemdUnit } = await import(${JSON.stringify(new URL('../src/utils/systemd-unit.ts', import.meta.url).pathname)});
+      const { moveSupervisorIntoFleetScope } = await import(${JSON.stringify(fileURLToPath(new URL('../src/core/fleet-scope.ts', import.meta.url)))});
+      const { readProcessSystemdUnit } = await import(${JSON.stringify(fileURLToPath(new URL('../src/utils/systemd-unit.ts', import.meta.url)))});
       const before = readProcessSystemdUnit(process.pid);
       const outcome = moveSupervisorIntoFleetScope();
       const after = readProcessSystemdUnit(process.pid);

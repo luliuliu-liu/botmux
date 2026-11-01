@@ -34,6 +34,7 @@ const RETIRED_TEMPLATE_SUBCOMMANDS = new Set([
 ]);
 
 export async function cmdWorkflow(sub: string, rest: string[]): Promise<void> {
+  if(sub==='--help'||sub==='-h'||rest.some(a=>a==='--help'||a==='-h')){const {WORKFLOW_HELP}=await import('./workflow-operations.js');console.log(WORKFLOW_HELP);return;}
   // Machine-wide workflow kill-switch. Authoring (host verbs) and launching
   // (saved `run` / `save`) are refused when the feature is off; read-only
   // `list`/`show` and `help` stay available so an operator can still inspect
@@ -56,7 +57,7 @@ export async function cmdWorkflow(sub: string, rest: string[]): Promise<void> {
     await cmdSavedWorkflow(sub, rest);
     return;
   }
-  if (sub === 'help' || !sub) {
+  if (sub === 'help' || sub === '--help' || sub === '-h' || !sub) {
     printWorkflowHelp();
     return;
   }

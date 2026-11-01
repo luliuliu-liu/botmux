@@ -71,7 +71,7 @@ function nonEmpty(value: unknown): value is string {
 /** Mutation payload keys the relay forwards; everything else is dropped so a
  * sandboxed caller cannot smuggle fields past the shared body parser. */
 const MUTATION_BODY_KEYS: Record<WorkflowDaemonMutation, readonly string[]> = {
-  start: [],
+  start: ['authoringApproval'],
   cancel: ['reason'],
   retry: ['nodeId'],
   grant: ['loopId'],

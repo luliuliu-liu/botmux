@@ -52,6 +52,7 @@ export type {
 } from './portable-final-outputs.js';
 
 export type PortableWorkflowRunOutcome =
+  | Extract<import('./shared-node-runtime.js').V3RunOutcome,{reason:'awaitingResources'}>
   | {
       reason: 'terminal';
       runStatus: 'succeeded' | 'failed' | 'blocked' | 'cancelled';

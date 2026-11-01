@@ -25,6 +25,9 @@ import { promisify } from 'node:util';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { hostDnsServers, networkPolicyWarnings, proxyEnvKeys } from './sandbox-network-policy.js';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
+import {containerGlobalAgentMode,splitContainerAgentEnvironment} from '../platform/management/container-agent-policy.js';
+import {readContainerAgentModel} from '../platform/management/container-agent-files.mjs';
 import { logger } from '../utils/logger.js';
 import type { DurableLarkOutboxTarget } from '../services/durable-lark-outbox.js';
 import { cliAuthBind, loadDashboardSecret, verifyHmac } from '../dashboard/auth.js';
@@ -5357,6 +5360,12 @@ ipcRoute('GET', '/api/sessions/:sessionId/write-link', (req, res, params) => {
  * Knowing any view capability never grants terminal input, so the link stays
  * read-only by construction rather than by UI convention.
  */
+ipcRoute('GET', '/api/sessions/:sessionId/card-view-link', (req, res, params) => {
+  if (!ipcHmacAuthorized(req)) return jsonRes(res, 401, { ok: false, error: 'unauthorized' });
+  const ds=findActiveBySessionId(params.sessionId);
+  if(!ds||!(ds.workerCardViewToken??ds.workerViewToken)||!(ds.workerPort??ds.session.webPort))return jsonRes(res,409,{ok:false,error:'terminal_unavailable'});
+  jsonRes(res,200,{ok:true,url:buildTerminalUrl(ds,{viewScope:'card'})});
+});
 ipcRoute('GET', '/api/sessions/:sessionId/view-link', (req, res, params) => {
   if (!ipcHmacAuthorized(req)) return jsonRes(res, 401, { ok: false, error: 'unauthorized' });
   const ds = findActiveBySessionId(params.sessionId);
@@ -8091,8 +8100,9 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     replyDeliveryDefault = defaultReplyDeliveryFor(cfg.cliId);
     replyDeliverySupported = supportsTranscriptReplyDeliveryForBot(cfg.cliId, { sandbox: cfg.sandbox });
   } catch { /* default send */ }
+  const containerAgentGlobalMode=containerGlobalAgentMode();
   let codexAuthSync: 'shared' | 'isolated' = 'shared';
-  try { if (getBot(cachedLarkAppId).config.codexAuthSync === 'isolated') codexAuthSync = 'isolated'; } catch { /* default shared */ }
+  try { if (!containerAgentGlobalMode&&getBot(cachedLarkAppId).config.codexAuthSync === 'isolated') codexAuthSync = 'isolated'; } catch { /* default shared */ }
   // Trigger-user CLI auth policy. Absent → null ("feature off"), which is what
   // the dashboard toggle renders as unchecked. It has to be echoed here or the
   // Bot Defaults page loses the setting on every refresh: the PUT persists it,
@@ -8149,7 +8159,9 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
       : null;
     wrapperCli = typeof cfg.wrapperCli === 'string' && cfg.wrapperCli.trim() ? cfg.wrapperCli : null;
     cliLaunchMode = cfg.cliLaunchMode ?? null;
-    model = typeof cfg.model === 'string' && cfg.model.trim() ? cfg.model : null;
+    model = containerGlobalAgentMode()
+      ? readContainerAgentModel(homedir(),cfg.cliId)
+      : typeof cfg.model === 'string' && cfg.model.trim() ? cfg.model : null;
     modelBackendVariant = isBackendVariantCliId(cfg.cliId)
       && (cfg.modelBackendVariant === 'standard' || cfg.modelBackendVariant === 'max')
       ? cfg.modelBackendVariant
@@ -8332,6 +8344,7 @@ ipcRoute('GET', '/api/bot-default-oncall', requireBoundBot(async (_req, res) => 
     // on THIS daemon. Advice next to the choice; saving is never blocked on it.
     scratchCapability: (() => { try { return probeScratchCapability(); } catch { return null; } })(),
     codexAuthSync,
+    containerAgentGlobalMode,
     envPolicy: (() => { try { return getBot(cachedLarkAppId).config.envPolicy ?? { mode: 'inherit' }; } catch { return { mode: 'inherit' }; } })(),
     sandboxPaths: sandboxPathsForDashboard ?? null,
     // Already-stored readWrite entries the save path would now refuse; the
@@ -9080,11 +9093,12 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
   try { requestedProfile = normalizeCodexProfile(body.codexProfile); }
   catch { return jsonRes(res, 400, { ok: false, error: 'codex_profile_invalid_name' }); }
   const requestedSelection = selected;
+  const globalAgentMode=containerGlobalAgentMode();
+  const model = globalAgentMode ? readContainerAgentModel(homedir(),selected.cliId)??'' : typeof body.model === 'string' ? body.model.trim() : '';
   const rpcFieldPresent = Object.prototype.hasOwnProperty.call(body, 'codexRpcInput');
   if (rpcFieldPresent && body.codexRpcInput !== null && typeof body.codexRpcInput !== 'boolean') {
     return jsonRes(res, 400, { ok: false, error: 'invalid_codex_rpc_input' });
   }
-  const model = typeof body.model === 'string' ? body.model.trim() : '';
   const autoFieldPresent = Object.prototype.hasOwnProperty.call(body, 'traexAutoModel');
   const requestedAuto = normalizeTraexAutoModelConfig(body.traexAutoModel);
   if (selected.cliId === 'traex' && requestedAuto.error) {
@@ -9474,7 +9488,7 @@ ipcRoute('PUT', '/api/bot-agent', requireBoundBot(async (req, res) => {
         delete entry.cliRuntime;
         delete entry.cliPathOverride;
       }
-      if (model) entry.model = model;
+      if (!globalAgentMode&&model) entry.model = model;
       else delete entry.model;
       if (nextTraexAutoModel) entry.traexAutoModel = nextTraexAutoModel;
       else delete entry.traexAutoModel;
@@ -10032,6 +10046,11 @@ ipcRoute('PUT', '/api/bot-env', async (req, res) => {
     if (!coerced.ok) return jsonRes(res, 400, { ok: false, error: coerced.reason });
     incoming = coerced.value as Record<string, string>;
   }
+  const cfg=getBot(cachedLarkAppId).config;
+  const separated=containerGlobalAgentMode()?splitContainerAgentEnvironment(cfg.cliId,incoming):null;
+  if(separated&&Object.keys(separated.global).length){
+    return jsonRes(res,409,{ok:false,error:'container_agent_environment_managed'});
+  }
   // 合并在 bots.json 文件锁内基于盘上最新 env 计算，并发 merge/remove 不丢更新。
   const r = await applyPerBotEnvChange(cachedLarkAppId, {
     incoming,
@@ -10143,6 +10162,9 @@ ipcRoute('PUT', '/api/bot-codex-auth-sync', requireBoundBot(async (req, res) => 
   catch { return jsonRes(res, 400, { error: 'invalid_json' }); }
   if (body.codexAuthSync !== 'shared' && body.codexAuthSync !== 'isolated') {
     return jsonRes(res, 400, { ok: false, error: 'invalid_codex_auth_sync' });
+  }
+  if(containerGlobalAgentMode()&&body.codexAuthSync==='isolated'){
+    return jsonRes(res,409,{ok:false,error:'container_global_auth_required'});
   }
   const spec = findConfigField('codexAuthSync');
   if (!spec) return jsonRes(res, 500, { ok: false, error: 'field_unavailable' });

@@ -61,7 +61,10 @@ function systemPsBin(): string | undefined {
 }
 
 export function readFleetProcessCommandLine(pid: number): string | undefined {
-  if (!Number.isSafeInteger(pid) || pid <= 1) return undefined;
+  // Docker entrypoints run the supervisor as PID 1. Allow self-inspection in
+  // that case, while keeping arbitrary external PID 1 out of the attestation
+  // surface.
+  if (!Number.isSafeInteger(pid) || pid <= 0 || (pid === 1 && pid !== process.pid)) return undefined;
   if (process.platform === 'linux') {
     try {
       const value = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();

@@ -9,9 +9,11 @@ import { NAV_GROUPS, NAV_ITEMS } from '../src/dashboard/web/nav-items.js';
  * 都还在，故 URL 仍能直达，症状极隐蔽）。customization tab 就这样漏了。
  */
 describe('dashboard sidebar nav grouping', () => {
-  // 故意不进侧边栏分组的 nav item id 列在这里（目前没有）。留这张白名单是为了
+  // 故意不进侧边栏分组的 nav item id 列在这里。留这张白名单是为了
   // 逼未来的改动显式声明「这一项确实不该出现在菜单栏」，而不是靠沉默把它漏掉。
-  const INTENTIONALLY_UNGROUPED = new Set<string>();
+  // platform-bots：Bot 管理是「Agent 管理」页内的分区（#/platform-bots 打开同一页的 bots
+  // 分区并高亮 Agent 管理），不单独占侧边栏一行；⌘K 仍按页面收录。
+  const INTENTIONALLY_UNGROUPED = new Set<string>(['platform-bots']);
 
   it('keeps NAV_ITEMS and NAV_GROUPS in sync so no nav item silently drops out of the sidebar', () => {
     const ids = new Set(NAV_ITEMS.map(item => item.id));

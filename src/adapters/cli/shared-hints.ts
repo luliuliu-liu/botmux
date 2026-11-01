@@ -13,6 +13,7 @@
  * rendered by `buildNewTopicPrompt` in `session-manager.ts`.
  */
 import { t, type Locale } from '../../i18n/index.js';
+import {interactiveConventionPrompt} from '../../platform/workflow/conventions.js';
 import { whiteboardEnabled } from '../../services/whiteboard-store.js';
 import { isWorkflowFeatureEnabled } from '../../global-config.js';
 import { config } from '../../config.js';
@@ -445,5 +446,6 @@ export function buildBotmuxSystemPromptText(opts: {
     ...identityBlock,
     ...(credentialBoundaryBlock ? ['', credentialBoundaryBlock] : []),
     ...(builtinSkillBlock ? ['', builtinSkillBlock] : []),
+    interactiveConventionPrompt(),
   ].join('\n');
 }

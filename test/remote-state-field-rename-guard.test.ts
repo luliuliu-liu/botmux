@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -39,7 +40,7 @@ function walk(dir: string): string[] {
 
 describe('retired riff-scoped state field names stay retired', () => {
   it('finds no consumer of the pre-generalisation names in src/ or test/', () => {
-    const root = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+    const root = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '');
     const files = [
       ...walk(`${root}/src`),
       ...walk(`${root}/test`),

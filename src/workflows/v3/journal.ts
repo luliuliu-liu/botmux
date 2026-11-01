@@ -27,9 +27,12 @@ import {
   readFileSync,
   readSync,
 } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { fsyncDirectorySyncPortable } from '../../utils/fs-durability.js';
 import { withFileLockSync } from '../../utils/file-lock.js';
+import {resolveJournalBackend} from './journal-backend.js';
+import {indexConfirmedTerminalEvents} from './terminal-session-index.js';
 import type { JournalMutation, StoredEvent, V3Event } from './event-contract.js';
 export type {
   GoalAsk,
@@ -146,6 +149,8 @@ export function withJournalMutationSync<T>(
   journalPath: string,
   fn: (mutation: JournalMutation) => T,
 ): T {
+  const backend=resolveJournalBackend(journalPath,'mutation');
+  if(backend)return backend.withMutationSync(fn);
   const dir = dirname(journalPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   return withFileLockSync(journalPath, () => {
@@ -163,6 +168,7 @@ export function withJournalMutationSync<T>(
         fsyncFile(journalPath);
         if (created) fsyncDirectorySyncPortable(dirname(journalPath));
       }
+      indexConfirmedTerminalEvents(journalPath, [stored]);
       return stored;
     };
     return fn({
@@ -213,7 +219,25 @@ export function appendEventDurable(journalPath: string, event: V3Event): StoredE
  * looking pending forever), so fail loud instead (codex hardening #11).
  * Returns `[]` if the file does not exist yet (a run that never started).
  */
-export function readJournal(journalPath: string): StoredEvent[] {
+export function journalExists(journalPath:string):boolean{
+  const backend=resolveJournalBackend(journalPath,'read');
+  return backend?backend.read().length>0:existsSync(journalPath);
+}
+
+/** Fresh read that never blocks the event loop on a remote journal. Backends
+ * without a non-blocking path keep their synchronous read. */
+export async function readJournalAsync(journalPath: string): Promise<StoredEvent[]> {
+  const backend=resolveJournalBackend(journalPath,'read');
+  if(backend)return backend.readAsync?backend.readAsync():(backend.read as (options?: { fresh?: boolean }) => StoredEvent[])({fresh:true});
+  let raw: string;
+  try { raw = await readFile(journalPath, 'utf-8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+  return parseJournalText(raw, journalPath, true);
+}
+
+export function readJournal(journalPath: string, options?: { fresh?: boolean }): StoredEvent[] {
+  const backend=resolveJournalBackend(journalPath,'read');
+  if(backend)return (backend.read as (options?: { fresh?: boolean }) => StoredEvent[])(options);
   if (!existsSync(journalPath)) return [];
   return parseJournalText(readFileSync(journalPath, 'utf-8'), journalPath, true);
 }

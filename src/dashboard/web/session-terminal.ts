@@ -16,6 +16,11 @@ export function sessionTerminalHref(s: any, loc: SessionTerminalLocation | null 
   // 若在此短路返回它，只读图标会打开可写沙箱、且匿名只读面板也会拿到写能力 ——
   // 故这里一律走 webPort 分支，让读/写入口与卡片侧一一对应。
   if (!s?.webPort || !loc) return null;
+  // Isolated Worker origins expose only the authenticated Dashboard port,
+  // including on HTTP localhost. Native /s/ handles its internal terminal hop.
+  if (/^w-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\./.test(loc.hostname)) {
+    return `${loc.origin}/s/${encodeURIComponent(s.sessionId)}`;
+  }
   // On the central HTTPS machine domain, terminals must go through the same
   // origin `/s/<session>` reverse proxy. Exposing a raw port would produce a
   // dead link because the platform only proxies 443.

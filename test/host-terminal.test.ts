@@ -312,6 +312,15 @@ describe('host-terminal WS 独立安全边界（不吃 t- 子域、不吃平台�
 });
 
 describe('host-terminal login environment', () => {
+  it('agent containers log terminals into the platform home, not the read-only passwd dir',()=>{
+    const env=hostLoginEnv('/bin/bash',{BOTMUX_AGENT_ROLE:'control',HOME:'/state',PATH:'/opt/agent/launchers:/state/.local/bin:/usr/local/bin:/usr/bin:/bin'});
+    expect(env.HOME).toBe('/state');
+    expect(env.PATH).toContain('/state/.local/bin');
+    // Outside agent containers the sshd-style passwd login stays unchanged.
+    const desktop=hostLoginEnv('/bin/zsh',{HOME:'/Users/dev',PATH:'/ignored'});
+    expect(desktop.HOME).not.toBe('/Users/dev');
+    expect(desktop.PATH).toBe(hostLoginEnv('/bin/zsh').PATH);
+  });
   it('builds an sshd-style env: identity + TERM + locale passthrough, nothing else', () => {
     const env = hostLoginEnv('/bin/zsh', {
       PATH: '/opt/daemon/bin:/usr/bin',

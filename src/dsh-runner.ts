@@ -34,6 +34,8 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import { RunnerControlWriter } from './adapters/cli/runner-control-channel.js';
+import {containerGlobalAgentMode} from './platform/management/container-agent-policy.js';
+import {dshModelPatchPath} from './platform/management/dsh-model-patch.js';
 import { larkToolPromptFromEnv } from './core/lark-tool-binding.js';
 import { JsonRpcStdioCore } from './utils/jsonrpc-stdio.js';
 import { errorMessage } from './utils/error-message.js';
@@ -88,6 +90,7 @@ interface PendingTurn {
   /** Notifications buffered until the spliced receipt for messageId arrives. */
   pending: Array<{ method: string; params: Record<string, unknown> }>;
   receiptReceived: boolean;
+  streamedCharacters?: number;
   /** Set from a turn/end event whose reason is an error, so a failed turn
    *  surfaces in the reply instead of completing with an empty final. */
   turnError?: string;
@@ -474,6 +477,14 @@ let firstTurn = true;
 const queue: string[] = [];
 let inputBuffer = '';
 let processing = false;
+// The native SDK otherwise emits only durable assistant messages, making a
+// slow provider look hung. This is elapsed-time information, not model output.
+const progressPulse=setInterval(()=>{
+ if(!activeTurn||!containerGlobalAgentMode())return;
+ const seconds=Math.floor((Date.now()-activeTurn.startedAtMs)/1000);
+ writeLine(`[dsh] ${activeTurn.streamedCharacters?'模型响应中':'等待模型响应'}（已等待 ${seconds} 秒）`);
+},30000);
+progressPulse.unref();
 
 function buildPreamble(): string {
   const name = args.botName?.trim() || 'bot';
@@ -576,6 +587,10 @@ function handleSessionEvent(turn: PendingTurn, event: unknown): void {
 }
 
 function processTurnNotification(turn: PendingTurn, method: string, p: Record<string, unknown>): void {
+  if(method==='session.progress'){
+    if(p.type==='text'&&typeof p.text==='string'){turn.streamedCharacters=(turn.streamedCharacters??0)+p.text.length;output.display(p.text);}
+    return;
+  }
   if (method === 'session.event') {
     const type = (p.event as { type?: unknown } | undefined)?.type;
     if (type === 'tool/call' || type === 'tool/result' || type === 'assistant/message') {
@@ -598,7 +613,7 @@ function processTurnNotification(turn: PendingTurn, method: string, p: Record<st
 function handleNotification(method: string, params: unknown): void {
   if (!params || typeof params !== 'object') return;
   const p = params as Record<string, unknown>;
-  if (method === 'session.event' || method === 'session.status') {
+  if (method === 'session.event' || method === 'session.status' || method==='session.progress') {
     if (p.sessionId !== dshSessionId) return;
     const turn = activeTurn;
     if (!turn) return;
@@ -817,6 +832,7 @@ async function main(): Promise<void> {
   };
   const launchArgs = ['--profile', profileName];
   if (args.bridgePatch) launchArgs.push(`--patch=${args.bridgePatch}`);
+  if(containerGlobalAgentMode()){for(const patch of [dshModelPatchPath(homedir()),join(homedir(),'.dsh','platform-mcp.patch.json')])if(existsSync(patch))launchArgs.push(`--patch=${patch}`);env.BOTMUX_DSH_PROGRESS='1';}
   const selection = resolveDshModel({
     dshBin: args.dshBin, launchArgs, cwd, env, dshHome: dshHomeDir(), model: args.model,
   });

@@ -220,12 +220,16 @@ function hasLocale(env: Record<string, string>): boolean {
 export function hostLoginEnv(shell: string, base: NodeJS.ProcessEnv = process.env): Record<string, string> {
   let user: { username: string; homedir: string } = { username: base.USER ?? '', homedir: homedir() };
   try { user = userInfo(); } catch { /* keep env fallback */ }
+  // Inside an Agent container the passwd home is a read-only /home/<user>;
+  // credentials, installed tools and rcfiles live in the platform home
+  // (/state). Terminals must log in there, not into the discarded passwd dir.
+  const agentHome = base.BOTMUX_AGENT_ROLE ? base.HOME : undefined;
   const env: Record<string, string> = {
-    HOME: user.homedir || homedir(),
+    HOME: agentHome || user.homedir || homedir(),
     USER: user.username,
     LOGNAME: user.username,
     SHELL: shell,
-    PATH: DEFAULT_LOGIN_PATH,
+    PATH: agentHome && base.PATH ? base.PATH : DEFAULT_LOGIN_PATH,
     TERM: 'xterm-256color',
     COLORTERM: 'truecolor',
   };

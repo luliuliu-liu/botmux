@@ -1,3 +1,5 @@
+import {createHash} from 'node:crypto';
+import {verifyDagApproval,authoringAudit} from './authoring-approval.js';
 /**
  * v3 grill host controller.
  *
@@ -285,6 +287,7 @@ export function hostApproveSpec(runDir: string, now: Date = new Date()): GrillSt
     if (cur.status !== 'spec_ready') {
       throw new HostGuardError(`approve-spec 需要 status=spec_ready，当前 ${cur.status}`);
     }
+    authoringAudit(runDir,{type:'specConfirmed',byKind:'agent',specSha256:requireHash(cur.specJsonPath)});
     return transition(runDir, 'spec_approved', {}, now);
   });
 }
@@ -294,6 +297,8 @@ export interface ArchitectDeps {
   /** Throws on an invalid dag (dag.ts loadDag). */
   loadDag: (path: string) => unknown;
   botSnapshot: BotSnapshot;
+  /** Live per-bot CLI env; never persisted with the run. */
+  workerEnv?: Record<string, string>;
   resolveLarkAppSecret: (larkAppId: string) => string | undefined | Promise<string | undefined>;
   timeoutMs?: number;
   cancelSignal?: AbortSignal;
@@ -338,6 +343,7 @@ export async function hostArchitect(runDir: string, deps: ArchitectDeps, now: Da
         specPath: cur.specPath,
         specJsonPath: cur.specJsonPath,
         botSnapshot: deps.botSnapshot,
+        workerEnv: deps.workerEnv,
         resolveLarkAppSecret: deps.resolveLarkAppSecret,
         timeoutMs: deps.timeoutMs,
         cancelSignal: deps.cancelSignal,
@@ -453,6 +459,7 @@ export function authorizeAdHocRun(
   return withHostMutationLockSync(runDir, () => withFileLockSync(join(runDir, 'run.json'), () => {
     // Re-read both state and envelope after acquiring the cross-process lock.
     const cur = mustRead(runDir);
+    verifyDagApproval(runDir);
 
     // Crash-window replay: run.json is the create-once commit. Never rebuild
     // its pinned snapshots from a possibly drifted bots.json. Both dag_ready
@@ -626,6 +633,8 @@ export async function cmdWorkflowHost(
   rest: string[],
   deps: WorkflowHostCommandDeps = {},
 ): Promise<void> {
+  if(rest.includes('--help')||rest.includes('-h')){const {WORKFLOW_HELP}=await import('../../cli/workflow-operations.js');console.log(WORKFLOW_HELP);return;}
+  if(argValue(rest,'--by')==='user')throw Error('User approval must come from the authenticated approval card, not --by user');
   const baseDir = argValue(rest, '--base-dir') ?? defaultBaseDir();
   const guardedRunDir = (runId: string): string => {
     const runDir = runDirFor(runId, baseDir);
@@ -644,7 +653,7 @@ export async function cmdWorkflowHost(
       const { runId, runDir, state } = hostNew({ goal, baseDir, chatBinding });
       console.log(JSON.stringify({
         runId, runDir, status: state.status, specPath: state.specPath,
-        chatBound: !!chatBinding,
+        chatBound: !!chatBinding,nextAction:'Edit spec.md, then workflow spec-finalize '+runId,
       }, null, 2));
       return;
     }
@@ -721,13 +730,12 @@ export function isHostSub(sub: string): boolean {
   return ['new', 'spec-finalize', 'approve-spec', 'revise-spec', 'architect', 'revise-dag', 'approve-dag'].includes(sub);
 }
 
-/** Resolve real bot/secret deps and run the architect step. */
-export function resolveArchitectBotSnapshot(
+/** Resolve the exact bot config used by the Architect worker. */
+export function resolveArchitectBotConfig(
   runDir: string,
   bots: BotConfig[],
   explicitSelector?: string,
-  workingDirOverride?: string,
-): BotSnapshot {
+): BotConfig {
   if (bots.length === 0) throw new Error('没有可用 bot 配置（bots.json 为空）');
   const state = mustRead(runDir);
   const selector = explicitSelector ?? state.chatBinding?.larkAppId;
@@ -741,6 +749,16 @@ export function resolveArchitectBotSnapshot(
       `没有同时满足 bypass + v3 CLI allowlist 的 bot（supported: ${V3_SUPPORTED_CLIS.join(', ')}）`,
     );
   }
+  return bot;
+}
+
+export function resolveArchitectBotSnapshot(
+  runDir: string,
+  bots: BotConfig[],
+  explicitSelector?: string,
+  workingDirOverride?: string,
+): BotSnapshot {
+  const bot = resolveArchitectBotConfig(runDir, bots, explicitSelector);
   const snapshot = botToSnapshot(bot, workingDirOverride);
   if (!isV3SupportedCli(snapshot.cliId)) {
     throw new Error(
@@ -757,10 +775,12 @@ async function runArchitectCli(runId: string, baseDir: string, rest: string[]): 
   // The authoritative constructor rejects disableCliBypass=true: architect and
   // goal workers both require CLI bypass permissions by product contract.
   const runDir = runDirFor(runId, baseDir);
+  const selector = argValue(rest, '--bot');
+  const bot = resolveArchitectBotConfig(runDir, bots, selector);
   const botSnapshot = resolveArchitectBotSnapshot(
     runDir,
     bots,
-    argValue(rest, '--bot'),
+    selector,
     argValue(rest, '--working-dir'),
   );
 
@@ -768,6 +788,7 @@ async function runArchitectCli(runId: string, baseDir: string, rest: string[]): 
     runArchitect: realRunArchitect,
     loadDag,
     botSnapshot,
+    workerEnv: bot.env,
     resolveLarkAppSecret: (id: string) => secretById.get(id),
   });
 }
@@ -798,3 +819,5 @@ function requireRunId(rest: string[]): string {
   }
   return runId;
 }
+
+function requireHash(path:string){return createHash('sha256').update(readFileSync(path)).digest('hex');}

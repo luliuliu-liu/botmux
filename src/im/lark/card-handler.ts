@@ -1,3 +1,4 @@
+import type {ResourceCardDeps} from './v3-resource-card-handler.js';
 /**
  * Lark card action handler — processes button clicks and dropdown selections
  * from Feishu interactive cards.
@@ -144,7 +145,9 @@ export interface CardHandlerDeps {
   sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string, turnId?: string, opts?: WorkerSessionReplyOptions) => Promise<string>;
   lastRepoScan: Map<string, ProjectInfo[]>;
   /** v3 humanGate 审批卡点击处理（driveRun 由 daemon 接的 v3 gate runner 提供）. */
+  v3ResourceDeps?:ResourceCardDeps;
   v3GateDeps?: V3GateCardHandlerDeps;
+  v3AuthoringApproval?:(value:any,operator:string|undefined,messageId:string|undefined,appId:string|undefined)=>Promise<any>;
   /** v3 blocked 重试卡点击处理（同一个 runner 的 driveRun）. */
   v3BlockedDeps?: V3BlockedCardHandlerDeps;
   /** v3 loop 追加一轮卡点击处理（同一个 runner 的 driveRun）. */

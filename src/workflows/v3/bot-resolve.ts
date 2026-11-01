@@ -81,6 +81,7 @@ export function botToSnapshot(bot: BotConfig, workingDirOverride?: string): BotS
     ...((instance.cliPathOverride ?? bot.cliPathOverride) ? { cliPathOverride: instance.cliPathOverride ?? bot.cliPathOverride } : {}),
     ...(bot.wrapperCli ? { wrapperCli: bot.wrapperCli } : {}),
     ...(bot.model ? { model: bot.model } : {}),
+    ...(bot.cliId === 'codex' && bot.codexAuthSync === 'isolated' ? { codexAuthSync: 'isolated' as const } : {}),
     ...(bot.sandbox === true || bot.sandbox === 'oncall'
       ? { sandbox: true }
       : bot.sandbox === 'scratch' ? { sandbox: 'scratch' } : {}),

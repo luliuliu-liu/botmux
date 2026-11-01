@@ -38,6 +38,8 @@ import { createDshAdapter } from './dsh.js';
 import { createDshTuiAdapter } from './dsh-tui.js';
 import { createMojoAdapter } from './mojo.js';
 import { createMinimaxAdapter } from './minimax.js';
+import {createZcodeAdapter as createPlatformZcodeAdapter} from '../../platform/management/zcode-tui-adapter.js';
+import {containerGlobalAgentMode} from '../../platform/management/container-agent-policy.js';
 import { createRemoteRunnerAdapter } from './remote-runner.js';
 import { createZcodeAdapter } from './zcode.js';
 import { retiredCli, retiredCliNotice } from './retired-cli.js';
@@ -351,7 +353,7 @@ export function createCliAdapterSync(id: CliId, pathOverride?: string, opts?: Cl
     case 'mojo': return createMojoAdapter(pathOverride);
     case 'minimax': return createMinimaxAdapter(pathOverride);
     case 'remote-runner': return createRemoteRunnerAdapter(pathOverride);
-    case 'zcode': return createZcodeAdapter(pathOverride);
+    case 'zcode': return containerGlobalAgentMode()?createPlatformZcodeAdapter(pathOverride):createZcodeAdapter(pathOverride);
     default:
       // A session persisted on a removed CLI (e.g. switched with `/cli gemini`)
       // fails with the migration notice, not a bare "unknown adapter".

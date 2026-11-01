@@ -63,6 +63,25 @@ function buildRun(runsDir: string, runId: string): string {
   return runDir;
 }
 
+it('serves an authenticated standalone xterm replay page for a completed node without executing a worker', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'v3-replay-api-'));
+  try {
+    const dir = buildRun(base, 'completed-replay'), attempt = join(dir, 'research/attempts/001');
+    mkdirSync(attempt, { recursive: true }); writeFileSync(join(attempt, 'pty.log'), '\u001b[31mRED OUTPUT\u001b[0m\n');
+    appendEvent(join(dir, 'journal.ndjson'), { type: 'nodeSucceeded', nodeId: 'research', attemptId: 'research/attempts/001', manifestPath: join(attempt, 'manifest.json') });
+    appendEvent(join(dir, 'journal.ndjson'), { type: 'runSucceeded' });
+    const proxy = vi.fn(), deps = apiDeps(base, proxy), path = '/api/v3/runs/completed-replay/nodes/research/terminal-replay';
+    const denied = mockRes(), a = get(path); await handleV3RunsApi(a.req, denied.res, a.url, deps, false); expect(denied.status).toBe(401);
+    const allowed = mockRes(), b = get(path); await handleV3RunsApi(b.req, allowed.res, b.url, deps, true);
+    expect(allowed.status).toBe(200); expect(allowed.headers['content-type']).toContain('text/html');
+    expect(allowed.body()).toContain('/assets/xterm.umd.js'); expect(allowed.body()).toContain('/nodes/research/pty-log');
+    expect(allowed.body()).not.toContain(base); expect(allowed.body()).not.toContain('viewToken'); expect(proxy).not.toHaveBeenCalled();
+    const raw = mockRes(), c = get(path.replace('terminal-replay', 'pty-log')); await handleV3RunsApi(c.req, raw.res, c.url, deps, true); await raw.done;
+    expect(raw.body()).toBe('\u001b[31mRED OUTPUT\u001b[0m\n');
+    const missing = mockRes(), d = get(path.replace('/research/', '/missing/')); await handleV3RunsApi(d.req, missing.res, d.url, deps, true); expect(missing.status).toBe(404);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
 function writeEnvelope(runDir: string, runId: string, larkAppId?: string): void {
   const sha256 = `sha256:${'0'.repeat(64)}`;
   writeFileSync(join(runDir, 'run.json'), JSON.stringify({
@@ -294,6 +313,38 @@ describe('v3-runs-api', () => {
       const m2 = mockRes();
       const h2 = await handleV3RunsApi(get('/api/other').req, m2.res, get('/api/other').url, apiDeps(base), false);
       expect(h2).toBe(false);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+});
+
+describe('v3 runs API — remote journal reads never block the event loop', () => {
+  it('serves the list, detail and pty-log route through the non-blocking journal read', async () => {
+    const { configureJournalBackend } = await import('../src/workflows/v3/journal-backend.js');
+    const base = mkdtempSync(join(tmpdir(), 'v3-runs-async-'));
+    try {
+      buildRun(base, 'remote-260602-0001');
+      const events = (await import('../src/workflows/v3/journal.js')).readJournal(join(base, 'remote-260602-0001', 'journal.ndjson'));
+      let release = () => {};
+      const gate = new Promise<void>((done) => { release = done; });
+      const readAsync = vi.fn(async () => { await gate; return events; });
+      const read = vi.fn(() => { throw new Error('a Dashboard request must not use the blocking read'); });
+      configureJournalBackend(() => ({ read, readAsync, withMutationSync: () => { throw new Error('read only'); } }));
+      try {
+        const pending = [
+          (async () => { const r = mockRes(); const { req, url } = get('/api/v3/runs'); await handleV3RunsApi(req, r.res, url, apiDeps(base), true); return r; })(),
+          (async () => { const r = mockRes(); const { req, url } = get('/api/v3/runs/remote-260602-0001'); await handleV3RunsApi(req, r.res, url, apiDeps(base), true); return r; })(),
+          (async () => { const r = mockRes(); const { req, url } = get('/api/v3/runs/remote-260602-0001/nodes/research/pty-log'); await handleV3RunsApi(req, r.res, url, apiDeps(base), true); return r; })(),
+        ];
+        await vi.waitFor(() => expect(readAsync).toHaveBeenCalledTimes(3));
+        // The event loop is free while the reads are pending.
+        expect(await new Promise((done) => setImmediate(() => done('free')))).toBe('free');
+        release();
+        const [list, detail, log] = await Promise.all(pending);
+        expect(list.json().runs).toEqual([expect.objectContaining({ runId: 'remote-260602-0001', nodeCount: 1 })]);
+        expect(detail.json()).toMatchObject({ runId: 'remote-260602-0001' });
+        expect(log.status).toBe(404);
+        expect(read).not.toHaveBeenCalled();
+      } finally { configureJournalBackend(undefined); }
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
 });

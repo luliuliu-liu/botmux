@@ -2,6 +2,7 @@
 // `pendingSuspendReason`，真正的 kill 推迟到会话转入 idle/limited 后由
 // runPendingSuspendIfSettled 兑现。这里钉住兑现函数的状态门控与幂等；
 // 排队半边（IPC 路由）见 ipc-suspend-route.test.ts。
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,7 +46,7 @@ import {
 import { sessionKey } from '../src/core/types.js';
 vi.mock('../src/services/codex-transcript.js', async orig => ({
   ...await orig<typeof import('../src/services/codex-transcript.js')>(),
-  findCodexRolloutBySessionId: vi.fn(() => new URL('../package.json', import.meta.url).pathname),
+  findCodexRolloutBySessionId: vi.fn(() => fileURLToPath(new URL('../package.json', import.meta.url))),
   drainCodexRollout: vi.fn(() => ({ events: [{ kind: 'assistant_final' }], newOffset: 1, pendingTail: '' })),
 }));
 import { drainCodexRollout, findCodexRolloutBySessionId } from '../src/services/codex-transcript.js';
@@ -360,7 +361,7 @@ describe('session reasoning effort changes', () => {
       expect(findCodexRolloutBySessionId).toHaveBeenCalledWith('isolated-native', { codexHome: botHome, noFollow: true });
       expect(ds.session.reasoningEffort).toBe('high');
     } finally {
-      vi.mocked(findCodexRolloutBySessionId).mockImplementation(() => new URL('../package.json', import.meta.url).pathname);
+      vi.mocked(findCodexRolloutBySessionId).mockImplementation(() => fileURLToPath(new URL('../package.json', import.meta.url)));
       rmSync(botHome, { recursive: true, force: true });
     }
   });

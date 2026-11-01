@@ -364,7 +364,7 @@ function findPiNativeTranscript(cliSessionId: string, cwds: string[], sessionsRo
         const headerCwd = piTranscriptHeaderCwd(full);
         // A header that names a different cwd is the stale transcript of an
         // earlier run elsewhere. One without a cwd is unknown, not foreign.
-        if (headerCwd === undefined || cwds.includes(resolve(headerCwd))) return full;
+        if (headerCwd === undefined || piCwdVariants(headerCwd).some(variant=>cwds.includes(variant))) return full;
       }
     }
   }
@@ -406,7 +406,7 @@ export function piBotmuxSessionTranscript(
       // Strict, as Pi is when it looks a session up inside --session-dir: a
       // file without a cwd header is one Pi would skip, so the bridge must too.
       const headerCwd = piTranscriptHeaderCwd(join(dir, n));
-      return headerCwd !== undefined && cwds.includes(resolve(headerCwd));
+      return headerCwd !== undefined && piCwdVariants(headerCwd).some(variant=>cwds.includes(variant));
     });
   return name ? join(dir, name) : undefined;
 }

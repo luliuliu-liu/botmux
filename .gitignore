@@ -57,3 +57,6 @@ test-bots.json
 
 # tmux 客户端调试日志（曾被误提交）
 tmux-client-*.log
+
+# Private deployment state, credentials and local acceptance artifacts
+/.local/

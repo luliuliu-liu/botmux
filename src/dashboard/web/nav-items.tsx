@@ -22,6 +22,9 @@ export type NavItem = {
 export const BOT_DEFAULTS_ALIASES: readonly string[] = ['机器人配置', '机器人设置', 'bot settings', 'bot configuration'];
 
 export const NAV_ITEMS: NavItem[] = [
+  {id:'platform-bots',href:'#/platform-bots',label:'Bot 管理',manage:true,icon:<><rect x="2" y="5" width="12" height="8" rx="2"/><path d="M8 5V2M1 8v3M15 8v3M5 13v1M11 13v1"/><circle cx="5.5" cy="9" r=".6"/><circle cx="10.5" cy="9" r=".6"/></>},
+  {id:'platform-configuration',href:'#/platform-configuration',label:'密钥与配置管理',aliases:['模型管理','Proxy 管理','凭证管理'],manage:true,icon:<><circle cx="5.5" cy="5.5" r="3.5"/><path d="M8 8l6 6M11 11l2-2M13 13l2-2"/></>},
+  {id:'platform-agents',href:'#/platform-agents',label:'Agent 管理',manage:true,icon:<><rect x="2" y="1.5" width="12" height="5" rx="1.5"/><rect x="2" y="9.5" width="5" height="5" rx="1"/><rect x="9" y="9.5" width="5" height="5" rx="1"/><path d="M8 6.5v1.5M4.5 9.5V8h7v1.5M4 4h1M7 4h5"/></>},
   {
     id: 'overview',
     href: '#/',
@@ -113,12 +116,15 @@ export const NAV_ITEMS: NavItem[] = [
  * pinned plugin 插入都仍由那条链路负责，这里不复制任何权限/可见性逻辑。
  * pinned plugin 项没有自己的组，统一挂在「管理」组的「插件」之后。
  */
+/** 仅在平台托管（Control Agent）的 Dashboard 里出现的入口；本机 / 桌面壳不显示。 */
+export const PLATFORM_MANAGED_NAV_IDS: ReadonlySet<string> = new Set(['platform-bots', 'platform-configuration', 'platform-models', 'platform-proxies', 'platform-agents', 'opensandbox']);
+
 export const NAV_GROUPS: Array<{ id: string; labelKey: string; items: string[] }> = [
   { id: 'overview', labelKey: 'nav.group.overview', items: ['overview'] },
   { id: 'collab', labelKey: 'nav.group.collab', items: ['sessions', 'decision-board', 'agent-workbench', 'groups', 'schedules', 'workflows'] },
   { id: 'workforce', labelKey: 'nav.group.workforce', items: ['roles', 'skills', 'customization', 'message-listeners', 'doc-watches', 'bot-defaults', 'agents'] },
   { id: 'analytics', labelKey: 'nav.group.analytics', items: ['monitoring', 'insights', 'feedback'] },
-  { id: 'manage', labelKey: 'nav.group.manage', items: ['terminal', 'connectors', 'plugins', 'whiteboards', 'settings'] },
+  { id: 'manage', labelKey: 'nav.group.manage', items: ['platform-agents','platform-configuration','terminal', 'connectors', 'plugins', 'whiteboards', 'settings'] },
 ];
 
 /**
@@ -139,6 +145,8 @@ export const NAV_SUBPAGES: readonly NavSubPage[] = [
   { id: 'roles-profile', parentId: 'roles', href: '#/roles/profile', labelKey: 'roles.tabProfiles', aliases: ['角色 Profile', 'role profiles'] },
   { id: 'connectors-logs', parentId: 'connectors', href: '#/connectors/logs', labelKey: 'connectors.tabLogs', aliases: ['Webhook 日志', 'webhook logs'] },
   // 数据洞察的 tab 直接按 INSIGHT_TABS 生成，新加 tab 自动进索引；overview 就是 #/insights 本身。
+  { id: 'platform-models', parentId: 'platform-configuration', href: '#/platform-models', labelKey: 'nav.platformModels', aliases: ['model connections'] },
+  { id: 'platform-proxies', parentId: 'platform-configuration', href: '#/platform-proxies', labelKey: 'nav.platformProxies' },
   ...INSIGHT_TABS.filter(tab => tab.key !== 'overview').map(tab => ({
     id: `insights-${tab.key}`,
     parentId: 'insights',
@@ -154,4 +162,5 @@ export const NAV_SUBPAGES: readonly NavSubPage[] = [
 export const PALETTE_UNINDEXED_ROUTES: Readonly<Record<string, string>> = {
   'agent-workbench-dock': '桌面壳 / 沉浸式入口嵌入的驾驶舱界面，不是独立页面',
   'webhook-logs': '#/connectors/logs 的旧别名',
+  opensandbox: '#/platform-agents 的旧书签别名，渲染同一个 Agent 实例页',
 };

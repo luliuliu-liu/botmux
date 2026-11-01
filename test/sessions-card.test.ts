@@ -1027,8 +1027,9 @@ describe('handleSessionsCardAction', () => {
         LARK_APP_ID,
         deps,
       );
-      expect(deps.requestSpy).toHaveBeenCalledOnce();
+      expect(deps.requestSpy).toHaveBeenCalledTimes(2);
       expect(deps.requestSpy.mock.calls[0][0]).toEqual({ method: 'GET', path: '/__daemon/sessions-list' });
+      expect(deps.requestSpy.mock.calls[1][0]).toMatchObject({method:'GET',path:'/__daemon/sessions/sess_a/card-view-link'});
       expect(r.toast).toBeUndefined();
       expect(r.card?.type).toBe('raw');
       const cardJson = JSON.stringify(r.card?.data);
@@ -1629,8 +1630,8 @@ describe('handleSessionsCardAction', () => {
         LARK_APP_ID,
         deps as any,
       );
-      // 3 calls: pre-GET + POST + post-GET
-      expect(deps.requestSpy).toHaveBeenCalledTimes(3);
+      // pre-GET + POST + post-GET + a native read-only card capability.
+      expect(deps.requestSpy).toHaveBeenCalledTimes(4);
       expect(deps.requestSpy.mock.calls[0][0].method).toBe('GET');
       expect(deps.requestSpy.mock.calls[1][0]).toEqual(
         expect.objectContaining({ method: 'POST', path: '/__daemon/sessions/sess_r/resume' }),

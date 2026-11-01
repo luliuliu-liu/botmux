@@ -312,7 +312,7 @@ describe('buildV3ProgressCard', () => {
     expect(url).toContain('/#/v3/run%20with%20space');
   });
 
-  it('有终端会话时渲染「终端」按钮，URL 直连 worker 端口', () => {
+  it('有终端会话时渲染「终端」按钮，URL 经过 Dashboard session 代理', () => {
     const card = parse(baseView({
       terminal: { sessionId: 'sess-terminal-1', webPort: 8765, viewToken: 'view token&1' },
     }));
@@ -321,8 +321,8 @@ describe('buildV3ProgressCard', () => {
     );
     expect(terminalBtn).toBeDefined();
     const url = terminalBtn.actions[0].multi_url.url;
-    // LAN 部署：直连 worker webPort；sessionId 不进 URL（按端口直达）。
-    expect(url).toContain(':8765');
+    expect(url).toContain('/s/sess-terminal-1/');
+    expect(url).not.toContain(':8765');
     expect(url).toContain('?viewToken=view%20token%261');
     // 终端按钮在 Web 详情按钮之前
     const terminalIdx = card.elements.indexOf(terminalBtn);
@@ -330,6 +330,17 @@ describe('buildV3ProgressCard', () => {
       (element: any) => element.tag === 'action' && element.actions?.[0]?.text?.content === 'Web 详情（需登录）',
     );
     expect(terminalIdx).toBeLessThan(detailIdx);
+  });
+
+  it('keeps the completed card replay button and prefers the live session when another node is running', () => {
+    const archived = { sessionId: 'archived-session', webPort: 43210, viewToken: 'archive-read-token' };
+    const replay = parse(baseView({ status: 'succeeded', terminalReplay: archived }));
+    const replayButton = replay.elements.find((e: any) => e.tag === 'action' && e.actions?.[0]?.text?.content === '终端回放（手机可看）');
+    expect(replayButton.actions[0].multi_url.url).toContain('/s/archived-session/');
+    const live = parse(baseView({ terminal: { sessionId: 'live-session', webPort: 43211, viewToken: 'live-read-token' }, terminalReplay: archived }));
+    const liveButton = live.elements.find((e: any) => e.tag === 'action' && e.actions?.[0]?.text?.content === '终端（手机可看）');
+    expect(liveButton.actions[0].multi_url.url).toContain('/s/live-session/');
+    expect(JSON.stringify(live)).not.toContain('archive-read-token');
   });
 
   it('无终端会话时不渲染「终端」按钮', () => {

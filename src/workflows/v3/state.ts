@@ -39,6 +39,7 @@ export type V3RunStatus =
 
 export interface V3RunSnapshot {
   runStatus: V3RunStatus;
+  resources?:Array<{nodeId:string;attemptId:string;jobId:string;waitReason?:string;runtime?:Record<string,unknown>}>;
   /** First-wins durable cancellation boundary. Once present, later ordinary
    *  dispatch/settle events are audit-only and cannot revive the run. */
   cancelRequestId?: string;
@@ -234,7 +235,7 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
         // the finalizer still neutral-cancels the materialized running node.
         if (cancelRequestId !== undefined) break;
         if (e.instanceId) recordInstance(e.nodeId, e.instanceId, 'blocked', false);
-        else set(e.nodeId, 'blocked');
+        else {set(e.nodeId, 'blocked');if(!attempts.has(e.nodeId))attempts.set(e.nodeId,e.attemptId);}
         break;
       }
       case 'nodeSucceeded':
@@ -478,7 +479,10 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
     }
   }
 
+  const resources=new Map<string,NonNullable<V3RunSnapshot['resources']>[number]>();
+  for(const e of events){if(e.type==='nodeResourceWaiting')resources.set(e.jobId,{nodeId:e.nodeId,attemptId:e.attemptId,jobId:e.jobId,waitReason:e.waitReason});if(e.type==='nodeResourceAllocated')resources.set(e.jobId,{nodeId:e.nodeId,attemptId:e.attemptId,jobId:e.jobId,runtime:e.runtime});}
   return {
+    ...(resources.size?{resources:[...resources.values()]}:{}),
     runStatus,
     cancelRequestId,
     cancelRequestedBy,
@@ -501,6 +505,7 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
  *  human-readable and `jq`-able. */
 interface StateFile {
   runStatus: V3RunStatus;
+  resources?:V3RunSnapshot['resources'];
   cancelRequestId?: string;
   cancelRequestedBy?: string;
   uncertainHostEffects?: V3UncertainHostEffect[];
@@ -527,6 +532,7 @@ export function writeState(statePath: string, snap: V3RunSnapshot): void {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const file: StateFile = {
     runStatus: snap.runStatus,
+    ...(snap.resources?{resources:snap.resources}:{}),
     cancelRequestId: snap.cancelRequestId,
     cancelRequestedBy: snap.cancelRequestedBy,
     uncertainHostEffects: snap.uncertainHostEffects,
@@ -554,6 +560,7 @@ export function readState(statePath: string): V3RunSnapshot | undefined {
   const file = JSON.parse(readFileSync(statePath, 'utf-8')) as StateFile;
   return {
     runStatus: file.runStatus,
+    ...(file.resources?{resources:file.resources}:{}),
     cancelRequestId: file.cancelRequestId,
     cancelRequestedBy: file.cancelRequestedBy,
     uncertainHostEffects: file.uncertainHostEffects,

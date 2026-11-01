@@ -27,6 +27,8 @@ import type { V3Dag } from './dag.js';
 import { loadDag } from './dag-loader.js';
 import { runWorkflow, type V3RuntimeDeps, type V3RuntimeOptions } from './runtime.js';
 import { createEphemeralPool } from './ephemeral-pool.js';
+import { resolveExecutionBackend } from './execution-backend.js';
+import { assertPoolExecutionAvailable } from './pool-execution-policy.js';
 import { readAndValidateManifest, ManifestValidationError } from './manifest.js';
 import { createFileGate, type GateWait } from './human-gate.js';
 import {
@@ -349,6 +351,8 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
     const bot = resolveBotConfig(botId ?? args.botSelector, bots);
     return botToSnapshot(bot, args.workingDir);
   };
+  const resolveBotEnv = (botId: string | undefined): Record<string, string> | undefined =>
+    resolveBotConfig(botId ?? args.botSelector, bots).env;
 
   const { runNode } = createEphemeralPool({ resolveLarkAppSecret, resolveBot: appId => bots.find(bot => bot.larkAppId === appId) });
   const resolveGate = createFileGate({ awaitDecision: makeAwaitDecision(args.autoApproveGates) });
@@ -362,6 +366,12 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
   }
 
   const runDir = join(args.baseDir, dag.runId);
+  try {
+    assertPoolExecutionAvailable(dag, resolveExecutionBackend(runDir));
+  } catch (err) {
+    console.error(`❌ ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
   let frozenBotSnapshots: Map<string, BotSnapshot>;
   try {
     const authorization = authorizeManualCliRun({
@@ -382,6 +392,7 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
     runNode,
     validateManifest,
     resolveBotSnapshot,
+    resolveBotEnv,
     resolveGate,
     hostExecutors: createDefaultHostExecutorRegistry(),
     hostReconcilers: createDefaultProviderReconcilers(),
@@ -427,6 +438,7 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
     console.error(`   CLI 默认应使用 blocking gate；若看到此消息，请改用 daemon 驱动或检查 gateMode。`);
     process.exit(1);
   }
+  if(outcome.reason==='awaitingResources'){console.error('Workflow 等待 Agent 资源，请在 Dashboard 或飞书处理后继续');process.exit(1);}
   if (outcome.runStatus === 'succeeded') {
     console.log(`\n✅ run 成功 — 产物在 ${outcome.runDir}`);
     process.exit(0);

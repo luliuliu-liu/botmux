@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './platform/workflow/install.js';
 import { assertMessageTopicAvailable, assertSendTopicsAvailable, createTopicMessageLookupCache, TopicSendError, type TopicMessageLookup } from './cli/topic-send-guard.js';
 import { privateReplyEnabled, sendPrivateReply } from './core/private-reply.js';
 import { buildReplyConsoleUrl } from './core/dashboard-url.js';
@@ -3501,6 +3502,15 @@ async function cmdLogs(): Promise<void> {
     process.exit(1);
   });
   child.on('exit', code => process.exit(code ?? 0));
+}
+
+/** Image-local configuration uses the same supervisor ownership lock as CLI
+ * fleet operations; native-configuration alone does not serialize starts. */
+async function startNativeWorkerBot(appId:string){
+  return withFileLock(PM2_FLEET_MUTATION_LOCK_TARGET,async()=>{
+    const {startBotViaSupervisor}=await import('./core/fleet-runtime.js');
+    return startBotViaSupervisor(appId,()=>randomUUID(),()=>new Date().toISOString());
+  });
 }
 
 /** Fleet start/stop/restart from inside a session sandbox: refuse where host
@@ -18369,6 +18379,7 @@ function getVersion(): string {
 }
 
 const command = process.argv[2];
+if(command==='workflow'&&(process.argv.slice(3).includes('--help')||process.argv.slice(3).includes('-h'))){const {WORKFLOW_HELP}=await import('./cli/workflow-operations.js');console.log(WORKFLOW_HELP);process.exit(0);}
 
 // Riff runs on a different machine. Dispatch its stateful helpers on the owning
 // host before any command can accidentally read/write sandbox-local stores.
@@ -18645,6 +18656,8 @@ if (process.env.BOTMUX_WORKFLOW === '1') {
     'architect',
     'revise-dag',
     'approve-dag',
+    'clone',
+    'revise',
     // Saved Workflow creation / execution and live-run mutations.
     'save',
     'run',
@@ -19576,6 +19589,53 @@ switch (command) {
   case 'serve':   await cmdServe(process.argv.slice(3)); break;
   case 'start-bot': await runFleetMutationCommand('start-bot', () => cmdStartBot(process.argv.slice(3))); break;
   case 'stop-bot': await runFleetMutationCommand('stop-bot', () => cmdStopBot(process.argv.slice(3))); break;
+  case '__platform-goal': {
+    if((await import('./platform/management/container-role.js')).containerRole()!=='worker')throw new Error('native_worker_image_required');
+    const {executeWorkerCommand}=await import('./platform/workflow/worker-command.js');
+    const controller=new AbortController();
+    process.on('SIGTERM',()=>controller.abort('worker_command_cancelled'));
+    process.on('SIGINT',()=>controller.abort('worker_command_cancelled'));
+    const result=await executeWorkerCommand(JSON.parse(readFileSync(0,'utf8')),controller.signal,
+      session=>{if(process.send)process.send({type:'session',session});});
+    console.log(JSON.stringify(result));
+    break;
+  }
+  case '__platform-worker': {
+    // Private image-local bridge. It has no HTTP listener and never accepts
+    // a global platform token. Only native Worker images expose this action.
+    if((await import('./platform/management/container-role.js')).containerRole()!=='worker')throw new Error('native_worker_image_required');
+    const input=JSON.parse(readFileSync(0,'utf8'));
+    const {readFleetStatus}=await import('./core/fleet-runtime.js');
+    const busy=async()=>{
+      const token=readFileSync(join(homedir(),'.botmux','.dashboard-token'),'utf8').trim();
+      const response=await fetch(`http://127.0.0.1:${process.env.BOTMUX_DASHBOARD_PORT||7891}/api/sessions`,{
+        headers:{cookie:`botmux_dashboard_token=${token}`},signal:AbortSignal.timeout(5000)});
+      if(!response.ok)throw new Error('native_sessions_unavailable');
+      const result=await response.json() as {sessions:Array<{status:string}>};
+      return result.sessions.some(session=>!['idle','closed','dormant','waiting'].includes(session.status));
+    };
+    if(input.action==='inspect')console.log(JSON.stringify({...readFleetStatus(),busy:await busy()}));
+    else if(input.action==='login-pause'||input.action==='login-resume'){
+      const {nativeWorkerLogin}=await import('./platform/management/native-worker-login.js');
+      console.log(JSON.stringify(await nativeWorkerLogin(input,{home:homedir(),busy,fleet:()=>readFleetStatus(),
+        stop:appId=>ensureBotDaemonStopped(appId,{quiet:true}),
+        start:startNativeWorkerBot})));
+    }
+    else if(input.action==='apply'){
+      const {createNativeWorkerConfigurator}=await import('./platform/management/native-worker-config.js');
+      const apply=createNativeWorkerConfigurator({home:homedir(),fleet:()=>readFleetStatus(),busy,
+        stop:appId=>ensureBotDaemonStopped(appId,{quiet:true}),
+        start:startNativeWorkerBot});
+      console.log(JSON.stringify(await apply(input.config)));
+    }
+    else if(input.action==='apply-cli'){
+      // File-level peer CLI configuration; never touches the running fleet.
+      if(await busy())throw new Error('agent_busy');
+      const {applyNativeCliConfiguration}=await import('./platform/management/native-worker-config.js');
+      console.log(JSON.stringify(await applyNativeCliConfiguration(homedir(),input.cli)));
+    }else throw new Error('unknown_native_worker_action');
+    break;
+  }
   case 'stop':    await runFleetMutationCommand('stop', cmdStop); break;
   case 'restart': await runFleetMutationCommand('restart', cmdRestart); break;
   case 'logs':    await cmdLogs(); break;
@@ -19903,6 +19963,22 @@ switch (command) {
   }
   case 'workflow': {
     const wfSub = process.argv[3] ?? '';
+    if(wfSub==='--help'||wfSub==='-h'||wfSub==='help'||process.argv.slice(4).some(a=>a==='--help'||a==='-h')){
+      const {WORKFLOW_HELP}=await import('./cli/workflow-operations.js');console.log(WORKFLOW_HELP);break;
+    }
+    const {OPERATION_COMMANDS,cmdWorkflowOperations}=await import('./cli/workflow-operations.js');
+    if(OPERATION_COMMANDS.has(wfSub)){
+      try{await cmdWorkflowOperations(wfSub,process.argv.slice(4));}catch(e){console.error(e instanceof Error?e.message:String(e));process.exitCode=process.exitCode||1;}break;
+    }
+    if(wfSub==='approve-dag'){
+      const {readGrillState,defaultBaseDir}=await import('./workflows/v3/grill-state.js');
+      const runId=process.argv[4],base=argValue(process.argv.slice(5),'--base-dir')??defaultBaseDir();
+      if(runId&&/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(runId)&&readGrillState(join(base,runId))?.approvalPolicy?.dag==='user'){
+        let response=await tryWorkflowSessionRelayMutation(runId,'start',{authoringApproval:true});
+        if(!response){const owner=authorizeWorkflowDaemonCommand(runId,process.argv.slice(5)),daemon=findDaemon(owner);if(!daemon)throw Error('DAG 人工审批需要在线 daemon');response=await postWorkflowDaemonMutation({daemon,runId,mutation:'start',body:{authoringApproval:true}});}
+        if(!response.ok){console.error(response.bodyRaw);process.exitCode=1;}else console.log('DAG 审批请求已提交；等待发起人在卡片中批准，再 workflow start。');break;
+      }
+    }
     if (wfSub === 'cancel') {
       // Durable v3 run cancellation. The v2 runtime is retired.
       await cmdWorkflowCancelV3(process.argv[4], process.argv.slice(5));

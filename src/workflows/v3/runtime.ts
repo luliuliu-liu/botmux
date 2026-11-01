@@ -15,6 +15,9 @@ import {
   type V3RunOutcome,
 } from './shared-node-runtime.js';
 import type { AttemptLeaseProvider } from './runtime-host-contract.js';
+import {join} from 'node:path';
+import {resolveExecutionBackend} from './execution-backend.js';
+import {assertPoolExecutionAvailable} from './pool-execution-policy.js';
 
 export {
   classifyTerminal,
@@ -45,10 +48,13 @@ export async function runWorkflow(
   deps: V3RuntimeDeps,
   options: V3RuntimeOptions,
 ): Promise<V3RunOutcome> {
+  const backend=resolveExecutionBackend(join(options.baseDir,dag.runId));
+  assertPoolExecutionAvailable(dag, backend ?? deps);
   return runSharedWorkflow(dag, {
     ...deps,
+    ...(backend?{runNode:backend.runNode,prepareResource:backend.prepareResource,resourceManaged:backend.resourceManaged}:{}),
     attemptLeaseProvider:
-      deps.attemptLeaseProvider ?? createBotmuxAttemptLeaseProvider(),
+      deps.attemptLeaseProvider ?? backend?.attemptLeaseProvider ?? createBotmuxAttemptLeaseProvider(),
     hostExecutorPolicy:
       deps.hostExecutorPolicy ?? authorizeChatBoundHostExecution,
   }, options);

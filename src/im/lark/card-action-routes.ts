@@ -1,3 +1,4 @@
+import {handleV3ResourceAction,isV3ResourceAction} from './v3-resource-card-handler.js';
 /**
  * `handleCardAction` 的分发表与敏感动作元数据。
  *
@@ -140,6 +141,8 @@ export interface V3CardRoute {
 
 /** 原 if 链顺序：gate → blocked → revisit → loop → runSave → distillation。 */
 export const V3_CARD_ROUTES: readonly V3CardRoute[] = [
+  {name:'authoringApproval',matches:a=>a==='v3_authoring_approve'||a==='v3_authoring_reject',run:ctx=>ctx.deps.v3AuthoringApproval?.(ctx.value,ctx.operatorOpenId,ctx.cardMessageId,ctx.larkAppId)},
+  {name:'resource',matches:isV3ResourceAction,run:ctx=>ctx.deps.v3ResourceDeps&&handleV3ResourceAction(ctx.value,ctx.operatorOpenId,ctx.deps.v3ResourceDeps,ctx.formValue)},
   {
     name: 'gate',
     matches: isV3GateAction,

@@ -1,3 +1,4 @@
+import {workflowStatus,workflowArtifacts,publicArtifacts,artifactBytes} from '../workflows/v3/operations.js';
 /**
  * Dashboard API for v3 workflow runs.
  *
@@ -22,10 +23,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createReadStream, lstatSync, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { jsonRes } from './http.js';
-import { isValidRunId, listRuns, projectRunById, ptyLogPathFor } from '../workflows/v3/ops-projection.js';
+import { isValidRunId, listRunsAsync, projectRunByIdAsync, ptyLogPathForAsync } from '../workflows/v3/ops-projection.js';
 import { workflowDaemonMutationPath } from '../workflows/v3/daemon-ipc-client.js';
 import { readRunEnvelope, V3_RUN_ENVELOPE_FILE } from '../workflows/v3/run-envelope.js';
 import { readGrillState } from '../workflows/v3/grill-state.js';
+import { buildReplayTerminalSrcdoc } from './web/v3-terminal.js';
 
 export type V3RunsApiDeps = {
   /** Root of the v3 run dirs (`~/.botmux/v3-runs` in production). */
@@ -52,9 +54,20 @@ export async function handleV3RunsApi(
     return true;
   }
 
+  const operations=url.pathname.match(/^\/api\/v3\/runs\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/(operations|artifacts)(?:\/([a-f0-9]{64}))?$/);
+  if(operations&&req.method==='GET'){
+    if(!authed){jsonRes(res,401,{error:'auth_required'});return true;}
+    try{
+      if(operations[2]==='operations')jsonRes(res,200,workflowStatus(operations[1]!,deps.runsDir));
+      else{const items=await workflowArtifacts(operations[1]!,deps.runsDir),key=operations[3];if(!key)jsonRes(res,200,{files:publicArtifacts(items).map(i=>({...i,url:'/api/v3/runs/'+operations[1]+'/artifacts/'+i.key}))});
+        else{const file=items.find(i=>i.key===key);if(!file){jsonRes(res,404,{error:'artifact_not_found'});return true;}const data=artifactBytes(file);res.writeHead(200,{'content-type':'application/octet-stream','content-disposition':'attachment; filename="'+file.path.split('/').at(-1)!.replace(/[^A-Za-z0-9._-]/g,'_')+'"','cache-control':'no-store'});res.end(data);}
+      }
+    }catch{jsonRes(res,409,{error:'workflow_operations_unavailable'});}return true;
+  }
+
   // GET /api/v3/runs
   if (req.method === 'GET' && url.pathname === '/api/v3/runs') {
-    jsonRes(res, 200, { runs: listRuns(deps.runsDir) });
+    jsonRes(res, 200, { runs: await listRunsAsync(deps.runsDir) });
     return true;
   }
 
@@ -68,7 +81,7 @@ export async function handleV3RunsApi(
       jsonRes(res, 400, { ok: false, error: 'bad_run_id' });
       return true;
     }
-    const view = projectRunById(deps.runsDir, runId);
+    const view = await projectRunByIdAsync(deps.runsDir, runId);
     if (!view) {
       jsonRes(res, 404, { error: 'unknown_run' });
       return true;
@@ -140,20 +153,26 @@ export async function handleV3RunsApi(
     return true;
   }
 
-  // GET /api/v3/runs/:id/nodes/:nodeId/pty-log  (raw bytes — AUTH required)
-  if (req.method === 'GET' && (m = url.pathname.match(/^\/api\/v3\/runs\/([^/]+)\/nodes\/([^/]+)\/pty-log$/))) {
+  // The standalone replay uses the same authenticated log route. It never
+  // restarts a worker or exposes a session read/write capability.
+  if (req.method === 'GET' && (m = url.pathname.match(/^\/api\/v3\/runs\/([^/]+)\/nodes\/([^/]+)\/(pty-log|terminal-replay)$/))) {
     if (!authed) {
       jsonRes(res, 401, { error: 'auth_required' });
       return true;
     }
-    const runId = decodeURIComponent(m[1]!);
-    const nodeId = decodeURIComponent(m[2]!);
-    const path = ptyLogPathFor(deps.runsDir, runId, nodeId);
+    let runId: string, nodeId: string;
+    try { runId = decodeURIComponent(m[1]!); nodeId = decodeURIComponent(m[2]!); }
+    catch { jsonRes(res, 400, { error: 'bad_run_or_node_id' }); return true; }
+    const path = await ptyLogPathForAsync(deps.runsDir, runId, nodeId);
     if (!path) {
       jsonRes(res, 404, { error: 'no_pty_log' });
       return true;
     }
-    streamPtyLog(res, path);
+    if (m[3] === 'terminal-replay') {
+      const endpoint = `/api/v3/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/pty-log`;
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+      res.end(buildReplayTerminalSrcdoc(endpoint, `${runId} / ${nodeId} / 终端回放`));
+    } else streamPtyLog(res, path);
     return true;
   }
 

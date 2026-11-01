@@ -1,3 +1,5 @@
+import {upstreamPreflight} from './upstream-preflight.js';
+import type {PrepareResource,ResourceWait} from './execution-backend.js';
 /**
  * Shared v3 Node runtime — the scheduling main loop.
  *
@@ -510,12 +512,17 @@ export function latestAttemptIdFor(events: StoredEvent[], key: string): string |
 export interface V3RuntimeDeps {
   /** Spawn an ephemeral worker for one goal node (codex's pool). */
   runNode: RunNode;
+  prepareResource?:PrepareResource;
+  resourceManaged?:()=>boolean;
   /** Validate a node's manifest after the worker exits (codex's manifest.ts). */
   validateManifest: ValidateManifest;
   /** Freeze a node's bot spawn config at run start.  Given `node.bot` (may be
    *  undefined → the run's default bot), returns the snapshot persisted in the
    *  runDir and threaded through `runNode` (never re-resolved mid-run). */
   resolveBotSnapshot: (botId: string | undefined) => BotSnapshot;
+  /** Resolve live per-bot CLI env for an ephemeral worker. This stays separate
+   * from BotSnapshot so provider credentials never enter durable run artifacts. */
+  resolveBotEnv?: (botId: string | undefined) => Record<string, string> | undefined;
   /** Host-specific execution profile validation. Botmux defaults this in its
    * facade; portable hosts may validate arbitrary executor ids. */
   validateExecutionSnapshot?: (snapshot: BotSnapshot, selector: string) => void;
@@ -592,7 +599,8 @@ export type V3RunOutcome =
       uncertainHostEffects?: V3UncertainHostEffect[];
       runDir: string;
     }
-  | { reason: 'awaitingGate'; pendingWaits: V3PendingGate[]; runDir: string };
+  | { reason: 'awaitingResources'; resourceWaits:ResourceWait[]; runDir:string }
+  | { reason: 'awaitingGate'; pendingWaits: V3PendingGate[]; resourceWaits?:ResourceWait[]; runDir: string };
 
 function assertOrCreateFrozenJson(
   path: string,
@@ -677,15 +685,22 @@ export async function runWorkflow(
   const botSnapshots = opts.frozenBotSnapshots
     ? new Map(opts.frozenBotSnapshots)
     : new Map<string, BotSnapshot>();
+  // Provider credentials are spawn-time inputs only. Keep them in memory and
+  // thread them through the worker IPC init; never persist them with snapshots.
+  const botEnvs = new Map<string, Record<string, string> | undefined>();
   const freezeBot = (bot: string | undefined): void => {
     const key = bot ?? '';
-    if (botSnapshots.has(key)) return;
+    if (botSnapshots.has(key)) {
+      if (!botEnvs.has(key)) botEnvs.set(key, deps.resolveBotEnv?.(bot));
+      return;
+    }
     if (opts.frozenBotSnapshots) {
       throw new Error(
         `v3 runtime: authorized bots.snapshot.json is missing selector "${key || '<default>'}"`,
       );
     }
     botSnapshots.set(key, deps.resolveBotSnapshot(bot));
+    botEnvs.set(key, deps.resolveBotEnv?.(bot));
   };
   for (const node of dag.nodes) {
     if (isGoalNode(node)) freezeBot(node.bot);
@@ -697,9 +712,9 @@ export async function runWorkflow(
     }
   }
 
-  // CLI-scope guard: goal-mode rides the native `/goal` command.  Fail the
+  // CLI-scope guard: goal-mode uses the adapter-specific prompt path. Fail the
   // whole run up front — clearly — rather than spawning a worker on a CLI that
-  // has not been verified to understand `/goal`.
+  // has not been verified to honor the goal contract.
   for (const [key, snap] of botSnapshots) {
     if (deps.validateExecutionSnapshot) {
       deps.validateExecutionSnapshot(snap, key);
@@ -736,6 +751,7 @@ export async function runWorkflow(
   // In-flight bookkeeping.  Work uses the nodeId as the key; gates use
   // `${nodeId}::gate` so a gated node's work + gate never collide.
   const inFlight = new Map<string, Promise<void>>();
+  const resourceWaits=new Map<string,ResourceWait>();
   const botInFlight = new Map<string, number>();
   const cliInFlight = new Map<string, number>();
   const nodeControllers = new Map<string, AbortController>();
@@ -1019,6 +1035,7 @@ export async function runWorkflow(
     // Dispatch the ready set under the three-layer cap.  Anything not started
     // this tick (cap hit) is retried next tick.
     let startedThisTick = 0;
+    resourceWaits.clear();
     for (const a of actions) {
       if (inFlight.size >= globalCap) break;
       if (a.kind === 'dispatchWork') {
@@ -1031,8 +1048,8 @@ export async function runWorkflow(
         } else {
           const botKey = node.bot ?? '';
           const botSnap = botSnapshots.get(botKey)!;
-          if ((botInFlight.get(botKey) ?? 0) >= perBotCap) continue;
-          if ((cliInFlight.get(botSnap.cliId) ?? 0) >= perCliCap) continue;
+          if (!deps.resourceManaged?.()&&(botInFlight.get(botKey) ?? 0) >= perBotCap) continue;
+          if (!deps.resourceManaged?.()&&(cliInFlight.get(botSnap.cliId) ?? 0) >= perCliCap) continue;
           if (startWork(node, botSnap, botKey, events, a.loop, a.omitted, a.instanceId)) {
             startedThisTick++;
           }
@@ -1060,8 +1077,9 @@ export async function runWorkflow(
             if (!drained) await new Promise((resolve) => setTimeout(resolve, 250));
             continue;
           }
-          return { reason: 'awaitingGate', pendingWaits, runDir };
+          return { reason: 'awaitingGate', pendingWaits, ...(resourceWaits.size?{resourceWaits:[...resourceWaits.values()]}:{}),runDir };
         }
+        if(resourceWaits.size>0)return {reason:'awaitingResources',resourceWaits:[...resourceWaits.values()],runDir};
         // Not terminal, nothing running, nothing dispatchable — a correct
         // decideNext never gets here; guard against an infinite spin.
         throw new Error('v3 runtime: no progress possible and run is not terminal');
@@ -2415,6 +2433,10 @@ export async function runWorkflow(
     // reserved nextAttemptId after a blocked retry (no hardcoded 001 — a retry
     // must not overwrite the previous attempt's logs/manifest/pty).
     const attemptId = nextAttemptIdFor(events, dispatchKey);
+    if(deps.resourceManaged?.()){
+      try{upstreamPreflight(runDir,buildInputs(node,events,attemptId,loopRef,omitted).inputs,events);}catch(e){appendEvent(journalPath,{type:'nodeBlocked',nodeId:node.id,instanceId,attemptId,errorClass:'artifactContractInvalid',errorCode:'UPSTREAM_PREFLIGHT_FAILED',message:e instanceof Error?e.message:'input_unavailable'});return true;}
+    }
+    if(deps.prepareResource){const admission=deps.prepareResource({runId:dag.runId,attemptId,node,botSnapshot:botSnap});if(admission.blocked){appendEvent(journalPath,{type:'nodeBlocked',nodeId:node.id,instanceId,attemptId,errorClass:'artifactContractInvalid',errorCode:admission.blocked.code,message:admission.blocked.message});return true;}if(!admission.ready){if(admission.wait)resourceWaits.set(dispatchKey,admission.wait);return false;}if(admission.cancelled){appendEvent(journalPath,{type:'nodeSkipped',nodeId:node.id,reason:'triggerRuleUnsatisfied',detail:'用户取消了此节点的资源等待'});return true;}}
     const attemptNNN = attemptId.slice(attemptId.lastIndexOf('/') + 1);
     const attemptDir = join(runDir, dispatchKey, 'attempts', attemptNNN);
     const outputDir = join(attemptDir, 'work');
@@ -2587,6 +2609,7 @@ export async function runWorkflow(
       inputsPath,
       outputDir,
       env,
+      ...(botEnvs.get(botKey) ? { workerEnv: botEnvs.get(botKey) } : {}),
       ...(opts.chatBinding ? { chatBinding: opts.chatBinding } : {}),
       workerFence: leaseAcquisition.hostToken as RunNodeRequest['workerFence'],
       timeoutMs: (node.timeoutSec ?? DEFAULT_NODE_TIMEOUT_SEC) * 1000,

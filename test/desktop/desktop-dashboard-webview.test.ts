@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { isWebTerminalDashboardHash } from '../../src/dashboard/web/client-shell.js';
-import { NAV_ITEMS } from '../../src/dashboard/web/nav-items.js';
+import { NAV_ITEMS, PLATFORM_MANAGED_NAV_IDS } from '../../src/dashboard/web/nav-items.js';
 
 const electron = vi.hoisted(() => ({
   exposed: new Map<string, Record<string, (...args: any[]) => unknown>>(),
@@ -54,8 +54,9 @@ describe('desktop dashboard embed', () => {
     expect(dashboardRoutes.length).toBeGreaterThan(0);
     // Web-terminal surfaces (the host Terminal page) belong to the native client:
     // the embedded dashboard redirects them to #/sessions, so the desktop sidebar
-    // deliberately leaves them out.
-    expect(sidebarRoutes).toEqual(dashboardRoutes.filter(id => !isWebTerminalDashboardHash(`#/${id}`)));
+    // deliberately leaves them out. Platform-management pages only exist on a
+    // platform-managed (Control Agent) dashboard, which the local desktop never is.
+    expect(sidebarRoutes).toEqual(dashboardRoutes.filter(id => !isWebTerminalDashboardHash(`#/${id}`) && !PLATFORM_MANAGED_NAV_IDS.has(id)));
   });
 
   it('isolates the embedded dashboard guest from Electron, Node, and the shell preload', async () => {

@@ -6,7 +6,7 @@ import { V3_DAG_SEGMENT_RE } from './dag.js';
 const CANCEL_REASON_MAX = 500;
 
 export type WorkflowDaemonMutationBody =
-  | { mutation: 'start'; value: Record<string, never> }
+  | { mutation: 'start'; value: {authoringApproval?:true} }
   | { mutation: 'cancel'; value: { reason?: string } }
   | { mutation: 'retry'; value: { nodeId?: string } }
   | { mutation: 'grant'; value: { loopId?: string } };
@@ -45,8 +45,8 @@ export function parseWorkflowDaemonMutationBody(
   if (!plainJsonObject(parsed)) return { ok: false, error: 'bad_body' };
 
   if (mutation === 'start') {
-    if (!exactKeys(parsed, [])) return { ok: false, error: 'bad_body' };
-    return { ok: true, body: { mutation, value: {} } };
+    if (!exactKeys(parsed, ['authoringApproval'])||(parsed.authoringApproval!==undefined&&parsed.authoringApproval!==true)) return { ok: false, error: 'bad_body' };
+    return { ok: true, body: { mutation, value: parsed.authoringApproval===true?{authoringApproval:true}:{} } };
   }
 
   if (mutation === 'cancel') {

@@ -8,6 +8,7 @@ import { writeRunnerInput } from './runner-input.js';
 import { runnerArgv0 } from '../../core/self-spawn.js';
 import { resolveRunnerPath } from './runner-path.js';
 import { ensureDshQuestionBridgePatch, type DshQuestionBridgePatch } from '../dsh-question-bridge.js';
+import {containerGlobalAgentMode} from '../../platform/management/container-agent-policy.js';
 
 function pushOpt(args: string[], key: string, value: string | undefined): void {
   if (value === undefined || value.length === 0) return;
@@ -28,7 +29,10 @@ export function createDshAdapter(pathOverride?: string): CliAdapter {
   // (spawn time), so constructing the adapter during `botmux setup` doesn't
   // shell out via resolveCommand. resolvedBin is the node runner, not dsh
   // itself.
-  const rawDshBin = pathOverride ?? 'dsh';
+  // Container launch env is already hydrated by the global Agent policy.
+  // The runner canonicalizes this path; resolving the public wrapper instead
+  // would erase its invoked name and try to launch agent-cli.mjs as an Agent.
+  const rawDshBin = pathOverride ?? (containerGlobalAgentMode()?'/opt/agent/native/dsh':'dsh');
   let cachedDshBin: string | undefined;
   let cachedBridge: DshQuestionBridgePatch | null | undefined;
   const bridgePatch = () => (cachedBridge ??= ensureDshQuestionBridgePatch({ cliId: 'dsh' }));

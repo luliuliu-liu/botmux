@@ -486,6 +486,10 @@ async function executeGoalRunCore(
     frozenBotSnapshots.get(selector ?? '')
     ?? [...frozenBotSnapshots.values()].find((candidate) => candidate.larkAppId === selector)
     ?? firstSnapshot;
+  const resolveBotEnv = (selector: string | undefined): Record<string, string> | undefined => {
+    const snapshot = resolveFrozenSnapshot(selector);
+    return bots.find((bot) => bot.larkAppId === snapshot.larkAppId)?.env;
+  };
 
   let runtimeDeps: V3RuntimeDeps;
   try {
@@ -493,6 +497,7 @@ async function executeGoalRunCore(
       runNode: deps.makeRunNode(bots),
       validateManifest: deps.validateManifest,
       resolveBotSnapshot: resolveFrozenSnapshot,
+      resolveBotEnv,
       hostExecutors: createDefaultHostExecutorRegistry(),
       hostReconcilers: createDefaultProviderReconcilers(),
     };

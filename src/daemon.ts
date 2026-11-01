@@ -1,3 +1,9 @@
+import {startReportPublisher} from './platform/workflow/report-publisher.js';
+import {workflowPreflight} from './workflows/v3/operations.js';
+import {requestDagApproval,approvalCard,handleAuthoringApproval} from './workflows/v3/authoring-approval.js';
+import {requestPersistenceSync} from './platform/workflow/sync-request.js';
+import {buildV3ResourceCard} from './im/lark/v3-resource-card.js';
+import {currentPoolCatalog} from './platform/workflow/agent-pool-client.js';
 import { findForbiddenReadWritePaths, findReadOnlyLauncherMountCovers, forbiddenReadWriteMessage, readOnlyLauncherMountMessage } from './services/sandbox-path-guard.js';
 import { recordDeploymentContinuation, cancelDeploymentContinuation } from './services/deployment-continuation.js';
 import { deploymentContinuationAuthority } from './core/deployment-continuation-authority.js';
@@ -6613,6 +6619,17 @@ const v3ProgressCardManager = new V3ProgressCardManager({
 // (cold-attach).  postCard / notifyTerminal use the daemon's Lark sender; the
 // run logic + in-flight guard live in createV3GateRunner.
 const v3GateRunner = createV3GateRunner({
+  postResourceCard:async(binding,wait,runId)=>{
+    const runDir=join(v3DefaultBaseDir(),runId),receipt=join(runDir,'resource-card-'+wait.jobId+'.json');
+    if(existsSync(receipt))return;
+    const catalog=currentPoolCatalog();
+    const identity=JSON.parse(readFileSync(join(homedir(),'.botmux/platform/workflow-storage.json'),'utf8'));
+    const modelCatalog=requestPersistenceSync({...identity,path:'/model-catalog',method:'GET'}),models=modelCatalog.models;
+    const card=buildV3ResourceCard(runId,wait,{members:catalog?.members??[],models,mounts:modelCatalog.mounts,agents:['pi','codex','claude-code','zcode','dsh','traex'].map(id=>({id,name:id,supported:true}))});
+    if(binding.rootMessageId)await replyMessage(binding.larkAppId,binding.rootMessageId,card,'interactive',true,'resource-'+wait.jobId);
+    else await sendMessage(binding.larkAppId,binding.chatId,card,'interactive','resource-'+wait.jobId);
+    atomicWriteFileSync(receipt,JSON.stringify({sentAt:Date.now()}),{mode:0o600});
+  },
   postCard: async (binding, gate, runId) => {
     const card = buildV3GateCard({
       runId,
@@ -7267,6 +7284,8 @@ const cardDeps: CardHandlerDeps = {
     loadBaseCard: (messageId, larkAppId) => readCompletionProposalBaseCard(messageId, larkAppId),
     startContinuation: startCompletionProposalContinuation,
   },
+  v3AuthoringApproval:async(value,operator,messageId,appId)=>handleAuthoringApproval(value,operator,messageId,appId,{loadBots:loadBotConfigs,canResolve:(b,o)=>canOperate(b.larkAppId,b.chatId,o)}),
+  v3ResourceDeps:{driveRun:runId=>v3GateRunner.driveDetached(runId),canResolve:(binding,operator)=>binding?canOperate(binding.larkAppId,binding.chatId,operator):false},
   v3GateDeps: {
     driveRun: (runId) => v3GateRunner.driveDetached(runId),
     // 审批权限：复用 canOperate（话题 owner / allowedUsers / oncall）。无 binding（corrupt /
@@ -7541,7 +7560,7 @@ for (const path of [
 // v3 humanGate: start a daemon-driven run (grill `approve-dag` 后的主入口).
 // Fire-and-forget: the runner drives the run + posts gate cards; the caller
 // polls /api/v3/runs/:id for status.
-workflowDaemonMutationRoute('start', async (reply, params, _body, identity) => {
+workflowDaemonMutationRoute('start', async (reply, params, body, identity) => {
   const runId = params.runId;
   if (!isValidV3RunId(runId)) return reply(400, { ok: false, error: 'bad_run_id' });
   // Machine-wide workflow kill-switch: refuse launching a NEW daemon-driven run
@@ -7552,6 +7571,16 @@ workflowDaemonMutationRoute('start', async (reply, params, _body, identity) => {
   // and is intentionally NOT gated, and `retry`/`grant`/`cancel` stay available.
   if (!isWorkflowFeatureEnabled()) return reply(409, { ok: false, error: 'workflow_disabled' });
   const runDir = join(v3DefaultBaseDir(), runId);
+  if((body as any).authoringApproval===true){
+    try{const b=readV3RunChatBinding(runDir);if(!b||b.larkAppId!==identity.larkAppId)return reply(403,{error:'wrong_daemon'});const r=requestDagApproval(runId);
+      if(r.status==='approved')return reply(200,{ok:true,approved:true});
+      if(!r.cardMessageId){const card=approvalCard(r),uuid='dag-approval-'+r.nonce;
+        const id=r.binding.rootMessageId?await replyMessage(r.binding.larkAppId,r.binding.rootMessageId,card,'interactive',true,uuid):await sendMessage(r.binding.larkAppId,r.binding.chatId,card,'interactive',uuid);
+        const path=join(runDir,'dag.approval.json');atomicWriteFileSync(path,JSON.stringify({...r,cardMessageId:id}),{mode:0o600,durable:true});
+      }
+      return reply(202,{ok:true,runId,awaiting:'dag_approval'});
+    }catch(e){return reply(409,{error:'authoring_approval_failed',detail:e instanceof Error?e.message:'unknown'});}
+  }
   const preflight = preflightV3RunStart(runDir);
   if (!preflight.ok) {
     if (preflight.error === 'no_grill_state') {
@@ -7571,6 +7600,7 @@ workflowDaemonMutationRoute('start', async (reply, params, _body, identity) => {
   if (binding.larkAppId !== identity.larkAppId) {
     return reply(409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
   }
+  try{const inputs=workflowPreflight(runId);if(!inputs.ok)return reply(409,{ok:false,error:'input_preflight_failed',checks:inputs.checks});}catch(e){return reply(409,{ok:false,error:'input_preflight_unavailable',detail:e instanceof Error?e.message:'unavailable'});}
   // A 202 means the start intent is recoverable after an immediate daemon
   // crash. Persist the journal boundary before scheduling detached work; cold
   // attach will re-drive a run that has runStarted but no active attempt.
@@ -33437,6 +33467,9 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   const sessionRuntimeSweepTimer = setInterval(() => { void sweepSessionRuntimeDirs(); }, 30 * 60_000);
   sessionRuntimeSweepTimer.unref?.();
   void sweepSessionRuntimeDirs();
+
+  // Report replies use this daemon's registered Bot client and exact identity.
+  const stopReportPublisher=startReportPublisher(cfg.larkAppId);process.once('exit',stopReportPublisher);
 
   // v3 humanGate cold-attach: re-post pending gate cards + resume healed gates
   // for runs OWNED BY THIS BOT (codex blocker #1 — owner filter, mirrors

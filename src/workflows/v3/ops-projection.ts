@@ -15,7 +15,7 @@
 import { readFileSync, existsSync, readdirSync, type Dirent } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
-import { readJournal } from './journal.js';
+import { readJournal, readJournalAsync } from './journal.js';
 import { materialize, type V3RunStatus } from './state.js';
 import type { V3NodeStatus } from './orchestrator.js';
 
@@ -194,6 +194,25 @@ export function projectRun(runId: string, runDir: string): RunView {
       events = [];
     }
   }
+  return projectEvents(runId, runDir, events);
+}
+
+/** Same projection for Dashboard HTTP handlers: a remote journal read must not
+ * block the server's event loop. Degrades exactly like {@link projectRun}. */
+export async function projectRunAsync(runId: string, runDir: string): Promise<RunView> {
+  const journalPath = join(runDir, 'journal.ndjson');
+  let events: ReturnType<typeof readJournal> = [];
+  if (existsSync(journalPath)) {
+    try {
+      events = await readJournalAsync(journalPath);
+    } catch {
+      events = [];
+    }
+  }
+  return projectEvents(runId, runDir, events);
+}
+
+function projectEvents(runId: string, runDir: string, events: ReturnType<typeof readJournal>): RunView {
   const snap = materialize(events);
   const dagNodes = readDagNodes(runDir);
 
@@ -305,13 +324,20 @@ export function projectRun(runId: string, runDir: string): RunView {
  * the join stays inside runsDir — defense in depth), and project.  Returns
  * `undefined` for an invalid id / traversal attempt / missing run.
  */
-export function projectRunById(runsDir: string, runId: string): RunView | undefined {
+function runDirFor(runsDir: string, runId: string): string | undefined {
   if (!isValidRunId(runId)) return undefined;
   const root = resolve(runsDir);
   const runDir = resolve(root, runId);
   if (runDir !== root && !runDir.startsWith(root + sep)) return undefined;
-  if (!existsSync(runDir)) return undefined;
-  return projectRun(runId, runDir);
+  return existsSync(runDir) ? runDir : undefined;
+}
+export function projectRunById(runsDir: string, runId: string): RunView | undefined {
+  const runDir = runDirFor(runsDir, runId);
+  return runDir ? projectRun(runId, runDir) : undefined;
+}
+export async function projectRunByIdAsync(runsDir: string, runId: string): Promise<RunView | undefined> {
+  const runDir = runDirFor(runsDir, runId);
+  return runDir ? projectRunAsync(runId, runDir) : undefined;
 }
 
 /**
@@ -369,13 +395,9 @@ export function liveV3TerminalPortForSession(runsDir: string, sessionId: string)
  * depth) before any read.  Returns undefined for invalid id / traversal / no log.
  */
 export function ptyLogPathFor(runsDir: string, runId: string, nodeId: string): string | undefined {
-  if (!isValidRunId(runId)) return undefined;
-  const root = resolve(runsDir);
-  const runDir = resolve(root, runId);
-  if (runDir !== root && !runDir.startsWith(root + sep)) return undefined;
-  const journalPath = join(runDir, 'journal.ndjson');
-  if (!existsSync(journalPath)) return undefined;
-
+  const runDir = runDirFor(runsDir, runId);
+  const journalPath = runDir && join(runDir, 'journal.ndjson');
+  if (!runDir || !journalPath || !existsSync(journalPath)) return undefined;
   // Read-only endpoint: a corrupt journal (readJournal fail-loud) degrades to
   // "no pty log" (→ 404) rather than a 500 (hardening #11 read-only carve-out).
   let events: ReturnType<typeof readJournal>;
@@ -384,6 +406,21 @@ export function ptyLogPathFor(runsDir: string, runId: string, nodeId: string): s
   } catch {
     return undefined;
   }
+  return recordedPtyLog(runDir, events, nodeId);
+}
+export async function ptyLogPathForAsync(runsDir: string, runId: string, nodeId: string): Promise<string | undefined> {
+  const runDir = runDirFor(runsDir, runId);
+  const journalPath = runDir && join(runDir, 'journal.ndjson');
+  if (!runDir || !journalPath || !existsSync(journalPath)) return undefined;
+  let events: ReturnType<typeof readJournal>;
+  try {
+    events = await readJournalAsync(journalPath);
+  } catch {
+    return undefined;
+  }
+  return recordedPtyLog(runDir, events, nodeId);
+}
+function recordedPtyLog(runDir: string, events: ReturnType<typeof readJournal>, nodeId: string): string | undefined {
   let recorded: string | undefined;
   for (const e of events) {
     if (e.type === 'nodeSessionReady' && e.nodeId === nodeId && e.ptyLogPath) recorded = e.ptyLogPath;
@@ -403,14 +440,18 @@ export interface RunSummary {
 
 /** List runs under `runsDir` (dirs that have a journal.ndjson), newest-first by
  *  name (runIds carry a `<slug>-<yymmdd-hhmm>` stamp so name sort ≈ time sort). */
-export function listRuns(runsDir: string): RunSummary[] {
+function runEntries(runsDir: string): string[] {
   if (!existsSync(runsDir)) return [];
-  const out: RunSummary[] = [];
-  for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !isValidRunId(entry.name)) continue;
-    if (!existsSync(join(runsDir, entry.name, 'journal.ndjson'))) continue;
-    const view = projectRun(entry.name, join(runsDir, entry.name));
-    out.push({ runId: view.runId, runStatus: view.runStatus, nodeCount: view.nodes.length });
-  }
-  return out.sort((a, b) => b.runId.localeCompare(a.runId));
+  return readdirSync(runsDir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && isValidRunId(entry.name) && existsSync(join(runsDir, entry.name, 'journal.ndjson')))
+    .map(entry => entry.name);
+}
+const summarize = (view: RunView): RunSummary => ({ runId: view.runId, runStatus: view.runStatus, nodeCount: view.nodes.length });
+const newestFirst = (rows: RunSummary[]) => rows.sort((a, b) => b.runId.localeCompare(a.runId));
+export function listRuns(runsDir: string): RunSummary[] {
+  return newestFirst(runEntries(runsDir).map(id => summarize(projectRun(id, join(runsDir, id)))));
+}
+/** Non-blocking list for the Dashboard; runs are read concurrently. */
+export async function listRunsAsync(runsDir: string): Promise<RunSummary[]> {
+  return newestFirst(await Promise.all(runEntries(runsDir).map(async id => summarize(await projectRunAsync(id, join(runsDir, id))))));
 }

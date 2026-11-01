@@ -1,3 +1,4 @@
+@import url('./platform-management.css');
 /* Base tokens — the default look (incl. the "数字员工工作台" redesign from
    PR #123) is layered later in this file. Skins override these per [data-skin]. */
 :root {
@@ -3341,6 +3342,7 @@ button.primary {
 
 /* ── 全局图标 tooltip（icon-tooltip.ts 委托渲染到 body，逃出容器 overflow）────── */
 .icon-tip {
+  overflow-wrap: anywhere;
   position: fixed;
   z-index: 9999;
   max-width: 260px;
@@ -20449,19 +20451,34 @@ main:has(.workflows-page .v3r-wrap) .v3r-graph {
 main:has(.workflows-page .v3r-wrap) .v3r-panel {
   height: 100%;
   min-height: 0;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 35%) auto minmax(0, 1fr);
   overflow: hidden;
 }
 
 main:has(.workflows-page .v3r-wrap) #v3-node-meta {
+  grid-row: 2;
   min-height: 0;
   overflow: auto;
 }
 
 main:has(.workflows-page .v3r-wrap) .v3r-term-slot {
+  grid-row: 4;
   min-height: 0;
   overflow: hidden;
+  margin-top: 0;
 }
+
+.v3r-terminal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.v3r-terminal-actions { grid-row: 1; }
+main:has(.workflows-page .v3r-wrap) #v3-inst-strip { grid-row: 3; }
+.v3r-terminal-actions:empty { display: none; }
+main:has(.workflows-page .v3r-wrap) .v3r-term-slot .v3-terminal-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+main:has(.workflows-page .v3r-wrap) .v3r-term-slot .v3-terminal-frame { height: 100%; min-height: 0; }
 
 main:has(.workflows-page .v3r-runs-section) {
   padding-bottom: 0;

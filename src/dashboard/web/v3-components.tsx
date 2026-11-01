@@ -1,3 +1,4 @@
+import {WorkflowOperations} from './v3-operations.js';
 import type React from 'react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { SectionHeader } from './dashboard-components.js';
@@ -249,6 +250,7 @@ function V3DetailPage(props: { runId: string }): React.JSX.Element {
           />
         </div>
       </div>
+      <WorkflowOperations runId={props.runId}/>
       {cancelNotice ? (
         <div className={`v3r-cancel-notice${view?.runStatus === 'cancelled' ? ' done' : ''}`} role="status">
           {cancelNotice}
@@ -517,6 +519,14 @@ function NodePanel(props: {
 
   return (
     <div id="v3-node-panel" className="v3r-panel">
+      <div className="v3r-terminal-actions" aria-label="节点终端操作">
+        {termNode?.webTerminal?.status === 'live' && termNode.webTerminal.webPort ? (
+          <a className="btn-link" href={`/api/v3/runs/${encodeURIComponent(props.runId)}/nodes/${encodeURIComponent(termNode.id)}/terminal/`} target="_blank" rel="noopener">打开实时终端</a>
+        ) : termNode?.hasPtyLog ? (
+          <a className="btn-link" href={`/api/v3/runs/${encodeURIComponent(props.runId)}/nodes/${encodeURIComponent(termNode.id)}/terminal-replay`} target="_blank" rel="noopener">打开终端回放</a>
+        ) : null}
+        {termNode?.hasPtyLog ? <a className="btn-link" href={`/api/v3/runs/${encodeURIComponent(props.runId)}/nodes/${encodeURIComponent(termNode.id)}/pty-log`} download>下载原始日志</a> : null}
+      </div>
       <div id="v3-node-meta">
         {node.goal ? <p className="v3r-goal">{node.goal}</p> : null}
         {node.depends.length ? (

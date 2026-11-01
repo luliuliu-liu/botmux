@@ -304,12 +304,13 @@ export function buildV3RunDetailUrl(runId: string, opts: { host: string; port: n
  */
 export function buildV3TerminalUrl(
   sessionId: string,
-  opts: { host: string; webPort?: number; viewToken?: string },
+  opts: { host: string; webPort?: number; dashboardPort?:number; viewToken?: string },
 ): string | null {
   if (!opts.viewToken) return null;
   const capability = `?viewToken=${encodeURIComponent(opts.viewToken)}`;
   const base = platformCentralTerminalBaseUrl() ?? nonPlatformRemoteBase();
   if (base) return `${base}/s/${encodeURIComponent(sessionId)}/${capability}`;
+  if(opts.dashboardPort)return `http://${formatUrlHost(String(opts.host))}:${opts.dashboardPort}/s/${encodeURIComponent(sessionId)}/${capability}`;
   if (!opts.webPort || opts.webPort <= 0) return null;
   return `http://${formatUrlHost(String(opts.host))}:${opts.webPort}/${capability}`;
 }

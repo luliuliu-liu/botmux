@@ -18,6 +18,7 @@ import {
 import {
   buildNodeTerminalRender,
   buildReplayTerminalSrcdoc,
+  replayFrameEnds,
   liveTerminalUrl,
   nodeTerminalSignature,
 } from '../src/dashboard/web/v3-terminal.js';
@@ -293,7 +294,8 @@ describe('v3 terminal render helpers', () => {
       webTerminal: { sessionId: 's', status: 'live', webPort: 3000 },
     }), { host: 'dash.local' });
     expect(live.kind).toBe('live');
-    expect(live.html).toContain('http://dash.local:3000/');
+    expect(live.html).toContain('/api/v3/runs/run-1/nodes/work/terminal/');
+    expect(live.html).not.toContain('http://dash.local:3000/');
     expect(live.html).toContain('v3 live terminal');
 
     const replay = buildNodeTerminalRender('run 1', node({
@@ -302,6 +304,8 @@ describe('v3 terminal render helpers', () => {
       webTerminal: { sessionId: 's', status: 'closed' },
     }));
     expect(replay.kind).toBe('replay');
+    expect(replay.html).toContain('/api/v3/runs/run%201/nodes/repair%2Fnode/terminal-replay');
+    expect(replay.html).toContain('打开终端回放');
     expect(replay.html).toContain('/api/v3/runs/run%201/nodes/repair%2Fnode/pty-log');
     expect(replay.html).toContain('v3-terminal-dot closed');
 
@@ -333,5 +337,30 @@ describe('v3 terminal render helpers', () => {
     expect(srcdoc).toContain('res.status===404');
     expect(srcdoc).toContain('x-botmux-truncated');
     expect(srcdoc).toContain('showing tail');
+  });
+
+  it('loads replay assets only from the dashboard origin, and those assets are the shipped xterm builds', async () => {
+    const srcdoc = buildReplayTerminalSrcdoc('/api/v3/runs/r/nodes/n/pty-log', 'r / n');
+    const refs = [...srcdoc.matchAll(/\b(?:src|href)="([^"]+)"/g)].map(match => match[1]!);
+    expect(refs.length).toBeGreaterThan(0);
+    // An offline or CDN-blocked network must still render the terminal, not plain text.
+    expect(refs.filter(ref => !ref.startsWith('/assets/'))).toEqual([]);
+    const { createRequire } = await import('node:module');
+    const require = createRequire(import.meta.url);
+    const shipped = new Map([
+      ['/assets/xterm.css', '@xterm/xterm/css/xterm.css'],
+      ['/assets/xterm.umd.js', '@xterm/xterm/lib/xterm.js'],
+      ['/assets/xterm-addon-fit.umd.js', '@xterm/addon-fit/lib/addon-fit.js'],
+    ]);
+    for (const ref of refs) expect(() => require.resolve(shipped.get(ref)!), ref).not.toThrow();
+  });
+
+  it('indexes synchronized screen updates and caps navigation without changing PTY bytes', () => {
+    const frame = '\u001b[?2026h\u001b[Hscreen\u001b[?2026l';
+    expect(replayFrameEnds(frame + frame)).toEqual([frame.length, frame.length * 2]);
+    const large = frame.repeat(12000), ends = replayFrameEnds(large);
+    expect(ends.length).toBeLessThanOrEqual(10000); expect(ends[0]).toBe(frame.length); expect(ends.at(-1)).toBe(large.length);
+    expect(replayFrameEnds('old\u001b[Hnew')).toEqual([3, 9]);
+    expect(replayFrameEnds('ordinary\r\noutput')).toEqual([16]);
   });
 });

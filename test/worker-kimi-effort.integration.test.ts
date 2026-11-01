@@ -8,7 +8,9 @@ import { spawnTsScript } from './helpers/ts-runner.js';
 import { killProcessTree } from './helpers/process-tree.js';
 
 it.skipIf(spawnSync('tmux', ['-V']).status !== 0)('Kimi effort reaches its pane without leaking into the next session', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'botmux-kimi-env-'));
+  // Darwin's default tmpdir exceeds the Unix socket path limit once tmux
+  // appends its per-probe socket name. Keep the same isolated test under /tmp.
+  const root = mkdtempSync(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'botmux-kimi-env-'));
   const data = join(root, 'data');
   mkdirSync(data);
   const fixture = join(root, 'kimi');
