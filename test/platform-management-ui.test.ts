@@ -770,3 +770,9 @@ describe('model and Agent management UI',()=>{
     await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){}}));expect(done).toHaveBeenCalledWith(expect.stringContaining('配置已同步'));
   });
 });
+it('shows failed runtime health instead of ready configuration as available',async()=>{
+ const fallback=fetcher.getMockImplementation()!;
+ fetcher.mockImplementation(async(url:string,init?:any)=>url.endsWith('/containers')&&(!init||init.method==='GET')?{ok:true,json:async()=>({containers:[{...current,runtimeHealth:'unhealthy',lastError:'Worker service recovery pending'}]})}:fallback(url,init));
+ let r:TestRenderer.ReactTestRenderer;await act(async()=>{r=TestRenderer.create(React.createElement(ManagementPage,{page:'agents'}));});renderers.push(r!);
+ expect(JSON.stringify(r!.toJSON())).toContain('服务恢复未确认');
+});
