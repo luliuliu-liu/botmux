@@ -328,6 +328,18 @@ describe('v3 terminal render helpers', () => {
     expect(liveTerminalUrl(3000, 'dash.local', 'sess-live')).toBe('https://dash.example/s/sess-live');
   });
 
+  it('uses same-origin terminal proxy for live v3 terminals under HTTP', () => {
+    vi.stubGlobal('window', {
+      location: {
+        protocol: 'http:',
+        origin: 'http://192.168.31.111:17891',
+        hostname: '192.168.31.111',
+      },
+    });
+
+    expect(liveTerminalUrl(3000, undefined, 'sess/live 1')).toBe('http://192.168.31.111:17891/s/sess%2Flive%201');
+  });
+
   it('keeps replay iframe behavior for auth errors, missing logs, truncation, and 160 cols', () => {
     const srcdoc = buildReplayTerminalSrcdoc('/api/v3/runs/r/nodes/n/pty-log', 'r / n');
     expect(srcdoc).toContain('var COLS=160;');

@@ -82,7 +82,9 @@ function emptyTerminalHtml(message: string): string {
 }
 
 export function liveTerminalUrl(webPort: number, host?: string, sessionId?: string): string {
-  if (sessionId && typeof window !== 'undefined' && window.location.protocol === 'https:') {
+  // The dashboard owns `/s/<session>` on HTTP as well as HTTPS. Keeping this
+  // same-origin avoids requiring LAN clients to reach the ephemeral web port.
+  if (sessionId && typeof window !== 'undefined') {
     return `${window.location.origin}/s/${encodeURIComponent(sessionId)}`;
   }
   return `http://${host ?? browserHost()}:${webPort}/`;

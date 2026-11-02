@@ -21,6 +21,7 @@ import {BrowserInstanceForm,DeleteBrowserInstance} from './browser-instances.js'
 import {cachedManagementGet,clearManagementCache} from './management-cache.js';
 import {CliLoginDialog} from './cli-logins.js';
 import {dynamicModel,idsOf,modelOptionLabel,modelGroupLabel} from './model-options.js';
+import {newPlatformRequestId} from './request-id.js';
 
 type Bot={botId:string;displayName:string;appId:string;usage:'local'|'free'|'sandbox';localRevision?:string;localDetachPending?:boolean;localConfigured?:boolean;localOwned?:boolean;localState?:string;bindingRevision?:number;localCliId?:string;ownerConfigured?:boolean;containerId?:string;containerName?:string;containerRevision?:number;containerStatus?:string;detachPending?:boolean;secretConfigured:boolean};
 type ModelCapability={modelId:string;inputModalities:Array<'text'|'image'>;contextWindow:number;maxTokens:number;reasoningLevels:string[];defaultReasoningLevel:string|null;
@@ -280,7 +281,7 @@ function DeleteContainer({container,onClose,onDone}:{container:Container;onClose
   </form></Modal>;
 }
 export function ContainerForm({data,container,onClose,onDone,hideModel=false}:{data:Data;container:Container|null;onClose:()=>void;onDone:(m:string)=>void;hideModel?:boolean}){
-  const [error,setError]=useState(''),[busy,setBusy]=useState(false);const requestId=useRef(crypto.randomUUID());
+  const [error,setError]=useState(''),[busy,setBusy]=useState(false);const requestId=useRef(newPlatformRequestId());
   const [mcpIds,setMcpIds]=useState<string[]>([]);
   const [workspaceType,setWorkspaceType]=useState('volume'),[volumeSource,setVolumeSource]=useState(''),[readOnly,setReadOnly]=useState(false);
   const [agentType,setAgentType]=useState(container?.agentType||'pi');

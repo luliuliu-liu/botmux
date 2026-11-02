@@ -6,12 +6,13 @@ import {ProxySelect} from './proxies.js';
 import {mcpTargets} from '../../../platform/management/mcp-schema.js';
 import {idsOf} from './model-options.js';
 import {saveInstanceConfiguration,saveLocalConfiguration} from './configuration-save.js';
+import {newPlatformRequestId} from './request-id.js';
 const cliNames:Record<string,string>={pi:'Pi',codex:'Codex','claude-code':'Claude Code',zcode:'ZCode',traex:'Traex',dsh:'dsh'};
 const sorted=(ids:string[])=>JSON.stringify([...ids].sort());
 export function ConfigureAgent({container,onClose,onDone}:{container?:Container;onClose:()=>void;onDone:(v:string)=>void}){
  const local=!container,multi=local||(container.imageAgents?.length??0)>1;
  const [base,setBase]=useState<any>(),[draft,setDraft]=useState<any>(),[error,setError]=useState(''),[busy,setBusy]=useState(false),[done,setDone]=useState('');
- const saving=useRef(false),mcpRequest=useRef(crypto.randomUUID());
+ const saving=useRef(false),mcpRequest=useRef(newPlatformRequestId());
  const load=async(preserve=false)=>{
   const [mcp,workspaces,bots,models,current,clis,controlWorkspace,proxy]=await Promise.all([
    platformApi('/mcp-targets/'+(local?'control':container.containerId)),platformApi('/workspaces'),platformApi('/bots'),platformApi('/models'),
@@ -23,7 +24,7 @@ export function ConfigureAgent({container,onClose,onDone}:{container?:Container;
   const hostMountIds=mounts.map((m:any)=>m.id??workspaces.globalReadOnlyMounts?.find((w:any)=>w.name===m.name&&(m.hostPath===undefined||w.hostPath===m.hostPath))?.id).filter(Boolean);
   const initial={agentType:local?(row.bots[0]?.cliId??'pi'):row.agentType,botId:local?(row.bots[0]?.appId??''):(row.botId??''),originalBotId:local?(row.bots[0]?.appId??''):'',owner:'',proxyProfileId:local?(proxy.proxyProfileId??''):(row.proxyProfileId??''),workspaceKind:workspace.kind,workspaceSource:workspace.source,workspaceReadOnly:workspace.readOnly,hostMountIds,mcpServerIds:mcp.serverIds,modelChoice:JSON.stringify([row.modelProfileId??null,row.modelId??null]),confirmRestart:false};
   const loaded={row,mcp,workspaces,bots:bots.bots,models:models.models,clis:clis?.clis??[],controlWorkspace,proxy,initial};setBase(loaded);if(!preserve)setDraft(initial);
-  mcpRequest.current=mcp.pendingRequestId??crypto.randomUUID();
+  mcpRequest.current=mcp.pendingRequestId??newPlatformRequestId();
  };
  useEffect(()=>{void load().catch(e=>setError(String(e)));},[]);
  const change=(key:string,value:any)=>setDraft((d:any)=>({...d,[key]:value}));
@@ -56,7 +57,7 @@ export function ConfigureAgent({container,onClose,onDone}:{container?:Container;
  {mountChange?<label className="pm-check"><input type="checkbox" checked={draft.confirmRestart} onChange={e=>change('confirmRestart',e.target.checked)}/><span>确认重建空闲 Agent，保留 state 和旧工作区文件</span></label>:null}</section>
  <section className="pm-config-section"><h3><Parameter help="保存并同步会更新平台 MCP 选择集合；取消选择只移除平台条目。手工与内置配置保留。">MCP</Parameter></h3>
  {base.mcp.pendingRequestId?<p role="status">上次 MCP 同步未确认，保存时将先重试原选择。</p>:null}
- {base.mcp.servers.map((r:any)=>{const targets=mcpTargets(r.configuration,clis);return <label className="pm-check" key={r.id}><input type="checkbox" disabled={!!base.mcp.pendingRequestId||!targets.length&&!draft.mcpServerIds.includes(r.id)} checked={draft.mcpServerIds.includes(r.id)} onChange={e=>{change('mcpServerIds',e.target.checked?[...draft.mcpServerIds,r.id]:draft.mcpServerIds.filter((id:string)=>id!==r.id));mcpRequest.current=crypto.randomUUID();}}/><span><CompactText text={r.configuration.displayName}/><small><CompactText text={targets.length?'应用到 '+targets.map(v=>cliNames[v]??v).join(' / '):'此 CLI 不兼容'}/></small></span></label>;})}
+ {base.mcp.servers.map((r:any)=>{const targets=mcpTargets(r.configuration,clis);return <label className="pm-check" key={r.id}><input type="checkbox" disabled={!!base.mcp.pendingRequestId||!targets.length&&!draft.mcpServerIds.includes(r.id)} checked={draft.mcpServerIds.includes(r.id)} onChange={e=>{change('mcpServerIds',e.target.checked?[...draft.mcpServerIds,r.id]:draft.mcpServerIds.filter((id:string)=>id!==r.id));mcpRequest.current=newPlatformRequestId();}}/><span><CompactText text={r.configuration.displayName}/><small><CompactText text={targets.length?'应用到 '+targets.map(v=>cliNames[v]??v).join(' / '):'此 CLI 不兼容'}/></small></span></label>;})}
  </section></fieldset>{error?<p role="alert">{error}</p>:null}{done?<p role="status">{done}</p>:null}<footer><button type="button" disabled={busy} onClick={onClose}>关闭</button><button disabled={busy||!!done}>{busy?'保存中…':'保存并同步'}</button></footer></form>}
  </Modal>;
 }

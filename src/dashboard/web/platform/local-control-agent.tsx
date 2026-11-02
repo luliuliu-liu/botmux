@@ -5,6 +5,7 @@ import {AgentActions,CompactText,Parameter,ConfigHelp} from './compact-controls.
 import {hostFirst,imageOptionLabel} from './image-utils.js';
 import {CliLoginDialog} from './cli-logins.js';
 import {idsOf,modelGroupLabel,modelOptionLabel,type ModelOption} from './model-options.js';
+import {newPlatformRequestId} from './request-id.js';
 type Model=ModelOption&{apiKeyConfigured:boolean};
 type Agent={agentType:string;revision:number;appliedRevision:number;requestId?:string;authMethod:string;modelProfileId:string|null;modelId:string;currentModel:string|null;modelName:string|null;credentialPresent:boolean;credentialKind?:'api-key'|'oauth'|'native';status:string;requiresLogin?:boolean};
 type Bot={appId:string;displayName:string;cliId:string};
@@ -46,7 +47,7 @@ function LocalModelForm({agent,models,onClose,onDone}:{agent:Agent;models:Model[
  const existing=agent.modelProfileId?[agent.modelProfileId,agent.modelId]:['codex','zcode'].includes(agent.agentType)&&agent.authMethod==='oauth'&&agent.status!=='unmanaged'?[null,null]:inherited.length===1?[inherited[0]!.profile,inherited[0]!.id]:null;
  const initial=existing?JSON.stringify(existing):'';
  const [selection,setSelection]=useState(initial),[oauthModel,setOauthModel]=useState(agent.authMethod==='oauth'?agent.modelId:''),[confirmed,setConfirmed]=useState(false),[error,setError]=useState(''),[busy,setBusy]=useState(false);
- const requestId=useRef(agent.status==='pending'?agent.requestId:crypto.randomUUID()),submitting=useRef(false),pending=agent.status==='pending';
+ const requestId=useRef(agent.status==='pending'?agent.requestId:newPlatformRequestId()),submitting=useRef(false),pending=agent.status==='pending';
  const oauth=selection==='[null,null]';
  async function submit(e:FormEvent<HTMLFormElement>){e.preventDefault();if(submitting.current)return;submitting.current=true;setBusy(true);setError('');
   try{const [modelProfileId,modelId]=JSON.parse(selection);const result=await platformApi('/local-agent/'+agent.agentType,'PUT',{revision:agent.revision,requestId:requestId.current,authMethod:oauth?'oauth':'api-key',modelProfileId,modelId:oauth?oauthModel.trim()||null:modelId,confirmRestart:confirmed});

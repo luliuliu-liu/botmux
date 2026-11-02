@@ -21,13 +21,14 @@ export function sessionTerminalHref(s: any, loc: SessionTerminalLocation | null 
   if (/^w-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\./.test(loc.hostname)) {
     return `${loc.origin}/s/${encodeURIComponent(s.sessionId)}`;
   }
-  // On the central HTTPS machine domain, terminals must go through the same
-  // origin `/s/<session>` reverse proxy. Exposing a raw port would produce a
-  // dead link because the platform only proxies 443.
-  if (loc.protocol === 'https:') {
-    return s.proxyPort ? `${loc.origin}/s/${encodeURIComponent(s.sessionId)}` : null;
-  }
+  // The dashboard front proxy authenticates and bridges `/s/<session>` on both
+  // HTTP and HTTPS. Prefer it whenever the daemon proxy is registered: an HTTP
+  // LAN browser then needs only the dashboard port, rather than a separately
+  // exposed per-daemon proxy port.
+  if (s.proxyPort) return `${loc.origin}/s/${encodeURIComponent(s.sessionId)}`;
+  // HTTPS platform hosts expose only their main reverse-proxy port; never emit
+  // an unreachable raw worker port when the daemon proxy is not registered.
+  if (loc.protocol === 'https:') return null;
   const port = s.proxyPort ?? s.webPort;
-  const suffix = s.proxyPort ? `/s/${encodeURIComponent(s.sessionId)}` : '';
-  return `http://${loc.hostname}:${port}${suffix}`;
+  return `http://${loc.hostname}:${port}`;
 }

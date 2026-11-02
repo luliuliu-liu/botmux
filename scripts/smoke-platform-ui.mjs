@@ -291,5 +291,30 @@ try{
   const cells=await page.locator('.pm-table-wrap > table > tbody > tr > td:last-child').evaluateAll(cells=>cells.filter(c=>c.querySelector('button')).map(c=>{const r=c.getBoundingClientRect();return {fits:c.scrollWidth<=c.clientWidth+1,buttons:[...c.querySelectorAll('button')].map(b=>{const q=b.getBoundingClientRect();return q.left>=r.left-1&&q.right<=r.right+1;})};}));assert(cells.every(c=>c.fits&&c.buttons.every(Boolean)),section+' '+width+' action cells must not clip');
   const trigger=page.locator('.pm-table-wrap button[aria-haspopup=menu]').first();if(await trigger.count()){await trigger.scrollIntoViewIfNeeded();await page.waitForTimeout(100);await trigger.click();await page.getByRole('menu').waitFor();const r=await page.getByRole('menu').boundingBox();assert(r.x>=0&&r.x+r.width<=width&&r.y>=0&&r.y+r.height<=900,section+' menu must fit viewport');await page.keyboard.press('Escape');}
  }}
- assert.deepEqual(await page.evaluate(()=>window.platformSmoke.unknown),[]);assert.deepEqual(errors,[]);console.log('Platform UI smoke passed: review title-help alignment, consolidated configuration and CLI selection, member menus, mount dialog, MCP catalog/import/masked preview, Control/Dev/Worker scopes, pending retries/deselection and Agent/pool creation; existing 1440/1000 layouts, pool/login, mounts and report regressions.');
+ // Unlike loopback, private-network HTTP is an insecure browser context.
+ // Fulfill only our source fixture here: no requests touch a real deployment.
+ const httpPage=await browser.newPage(),httpOrigin='http://platform-http-smoke.invalid';
+ httpPage.on('pageerror',error=>errors.push(error.message));
+ await httpPage.route('**/*',async route=>{
+  const url=new URL(route.request().url());
+  if(url.origin!==httpOrigin){await route.abort();return;}
+  const response=await route.fetch({url:origin+url.pathname+url.search});await route.fulfill({response});
+ });
+ await httpPage.goto(httpOrigin+'/#/platform-agents?section=local');
+ assert.deepEqual(await httpPage.evaluate(()=>({secure:window.isSecureContext,uuid:typeof crypto.randomUUID,bytes:typeof crypto.getRandomValues})),{secure:false,uuid:'undefined',bytes:'function'});
+ for(const [section,menuName,target] of [['local','Dev Agent 运行环境 的操作','control'],['instances','Dev acceptance 的操作','fixture-dev'],['instances','Worker acceptance 的操作','fixture-worker']]){
+  await httpPage.evaluate(s=>{window.platformSmoke.clearCache();location.hash='#/platform-agents?section='+s;},section);
+  await httpPage.getByRole('button',{name:menuName,exact:true}).click();await httpPage.getByRole('menuitem',{name:'修改配置',exact:true}).click();
+  const httpDialog=httpPage.locator('dialog');await httpDialog.getByLabel('配置 Agent',{exact:true}).waitFor();
+  await httpDialog.getByLabel(/Shared docs/).check();await httpPage.evaluate(()=>{window.platformSmoke.failNextMcp=true;});
+  await httpDialog.getByRole('button',{name:'保存并同步',exact:true}).click();await httpDialog.getByRole('alert').waitFor();
+  const first=await httpPage.evaluate(t=>window.platformSmoke.requests.filter(r=>r.path==='/mcp-targets/'+t&&r.method==='POST').at(-1),target);
+  assert.match(first.body.requestId,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  await httpDialog.getByRole('button',{name:'保存并同步',exact:true}).click();await httpDialog.waitFor({state:'hidden'});
+  const second=await httpPage.evaluate(t=>window.platformSmoke.requests.filter(r=>r.path==='/mcp-targets/'+t&&r.method==='POST').at(-1),target);
+  assert.equal(first.body.requestId,second.body.requestId,'HTTP retry keeps its idempotency key');
+  await httpPage.locator('.pm-management-heading').waitFor();
+ }
+ assert.deepEqual(await httpPage.evaluate(()=>window.platformSmoke.unknown),[]);await httpPage.close();
+ assert.deepEqual(await page.evaluate(()=>window.platformSmoke.unknown),[]);assert.deepEqual(errors,[]);console.log('Platform UI smoke passed: review title-help alignment, consolidated configuration and CLI selection, member menus, mount dialog, MCP catalog/import/masked preview, Control/Dev/Worker scopes, pending retries/deselection and Agent/pool creation; existing 1440/1000 layouts, pool/login, mounts and report regressions; insecure HTTP configuration dialogs and stable retry keys.');
 }finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));await rm(folder,{recursive:true,force:true});}

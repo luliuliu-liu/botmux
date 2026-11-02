@@ -5,6 +5,7 @@ import {useEffect,useRef,useState,type ReactNode} from 'react';
 import {Modal,platformApi,type Container} from './management-page.js';
 import {clearManagementCache} from './management-cache.js';
 import {dynamicModel,idsOf} from './model-options.js';
+import {newPlatformRequestId} from './request-id.js';
 
 const message=(error:unknown)=>error instanceof Error?error.message:String(error);
 const requiresPoolRebuild=(member:any,value:any)=>value.cpu!==member.cpu||value.memoryMiB!==member.memoryMiB||value.mountGlobalReadOnly!==!!member.globalReadOnlyHostPath||value.hostMountIds!==undefined&&JSON.stringify([...value.hostMountIds].sort())!==JSON.stringify((member.hostMounts??[]).map((m:any)=>m.id).sort());
@@ -88,7 +89,7 @@ function PoolMemberDialog({modal,data,busy,onClose,onSave}:any){
 }
 
 function PoolMemberForm({modal,data,pool,busy,loading=false,loadError='',onReload,onClose,onSave}:any){
- const member=modal.member,request=useRef(crypto.randomUUID()),submitting=useRef(false);
+ const member=modal.member,request=useRef(newPlatformRequestId()),submitting=useRef(false);
  const [agentType,setAgentType]=useState(member?.agentType||'pi'),[mode,setMode]=useState(modal.kind==='enroll'?'existing':'new'),[error,setError]=useState('');
  const [hostMountIds,setHostMountIds]=useState<string[]>(member?.hostMounts?.map((m:any)=>m.id)??[]);
  const [mcpIds,setMcpIds]=useState<string[]>([]);

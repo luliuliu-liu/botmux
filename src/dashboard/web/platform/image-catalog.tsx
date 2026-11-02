@@ -2,6 +2,7 @@ import {useEffect,useState} from 'react';
 import {Modal,platformApi} from './management-page.js';
 import {AgentActions,CompactText,Parameter,ConfigHelp} from './compact-controls.js';
 import {registryHostOfTags,remoteSourceOfTags,shortImageRef} from './image-utils.js';
+import {copyText} from '../clipboard.js';
 export type CatalogAgent={id:string;name:string;supported:boolean;version:string|null;protocols?:string[];authMethods?:string[];images:Array<{id:string;image:string;label:string}>};
 export type CachedImage={id:string;tags:string[];agents:string[];roles:string[];size:number;architecture?:string;os?:string;digests?:string[];created?:number};
 type RemoteImage={key:string;id:string;reference:string;tag:string;registry:string;digest:string;agents:string[];roles:string[];size:number;architecture:string;os:string;created?:string};
@@ -28,7 +29,7 @@ export function ImageCatalog({agents}:{agents:CatalogAgent[]}){
  useEffect(()=>{void reload();},[]);
  const operation=async(path:string,body:unknown)=>{setBusy(true);setError('');try{setCache(await platformApi(path,'POST',body));if(path==='/image-cache/pull')setSelected(current=>current.filter(key=>key!==(body as {key:string}).key));}catch(e){setError(String(e));}finally{setBusy(false);}};
  const pullSelected=async()=>{setBusy(true);setError('');setNotice('');const failed:string[]=[];let succeeded=0;try{for(const key of selected){try{setCache(await platformApi('/image-cache/pull','POST',{key}));succeeded++;}catch{failed.push(key);}}setSelected(failed);if(failed.length)setError(`已拉取 ${succeeded} 个镜像，${failed.length} 个失败；失败项保留选中，请检查网络后重试。`);else setNotice(`已拉取 ${succeeded} 个镜像。`);}finally{setBusy(false);}};
- const copy=async(value:string)=>{try{await navigator.clipboard.writeText(value);setNotice('镜像引用已复制');}catch{setError('无法写入剪贴板，请手动复制镜像引用');}};
+ const copy=async(value:string)=>{if(await copyText(value,'请复制镜像引用'))setNotice('镜像引用已复制');else setError('无法写入剪贴板，请手动复制镜像引用');};
  return <div className="pm-image-catalog"><div className="pm-catalog-toolbar"><span className="hint"><Parameter help="镜像目录按本机架构展示，创建和升级仅使用本地兼容镜像；查询不自动拉取。">本地配置</Parameter> · {cache.updatedAt?`缓存更新于 ${new Date(cache.updatedAt).toLocaleTimeString()}`:'尚未刷新缓存'}</span><div className="pm-inline-actions"><button disabled={busy||!selected.length} onClick={()=>void pullSelected()}>拉取选中（{selected.length}）</button><button disabled={busy} onClick={()=>void operation('/image-cache/refresh',{})}>刷新本地 Docker</button><button disabled={busy} onClick={()=>setRegistry(true)}>查询远端仓库</button></div></div>
   {error?<p role="alert" className="hint-warn">{error}</p>:null}{busy?<p role="status" className="hint">正在读取或拉取镜像，请稍候…</p>:null}{notice?<p role="status" className="hint">{notice}</p>:null}
   <div className="pm-table-wrap"><table className="pm-catalog-table"><thead><tr><th>类型</th><th>部署范围</th><th>认证方式</th><th>模型来源</th><th>可用镜像</th></tr></thead><tbody>{agents.map(agent=>{

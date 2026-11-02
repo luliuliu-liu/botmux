@@ -66,7 +66,7 @@ describe('session terminal href', () => {
   const local: SessionTerminalLocation = { protocol: 'http:', origin: 'http://localhost:8801', hostname: 'localhost' };
   const platform: SessionTerminalLocation = { protocol: 'https:', origin: 'https://m-1.example.test', hostname: 'm-1.example.test' };
 
-  it('builds local direct and proxy terminal urls', () => {
+  it('uses the same-origin proxy on HTTP when the daemon proxy is registered', () => {
     expect(sessionTerminalHref({ sessionId: 'abc', webPort: 3001 }, local)).toBe('http://localhost:3001');
     expect(sessionTerminalHref({ sessionId: 'abc', webPort: 3001, proxyPort: 8801 }, local)).toBe('http://localhost:8801/s/abc');
   });
