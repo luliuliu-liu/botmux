@@ -27,7 +27,7 @@ type Bot={botId:string;displayName:string;appId:string;usage:'local'|'free'|'san
 type ModelCapability={modelId:string;inputModalities:Array<'text'|'image'>;contextWindow:number;maxTokens:number;reasoningLevels:string[];defaultReasoningLevel:string|null;
   supportsReasoningSummaries:boolean;defaultReasoningSummary:'none'|'auto'|'concise'|'detailed'};
 type ClaudeModelRouting={haiku?:string;sonnet?:string;opus?:string;subagent?:string};
-type Model={profileId:string;displayName:string;provider:string;baseUrl:string;modelId:string;modelIds?:string[];modelCapabilities?:ModelCapability[];claudeModelRouting?:ClaudeModelRouting;apiKeyConfigured:boolean;enabled:boolean;protocol?:string;authMethod?:string};
+type Model={profileId:string;displayName:string;provider:string;baseUrl:string;modelId:string;modelIds?:string[];modelCapabilities?:ModelCapability[];claudeModelRouting?:ClaudeModelRouting;apiKeyConfigured:boolean;enabled:boolean;protocol?:string;authMethod?:string;revision?:number};
 const reasoningLevels=['low','medium','high','xhigh','max','ultra'];
 const defaultCapability=(modelId:string):ModelCapability=>({modelId,inputModalities:['text'],contextWindow:128000,maxTokens:8192,
   reasoningLevels:['low','medium','high','xhigh'],defaultReasoningLevel:'medium',
@@ -214,7 +214,7 @@ export function WorkspaceSettings({options,onClose,onDone,embedded=false}:{optio
     try{await platformApi('/workspaces','PUT',{hostPathRoot:path.trim()});onDone('hostPath 范围已保存，创建时使用该目录预填并限制子目录。');}
     catch(error){setError(error instanceof Error?error.message:String(error));}finally{submitting.current=false;setBusy(false);}
   }}>
-    <div className="pm-bot-list-heading"><h3><Parameter help="仅允许此目录及其子目录作为 Agent 工作区，同时用于默认预填；现有挂载不自动改变。">hostPath 范围</Parameter></h3><button disabled={busy||!path.trim()}>{busy?'保存中…':'保存设置'}</button></div>
+    <div className="pm-bot-list-heading"><h3><Parameter help="仅允许此目录及其子目录作为 Agent 工作区，同时用于默认预填；现有挂载不自动改变。">hostPath 范围</Parameter></h3><span>{options.hostPathRoot?<button type="button" disabled={busy} onClick={async()=>{if(submitting.current)return;submitting.current=true;setBusy(true);setError('');try{await platformApi('/workspaces','PUT',{hostPathRoot:null});onDone('已取消 hostPath 范围，恢复部署默认策略。');}catch(error){setError(error instanceof Error?error.message:String(error));}finally{submitting.current=false;setBusy(false);}}}>取消范围</button>:null}<button disabled={busy||!path.trim()}>{busy?'保存中…':'保存设置'}</button></span></div>
     <label className="pm-sr-only" htmlFor="hostpath-range">hostPath 范围</label><input id="hostpath-range" aria-label="hostPath 范围" name="hostPathRoot" value={path} onChange={e=>setPath(e.target.value)} disabled={busy} required placeholder={options.tenantHome||'/absolute/host/directory'}/>
     {error?<p role="alert" className="hint-warn">{error}</p>:null}<footer>{!embedded?<button type="button" onClick={onClose} disabled={busy}>取消</button>:null}</footer>
   </form>;
@@ -448,7 +448,8 @@ export function ModelForm({model,cloneSourceId=null,onClose,onDone}:{model:Model
       }
       const payload={displayName:value.displayName,provider:protocol==='vercel-claude'?'vercel':dynamic?'zai':protocol==='anthropic-messages'?provider.trim()||String(value.profileId).trim():value.provider,baseUrl:protocol==='vercel-claude'?'https://ai-gateway.vercel.sh':dynamic?'https://api.z.ai':baseUrl,modelIds,modelCapabilities,modelId:dynamic?'':protocol==='anthropic-messages'&&modelIds.includes(mainModel)?mainModel:modelIds[0],...(protocol==='anthropic-messages'&&(Object.keys(claudeRouting).length>0||routingChangedFromSaved)?{claudeModelRouting:claudeRouting}:{}),enabled:value.enabled==='on',protocol,authMethod,...(authMethod==='api-key'&&value.apiKey?{apiKey:value.apiKey}:{})};
       if(cloneSourceId)await platformApi(`/models/${encodeURIComponent(cloneSourceId)}/clone`,'POST',{...payload,profileId:value.profileId});
-      else await platformApi(`/models/${encodeURIComponent(String(value.profileId))}`,model?'PUT':'POST',payload);
+      // The edited revision rejects a save over someone else's change (409).
+      else await platformApi(`/models/${encodeURIComponent(String(value.profileId))}`,model?'PUT':'POST',model&&model.revision!==undefined?{...payload,revision:model.revision}:payload);
       onDone(cloneSourceId?'模型连接副本已保存。':'模型连接已保存；现有 Agent 保留原模型，请到 Agent 管理切换或同步配置。');}
     catch(error){setError(error instanceof Error?error.message:String(error));}finally{submitting.current=false;setBusy(false);}
   }}>{cloneSourceId?<ConfigHelp>当前仅预填草稿，尚未创建记录。可修改配置 ID 和其它参数；取消不会写入数据库。Key 留空时，保存副本才复制来源的加密 Key，不回显原文。</ConfigHelp>:null}<label><Parameter help="唯一标识，仅支持字母、数字、点、下划线和连字符，创建后不可修改。新建和克隆不能覆盖已存在的 ID。">配置 ID</Parameter><input name="profileId" defaultValue={model?.profileId||''} required readOnly={!!model&&!cloneSourceId} maxLength={100} pattern="[A-Za-z0-9._-]+"/></label>

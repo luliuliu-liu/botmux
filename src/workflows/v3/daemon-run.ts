@@ -1122,7 +1122,7 @@ export function requestV3RunCancel(
 export type V3RetryOutcome =
   | { kind: 'requested'; nodeId: string; previousAttemptId: string; nextAttemptId: string }
   | { kind: 'already-requested'; nodeId: string }
-  | { kind: 'stale-run'; reason: 'missing' | 'not-blocked' | 'stale-attempt' | 'loop-node' | 'invalid-answer' | 'host-effect-uncertain' | 'revise-workflow-required' };
+  | { kind: 'stale-run'; reason: 'missing' | 'not-blocked' | 'node-failed' | 'stale-attempt' | 'loop-node' | 'invalid-answer' | 'host-effect-uncertain' | 'revise-workflow-required' };
 
 type V3RetryAnswerInput =
   | { selected: string; by: string }
@@ -1202,6 +1202,9 @@ export function requestV3Retry(
     }
     return { kind: 'stale-run', reason: 'not-blocked' };
   }
+  // `failed` is fail-fast by design (only `blocked` is recoverable in the same
+  // DAG); tell the caller to clone instead of a misleading "not blocked".
+  if (status === 'failed') return { kind: 'stale-run', reason: 'node-failed' };
   if (status !== 'blocked') return { kind: 'stale-run', reason: 'not-blocked' };
 
   // Constraint 5: a retry stays in the SAME instance — key attempt numbering by

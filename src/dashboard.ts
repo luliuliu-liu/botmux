@@ -139,7 +139,7 @@ import {withLocalInventoryLock} from './platform/management/local-inventory-lock
 import {readFleetStatus} from './core/fleet-runtime.js';
 import {createNativeWorkerProxyIdentity,nativeWorkerTerminalLink} from './platform/management/native-worker-proxy-auth.js';
 import {createControlBrowserBoundary} from './platform/management/control-browser-boundary.js';
-import { createWorkerDashboardProxy } from './platform/management/worker-dashboard-proxy.js';
+import { createWorkerDashboardProxy, createRouteKindResolver } from './platform/management/worker-dashboard-proxy.js';
 import { PlatformLocalInventory } from './platform/management/local-inventory-sync.js';
 import { FeishuLoginManager } from './dashboard/feishu-login.js';
 import {
@@ -1919,6 +1919,10 @@ const botOnboarding = new BotOnboardingManager({
   }),
 });
 
+const workerRouteKind=createRouteKindResolver({
+  probes:['containers','logins','local-login-workbench','browsers'],
+  probe:async(kind,id)=>(await platformRequest(`/${kind}/${id}/dashboard-route`)).status===200,
+});
 const workerDashboardProxy=createWorkerDashboardProxy({
   domain:process.env.BOTMUX_WORKER_DASHBOARD_DOMAIN||'localhost',issuer:()=>currentDashboardToken()||'',
   resolveTerminal:async id=>{
@@ -1927,11 +1931,7 @@ const workerDashboardProxy=createWorkerDashboardProxy({
     return {url:`${base.replace(/\/$/,'')}/internal/v1/worker-terminal/${id}`,headers:{'x-api-key':key}};
   },
   resolve:async id=>{
-    let response=await platformRequest(`/containers/${id}/dashboard-route`);
-    if(response.status!==200)response=await platformRequest(`/logins/${id}/dashboard-route`);
-    if(response.status!==200)response=await platformRequest(`/local-login-workbench/${id}/dashboard-route`);
-    if(response.status!==200)response=await platformRequest(`/browsers/${id}/dashboard-route`);
-    if(response.status!==200)throw new Error('worker_unavailable');
+    await workerRouteKind(id);
     const base=process.env.CONTROL_PLANE_URL!,key=process.env.CONTROL_PLANE_SYNC_KEY!;
     return {url:`${base.replace(/\/$/,'')}/internal/v1/worker-dashboard/${id}`,headers:{'x-api-key':key}};
   },

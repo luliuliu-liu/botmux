@@ -5,7 +5,7 @@ import {registryHostOfTags,remoteSourceOfTags,shortImageRef} from './image-utils
 import {copyText} from '../clipboard.js';
 export type CatalogAgent={id:string;name:string;supported:boolean;version:string|null;protocols?:string[];authMethods?:string[];images:Array<{id:string;image:string;label:string}>};
 export type CachedImage={id:string;tags:string[];agents:string[];roles:string[];size:number;architecture?:string;os?:string;digests?:string[];created?:number};
-type RemoteImage={key:string;id:string;reference:string;tag:string;registry:string;digest:string;agents:string[];roles:string[];size:number;architecture:string;os:string;created?:string};
+type RemoteImage={key:string;id:string;localId?:string|null;reference:string;tag:string;registry:string;digest:string;agents:string[];roles:string[];size:number;architecture:string;os:string;created?:string};
 type Cache={images:CachedImage[];remote:RemoteImage[];sources:string[];updatedAt:string|null;hostArch?:string};
 const empty:Cache={images:[],remote:[],sources:[],updatedAt:null};
 export function imageSize(bytes:number){return bytes>0?bytes>=1024**3?`${(bytes/1024**3).toFixed(2)} GB`:`${(bytes/1024**2).toFixed(0)} MB`:'—';}
@@ -13,7 +13,9 @@ export function catalogImages(agent:CatalogAgent,cache:Cache){
  const grouped=new Map<string,{id:string;local?:CachedImage;remote:RemoteImage[]}>();
  for(const local of cache.images.filter(i=>i.agents.includes(agent.id)&&(agent.id==='browser'?i.roles.includes('browser'):i.roles.includes('worker'))))grouped.set(local.id,{id:local.id,local,remote:[]});
  for(const remote of cache.remote.filter(i=>i.agents.includes(agent.id)&&(agent.id==='browser'?i.roles.includes('browser'):i.roles.includes('worker')))){
-  const item=grouped.get(remote.id)||{id:remote.id,remote:[]};item.remote.push(remote);grouped.set(remote.id,item);
+  // The containerd image store reports the manifest digest as the local ID;
+  // the control plane resolves which local image a remote entry already is.
+  const key=remote.localId||remote.id,item=grouped.get(key)||{id:key,remote:[]};item.remote.push(remote);grouped.set(key,item);
  }
  const archOf=(entry:{local?:CachedImage;remote:RemoteImage[]})=>entry.local?.architecture??entry.remote[0]?.architecture;
  return [...grouped.values()].sort((a,b)=>{

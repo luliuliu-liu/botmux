@@ -271,6 +271,10 @@ export interface RunNodeRequest {
   runId: string;
   /** Stable id e.g. `research/attempts/001`, used for sessionId / log naming. */
   attemptId: string;
+  /** Extra session identity for an attempt id that is deliberately reused
+   * (the Architect always runs as attempt 001). Claude refuses a session id
+   * whose transcript already exists, so each such run needs a fresh one. */
+  sessionKey?: string;
   /** Host-neutral scheduler ownership. New runtime calls always provide this;
    * optional during the compatibility window for older RunNode adapters. */
   attemptLease?: AttemptLease;
@@ -378,6 +382,8 @@ export interface Spec {
   acceptance?: string;
   /** 明确不做的. */
   nonGoals?: string[];
+  /** 缺省保留历史文档交付行为；仅归档必须显式指定并纳入审批。 */
+  deliveryMode?: import('./delivery-policy.js').WorkflowDeliveryMode;
   nodes: SpecNodeSketch[];
 }
 

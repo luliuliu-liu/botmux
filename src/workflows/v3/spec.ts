@@ -3,7 +3,7 @@
  *
  * grill writes `spec.md` (human narrative) containing a single fenced ```json
  * block that holds the canonical `Spec` (schemaVersion / runId / title /
- * requirement / acceptance? / nonGoals? / nodes[]).  `workflow spec-finalize`
+ * requirement / acceptance? / nonGoals? / deliveryMode? / nodes[]).  `workflow spec-finalize`
  * extracts that block, validates it against the Spec schema, and materializes
  * `spec.json` — the structured truth the architect goal-worker reads.  Any
  * parse / validate failure throws and BLOCKS handoff (codex review 2026-06-02).
@@ -15,6 +15,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { SPEC_SCHEMA_VERSION, type Spec, type SpecNodeSketch } from './contract.js';
+import {parseWorkflowDeliveryMode,type WorkflowDeliveryMode} from './delivery-policy.js';
 
 /** Path-safe id (same shape as dag.ts node ids / runId). */
 const SKETCH_ID_RE = /^[A-Za-z0-9._-]+$/;
@@ -89,6 +90,9 @@ export function validateSpec(raw: unknown): Spec {
     problems.push('acceptance 必须是字符串或省略');
   }
   const nonGoals = r.nonGoals === undefined ? undefined : normStringArray(r.nonGoals, 'nonGoals', problems);
+  let deliveryMode: WorkflowDeliveryMode | undefined;
+  try { deliveryMode = parseWorkflowDeliveryMode(r.deliveryMode); }
+  catch { problems.push('deliveryMode 必须为 feishu-doc 或 archive-only，或省略以兼容历史任务'); }
 
   if (!Array.isArray(r.nodes) || r.nodes.length === 0) {
     throw new SpecValidationError([...problems, 'nodes 必须是非空数组']);
@@ -150,6 +154,7 @@ export function validateSpec(raw: unknown): Spec {
     requirement: (r.requirement as string).trim(),
     acceptance: r.acceptance as string | undefined,
     nonGoals,
+    ...(deliveryMode === undefined ? {} : {deliveryMode}),
     nodes,
   };
 }

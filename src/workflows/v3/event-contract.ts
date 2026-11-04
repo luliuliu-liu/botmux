@@ -56,6 +56,8 @@ export interface V3LoopRef {
 export type V3Event =
   | {type:'nodeResourceWaiting';nodeId:string;attemptId:string;jobId:string;waitReason:string}
   | {type:'nodeResourceAllocated';nodeId:string;attemptId:string;jobId:string;runtime:Record<string,unknown>}
+  /** Final platform receipt once the remote task closed (dispatch/run/end times, session). */
+  | {type:'nodeResourceSettled';nodeId:string;attemptId:string;jobId:string;runtime:Record<string,unknown>}
   | { type: 'runStarted'; runId: string }
   | {
       type: 'nodeDispatched';

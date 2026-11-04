@@ -43,7 +43,7 @@ export function AgentPoolPage(){
  const listAction=async(path:string,method:string,body:any,confirmed?:(result:any)=>boolean)=>{setError('');try{await action(path,method,body,false,confirmed);}catch(error){if(mounted.current)setError(message(error));}};
  const pool=data.pools.find((row:any)=>row.poolId===poolId);
  const open=(kind:string,extra:any={})=>{if(!submitting.current)setModal({kind,pool,...extra});};
- return <><div className="page-heading"><div><h2>Workflow Agent 池 <ConfigHelp>共享工作区，复用 Agent 容器；每个任务开启独立 session。</ConfigHelp></h2></div><button disabled={busy} onClick={()=>void refresh(true)}>刷新</button></div>
+ return <><div className="page-heading"><div><h2 className="pm-panel-title">Workflow Agent 池 <ConfigHelp>共享工作区，复用 Agent 容器；每个任务开启独立 session。</ConfigHelp></h2></div><button disabled={busy} onClick={()=>void refresh(true)}>刷新</button></div>
  {error?<p role="alert" className="hint-warn">{error}</p>:null}
  <div className="pm-list-filters"><select aria-label="Agent 池" disabled={busy} value={poolId} onChange={event=>{selectedPool.current=event.target.value;setPoolId(event.target.value);setData((old:any)=>({...old,members:[]}));setLoading(true);void refresh();}}><option value="">选择工作区池</option>{data.pools.map((row:any)=><option key={row.poolId} value={row.poolId}>{row.displayName} · {row.workspaceKind} · {row.workspaceSource}</option>)}</select><AgentActions name="工作区池" disabled={busy||loading} actions={[{label:'删除工作区池',disabled:!pool, danger:true,run:()=>open('delete-pool')},{label:'新建池成员',disabled:!pool,run:()=>open('create')},{label:'纳入已有 Agent',disabled:!pool,run:()=>open('enroll')}]}/></div>
  {loading?<p role="status">正在加载池成员…</p>:null}

@@ -1,5 +1,9 @@
 # botmux
 
+> 本分支包含 Agent Control Plane 配套平台扩展。镜像版本 `v3.56.0-platform.4` 配套 Control Plane `v1.2.0`，包括管理并发/关闭确认、Workflow仅归档策略、私有归档与手动清理、旧运行读取兼容和列表/详情布局修复。
+> 自动清理保持关闭，手动压缩须先校验归档并独立确认；已清理运行只读，重新执行须克隆新ID并重新审批。平台Worker只维护Pi/Codex/ClaudeCode/ZCode，独立Botmux适配器支持不变。
+> 本次仅发布ACR平台镜像；Git来源标签 `acp-v3.56.0-platform.4` 不触发npm或GitHub Release，npm安装说明仍指向原项目的发行渠道。
+
 <p align="center">
   <img src="cover.svg" alt="botmux" width="760">
 </p>

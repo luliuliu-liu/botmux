@@ -91,3 +91,23 @@ describe('workflowResourceRequest',()=>{
   expect(mocks.request).not.toHaveBeenCalled();
  });
 });
+
+describe('controlRuntime',()=>{
+ const record=(value:unknown)=>{mkdirSync(join(home,'.botmux/platform'),{recursive:true});writeFileSync(join(home,'.botmux/platform/control-runtime.json'),JSON.stringify(value));};
+ it('uses the entrypoint record when a CLI pane lost the BOTMUX_* environment',async()=>{
+  const {controlRuntime}=await import('../src/platform/workflow/agent-pool-client.js');
+  record({role:'control',workspaceKind:'hostpath',workspaceClaim:'/srv/work'});
+  expect(controlRuntime(home,{},{role:()=>'worker',imageRole:()=>'dev'})).toEqual({workspaceKind:'hostpath',workspaceClaim:'/srv/work'});
+ });
+ it('never treats a Worker-only image or a missing record as Control',async()=>{
+  const {controlRuntime}=await import('../src/platform/workflow/agent-pool-client.js');
+  expect(controlRuntime(home,{},{role:()=>'worker',imageRole:()=>'dev'})).toBeUndefined();
+  record({role:'control',workspaceKind:'hostpath',workspaceClaim:'/srv/work'});
+  expect(controlRuntime(home,{},{role:()=>'worker',imageRole:()=>'worker'})).toBeUndefined();
+ });
+ it('prefers live environment values over the record',async()=>{
+  const {controlRuntime}=await import('../src/platform/workflow/agent-pool-client.js');
+  record({role:'control',workspaceKind:'hostpath',workspaceClaim:'/srv/old'});
+  expect(controlRuntime(home,{BOTMUX_WORKSPACE_KIND:'volume',BOTMUX_WORKSPACE_CLAIM:'shared'},{role:()=>'control',imageRole:()=>'dev'})).toEqual({workspaceKind:'volume',workspaceClaim:'shared'});
+ });
+});

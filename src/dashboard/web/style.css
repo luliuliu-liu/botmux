@@ -20503,6 +20503,45 @@ main:has(.workflows-page .v3r-runs-section) .v3r-run-list {
   height: 100%;
 }
 
+/* 执行记录与拓扑是独立内容区；新增记录后不能继续把页面限定为两行。 */
+main:has(.workflows-page .workflow-operations) {
+  overflow-y: auto;
+  padding-bottom: 24px;
+}
+main:has(.workflows-page .workflow-operations) .workflows-page {
+  height: auto;
+  grid-template-rows: none;
+  grid-auto-rows: auto;
+  overflow: visible;
+}
+main:has(.workflows-page .workflow-operations) .v3r-wrap {
+  height: clamp(560px, 70vh, 900px);
+  min-height: 560px;
+}
+.workflow-operations { padding: 20px; min-width: 0; }
+.workflow-operations-table { overflow-x: auto; margin: 16px 0; }
+.workflow-operations-table table { min-width: 720px; }
+.workflow-operations-table th,.workflow-operations-table td { white-space: normal; overflow-wrap: anywhere; vertical-align: top; }
+.workflow-operations-table td:first-child { max-width: 340px; }
+.workflow-operations > ul { overflow-wrap: anywhere; }
+
+/* 存储预览是新增的完整内容区，不能挤进原来只为运行列表保留的 1fr。 */
+main:has(.workflows-page .workflow-retention) {
+  overflow-y: auto;
+  padding-bottom: 24px;
+}
+main:has(.workflows-page .workflow-retention) .workflows-page {
+  height: auto;
+  grid-template-rows: none;
+  grid-auto-rows: auto;
+  overflow: visible;
+}
+main:has(.workflows-page .workflow-retention) .v3r-runs-section,
+main:has(.workflows-page .workflow-retention) .v3r-run-list {
+  height: auto;
+  overflow: visible;
+}
+
 @media (max-width: 1180px) {
   main:has(.workflows-page .v3r-wrap) {
     padding-bottom: 24px;

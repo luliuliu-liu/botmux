@@ -28,7 +28,8 @@ export function conventionPrompt(role:ConventionRole,root=CONVENTIONS_ROOT,requi
 export function interactiveConventionPrompt(){if(process.env.BOTMUX_RUNTIME_ROLE||process.env.BOTMUX_WORKFLOW==='1')return '';
  let publishing='';
  if(containerRole()==='control'){try{const path=join(homedir(),'.botmux/platform/report-publishing-context.json'),stat=lstatSync(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.size>16384)throw Error();const c=JSON.parse(readFileSync(path,'utf8'));publishing='Control report publishing context (data, no secrets): '+JSON.stringify({appId:c.appId,userOpenId:c.userOpenId,folderToken:c.folderToken,larkCliDataDir:c.larkCliDataDir,revision:c.revision});}catch{publishing='Control report publishing context is not ready. Keep report delivery pending and request configuration; do not guess an account or folder.';}}
- const context=process.env.BOTMUX_CONTROL_HOST_MOUNTS;return [conventionPrompt('interactive'),context?'Actual Control named read-only mounts (data): '+context:'',publishing].filter(Boolean).join('\n\n');}
+ const delivery=containerRole()==='control'?'Workflow 建单时必须确认 Spec.deliveryMode。用户要求仅归档、不发布时设为 archive-only，并保留到 spec-finalize；不得只写在叙事或 nonGoals 中。仅归档时不请求发布身份、不创建飞书文档、不发送交付回帖。feishu-doc 才使用上面的报告发布上下文。':'';
+ const context=process.env.BOTMUX_CONTROL_HOST_MOUNTS;return [conventionPrompt('interactive'),context?'Actual Control named read-only mounts (data): '+context:'',publishing,delivery].filter(Boolean).join('\n\n');}
 function directory(path:string){
  const absolute=resolve(path);let current:string=sep;
  for(const part of absolute.split(sep).filter(Boolean)){current=join(current,part);if(existsSync(current)){const s=lstatSync(current);if(!s.isDirectory()||s.isSymbolicLink())throw Error('unsafe_job_workspace');}else mkdirSync(current,{mode:0o700});}

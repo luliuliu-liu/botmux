@@ -28,12 +28,15 @@ import { workflowDaemonMutationPath } from '../workflows/v3/daemon-ipc-client.js
 import { readRunEnvelope, V3_RUN_ENVELOPE_FILE } from '../workflows/v3/run-envelope.js';
 import { readGrillState } from '../workflows/v3/grill-state.js';
 import { buildReplayTerminalSrcdoc } from './web/v3-terminal.js';
+import {ArchiveReader,ArchiveReadUnavailable,archivedFiles,archivedOperations,type ArchiveRead} from '../platform/workflow/archive-reader.js';
 
 export type V3RunsApiDeps = {
   /** Root of the v3 run dirs (`~/.botmux/v3-runs` in production). */
   runsDir: string;
   /** Route a mutation to the daemon that owns the immutable run binding. */
   proxyToDaemon: (larkAppId: string, daemonPath: string, init: RequestInit) => Promise<Response>;
+  /** Injectable in tests; production uses the managed platform Gateway. */
+  archiveReader?: ArchiveReader;
 };
 
 /** Cap a single pty-log response so a runaway log can't exhaust the dashboard. */
@@ -54,20 +57,30 @@ export async function handleV3RunsApi(
     return true;
   }
 
+  const reader=deps.archiveReader??new ArchiveReader({runsDir:deps.runsDir});
+  const archiveLookup=async(runId:string):Promise<ArchiveRead|null>=>reader.lookup(runId);
+  const unavailable=(error:unknown)=>{if(error instanceof ArchiveReadUnavailable){jsonRes(res,503,{error:error.code});return true;}return false;};
   const operations=url.pathname.match(/^\/api\/v3\/runs\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/(operations|artifacts)(?:\/([a-f0-9]{64}))?$/);
   if(operations&&req.method==='GET'){
     if(!authed){jsonRes(res,401,{error:'auth_required'});return true;}
     try{
-      if(operations[2]==='operations')jsonRes(res,200,workflowStatus(operations[1]!,deps.runsDir));
-      else{const items=await workflowArtifacts(operations[1]!,deps.runsDir),key=operations[3];if(!key)jsonRes(res,200,{files:publicArtifacts(items).map(i=>({...i,url:'/api/v3/runs/'+operations[1]+'/artifacts/'+i.key}))});
+      const archived=await archiveLookup(operations[1]!),useArchive=archived&&(archived.state==='compacted'||archived.state==='archive_verified');
+      if(operations[2]==='operations')jsonRes(res,200,useArchive?archivedOperations(archived.row):workflowStatus(operations[1]!,deps.runsDir));
+      else if(useArchive){const files=archivedFiles(archived.row),key=operations[3];if(!key)jsonRes(res,200,{files,readOnly:true,logsArchived:false});
+        else{const file=files.find(item=>item.key===key);if(!file){jsonRes(res,404,{error:'artifact_not_found'});return true;}const upstream=await reader.file(operations[1]!,key);if(!upstream.ok){jsonRes(res,upstream.status,{error:'artifact_unavailable'});return true;}res.writeHead(200,{'content-type':upstream.headers.get('content-type')??'application/octet-stream','content-disposition':'attachment; filename="'+file.path.split('/').at(-1)!.replace(/[^A-Za-z0-9._-]/g,'_')+'"','cache-control':'no-store'});res.end(Buffer.from(await upstream.arrayBuffer()));}
+      }else{const items=await workflowArtifacts(operations[1]!,deps.runsDir),key=operations[3];if(!key)jsonRes(res,200,{files:publicArtifacts(items).map(i=>({...i,url:'/api/v3/runs/'+operations[1]+'/artifacts/'+i.key}))});
         else{const file=items.find(i=>i.key===key);if(!file){jsonRes(res,404,{error:'artifact_not_found'});return true;}const data=artifactBytes(file);res.writeHead(200,{'content-type':'application/octet-stream','content-disposition':'attachment; filename="'+file.path.split('/').at(-1)!.replace(/[^A-Za-z0-9._-]/g,'_')+'"','cache-control':'no-store'});res.end(data);}
       }
-    }catch{jsonRes(res,409,{error:'workflow_operations_unavailable'});}return true;
+    }catch(error){if(!unavailable(error))jsonRes(res,409,{error:'workflow_operations_unavailable'});}return true;
   }
 
   // GET /api/v3/runs
   if (req.method === 'GET' && url.pathname === '/api/v3/runs') {
-    jsonRes(res, 200, { runs: await listRunsAsync(deps.runsDir) });
+    try{
+      const archived=await reader.refresh(),local=await listRunsAsync(deps.runsDir),byId=new Map(local.map(row=>[row.runId,row]));
+      for(const row of archived.values())if((row.state==='compacted'||row.state==='archive_verified')&&!byId.has(row.runId))byId.set(row.runId,{runId:row.runId,runStatus:(row.summary?.runStatus??'unknown') as any,nodeCount:row.summary?.jobs.length??0});
+      jsonRes(res,200,{runs:[...byId.values()].sort((a,b)=>b.runId.localeCompare(a.runId))});
+    }catch(error){if(!unavailable(error))throw error;}
     return true;
   }
 
@@ -81,12 +94,15 @@ export async function handleV3RunsApi(
       jsonRes(res, 400, { ok: false, error: 'bad_run_id' });
       return true;
     }
-    const view = await projectRunByIdAsync(deps.runsDir, runId);
-    if (!view) {
-      jsonRes(res, 404, { error: 'unknown_run' });
+    let archived:ArchiveRead|null;
+    try{archived=await archiveLookup(runId);}catch(error){if(unavailable(error))return true;throw error;}
+    if(archived&&(archived.state==='compacted'||archived.state==='archive_verified')){
+      jsonRes(res,200,{runId,runStatus:archived.row.summary?.runStatus??'unknown',nodes:[],archived:true,archiveState:archived.state,readOnly:true,logsArchived:false,summary:archived.row.summary,files:archivedFiles(archived.row)});
       return true;
     }
-    jsonRes(res, 200, view);
+    const view=await projectRunByIdAsync(deps.runsDir,runId);
+    if(!view){jsonRes(res,404,{error:'unknown_run'});return true;}
+    jsonRes(res,200,view);
     return true;
   }
 
@@ -113,6 +129,8 @@ export async function handleV3RunsApi(
       jsonRes(res, 400, { ok: false, error: 'bad_run_id' });
       return true;
     }
+    try{const archived=await archiveLookup(runId);if(archived&&archived.state==='compacted'){jsonRes(res,410,{ok:false,error:'archived_read_only'});return true;}}
+    catch(error){if(unavailable(error))return true;throw error;}
 
     const owner = resolveV3RunOwner(deps.runsDir, runId);
     if (owner.kind === 'missing') {
@@ -163,6 +181,8 @@ export async function handleV3RunsApi(
     let runId: string, nodeId: string;
     try { runId = decodeURIComponent(m[1]!); nodeId = decodeURIComponent(m[2]!); }
     catch { jsonRes(res, 400, { error: 'bad_run_or_node_id' }); return true; }
+    try{const archived=await archiveLookup(runId);if(archived&&archived.state==='compacted'){jsonRes(res,410,{error:'not_archived',message:'原始终端日志不在归档白名单中'});return true;}}
+    catch(error){if(unavailable(error))return true;throw error;}
     const path = await ptyLogPathForAsync(deps.runsDir, runId, nodeId);
     if (!path) {
       jsonRes(res, 404, { error: 'no_pty_log' });

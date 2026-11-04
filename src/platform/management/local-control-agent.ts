@@ -71,10 +71,22 @@ export function createLocalControlAgent(deps:Dependencies){
     let state:Result;
     try{state=await deps.request(path);}catch{retained=true;throw new LocalControlError(502,'重建受理状态未知，Bot 保持停止；请检查 Control 状态后恢复');}
     if(state.status!==200){retained=true;throw new LocalControlError(502,'重建受理状态未知，Bot 保持停止；请检查 Control 状态后恢复');}
-    const accepted=path==='/control-workspace'?state.data.revision>input.revision&&['queued','applied'].includes(state.data.status):state.data.status==='queued'||state.data.status==='applied'&&state.data.currentImage===input.image;
+    const accepted=path==='/control-workspace'?state.data.revision>input.revision&&['queued','applied'].includes(state.data.status):state.data.status==='queued';
     if(accepted){retained=true;return {queued:true,recovered:true};}
+    if(path==='/control-upgrade'){
+      // 历史 applied 不能证明本次请求触发了重建。让服务端在同一重建锁下
+      // 重判相同请求：明确 noop 才恢复 Bot，queued 则继续等待新容器启动。
+      try{
+        const retry=await deps.request(path,'POST',input);
+        if(retry.status===200&&retry.data?.noop===true)return {...retry.data,recovered:true};
+        if(retry.status===202){retained=true;return {...retry.data,recovered:true};}
+      }catch{retained=true;throw new LocalControlError(502,'重建受理状态未知，Bot 保持停止；请检查 Control 状态后恢复');}
+    }
     throw new LocalControlError(502,'重建请求未受理，已尝试恢复 Bot，请重试');
    }
+   // Nothing will be rebuilt (Control already runs this image): resume now,
+   // because only a new container boot restarts Bots kept stopped for it.
+   if(result.status===200&&result.data?.noop===true)return result.data;
    if(result.status!==202)throw new LocalControlError(result.status,result.data.message||'挂载请求未确认');
    retained=true;return result.data;
   },()=>retained);
@@ -175,7 +187,7 @@ export function createLocalControlAgent(deps:Dependencies){
    });
   },
   async login(type:string,input:any){requireType(type);
-   if(!['codex','claude-code','traex','zcode'].includes(type)||!['start','inspect','cancel','callback','dashboard'].includes(input.action))throw new LocalControlError(400,'原生登录操作无效');
+   if(!['codex','claude-code','zcode'].includes(type)||!['start','inspect','cancel','callback','dashboard'].includes(input.action))throw new LocalControlError(400,'原生登录操作无效');
    return withFileLock(join(directory,'local-agent-operation'),async()=>{
     await loginManager();await restoring;
     if(input.action==='start'){

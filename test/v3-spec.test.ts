@@ -61,6 +61,17 @@ function specMd(obj: unknown): string {
 }
 
 describe('v3 spec — extract + validate', () => {
+  it('保留显式交付模式，拒绝未知值，旧 Spec 不补默认字段', () => {
+    for (const deliveryMode of ['feishu-doc', 'archive-only']) {
+      expect(parseSpecFromMarkdown(specMd(validSpecObj({deliveryMode})))).toMatchObject({deliveryMode});
+    }
+    for (const deliveryMode of ['unknown', '', null, false, {}]) {
+      expect(() => validateSpec(validSpecObj({deliveryMode}))).toThrow(SpecValidationError);
+    }
+    const legacy = validateSpec(validSpecObj());
+    expect(Object.hasOwn(legacy, 'deliveryMode')).toBe(false);
+    expect(JSON.stringify(validateSpec(JSON.parse(JSON.stringify(legacy))))).toBe(JSON.stringify(legacy));
+  });
   it('happy path：从 spec.md 抽 json 块并校验成 Spec', () => {
     const spec = parseSpecFromMarkdown(specMd(validSpecObj()));
     expect(spec.runId).toBe('deepsea-001');

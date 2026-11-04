@@ -116,6 +116,23 @@ describe('IdleDetector.releaseStaleProgramStatus', () => {
 });
 
 describe('ClaudeTranscriptTurnEnd', () => {
+  it('does not reopen an authentication-failed turn from trailing API request diagnostics', () => {
+    const end = new ClaudeTranscriptTurnEnd();
+    end.observe([userLine('request')], 1_000);
+    end.observe([
+      { type: 'assistant', isApiErrorMessage: true, error: 'authentication_failed', message: { role: 'assistant', stop_reason: 'stop_sequence', content: [] } } as any,
+      turnDuration('finished'),
+      { type: 'api-request-blob', message: { role: 'user', content: 'copied request' } } as any,
+      { type: 'api-request-blob', message: { role: 'system', content: 'copied context' } } as any,
+    ], 2_000);
+    const quiet = STALE_PROGRAM_STATUS_QUIET_MS;
+    expect(end.endedForMs(2_000 + quiet)).toBe(quiet);
+    expect(staleProgramStatusVerdict({heldWorking:true,programStatusQuietMs:quiet,transcriptEndedForMs:end.endedForMs(2_000 + quiet),backgroundTasksRunning:0})).toBe('check-screen');
+    end.observe([userLine('real-next-request')], 3_000 + quiet);
+    expect(end.endedForMs(4_000 + quiet)).toBeUndefined();
+    end.observe([{ type: 'api-request-blob', message: { role: 'assistant', stop_reason: 'end_turn', content: [] } } as any], 5_000 + quiet);
+    expect(end.endedForMs(6_000 + quiet)).toBeUndefined();
+  });
   it('is closed only while the latest main-thread record ended the turn', () => {
     const end = new ClaudeTranscriptTurnEnd();
     end.observe([userLine('u1'), toolUse('a1')], 1_000);

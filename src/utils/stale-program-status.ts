@@ -22,8 +22,8 @@ export const STALE_PROGRAM_STATUS_CHECK_MS = 15_000;
  *  queue bookkeeping, sidechains) neither opens nor closes the turn. */
 function isMainThreadActivity(ev: TranscriptEvent): boolean {
   if (!ev || (ev as { isSidechain?: unknown }).isSidechain === true) return false;
-  const role = ev.message?.role ?? ev.type;
-  if (role === 'user' || role === 'assistant') return true;
+  // api-request-blob 也嵌有 message.role，但它是请求调试数据，不是新一轮输入。
+  if (ev.type === 'user' || ev.type === 'assistant') return true;
   return ev.type === 'attachment' && ev.attachment?.type === 'queued_command';
 }
 
@@ -34,6 +34,7 @@ export class ClaudeTranscriptTurnEnd {
   /** Fold newly drained records, in transcript order. */
   observe(events: readonly TranscriptEvent[], now: number = Date.now()): void {
     for (const ev of events) {
+      if ((ev as { type?: string }).type?.startsWith('api-request')) continue;
       if (isClaudeTurnTerminalEvent(ev)) {
         this.endedAtMs ??= now;
       } else if (isMainThreadActivity(ev)) {

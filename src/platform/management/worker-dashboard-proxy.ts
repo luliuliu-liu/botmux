@@ -68,3 +68,21 @@ export function createWorkerDashboardProxy(deps:{resolve:(id:string)=>Promise<Pr
     },
   };
 }
+
+/** Worker routes are probed in order (Agent, login, local login, browser) and
+ * each probe costs a control-plane round trip, so every proxied asset paid up
+ * to four. Remember which probe answered for a short window; a failure drops
+ * the entry so a deleted or moved target is re-resolved on the next request. */
+export function createRouteKindResolver(deps:{probes:readonly string[];probe:(kind:string,id:string)=>Promise<boolean>;now?:()=>number;ttlMs?:number}){
+  const now=deps.now||Date.now,ttl=deps.ttlMs??10_000,known=new Map<string,{kind:string;until:number}>();
+  return async(id:string):Promise<string>=>{
+    const cached=known.get(id);
+    if(cached&&cached.until>now())return cached.kind;
+    known.delete(id);
+    for(const kind of deps.probes)if(await deps.probe(kind,id)){
+      if(known.size>2048)known.clear();
+      known.set(id,{kind,until:now()+ttl});return kind;
+    }
+    throw new Error('worker_unavailable');
+  };
+}

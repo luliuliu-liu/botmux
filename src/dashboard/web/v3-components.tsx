@@ -1,4 +1,5 @@
 import {WorkflowOperations} from './v3-operations.js';
+import {WorkflowRetentionPanel} from './workflow-retention.js';
 import type React from 'react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { SectionHeader } from './dashboard-components.js';
@@ -129,6 +130,7 @@ function V3ListPage(): React.JSX.Element {
         </div>
         {headingActions}
       </div>
+      {ui.platformManaged?<WorkflowRetentionPanel/>:null}
       <section className="overview-block v3r-runs-section">
         <div className="v3r-run-list">
           {runs.length ? runs.map((run) => (
@@ -233,6 +235,11 @@ function V3DetailPage(props: { runId: string }): React.JSX.Element {
     }
   }, [cancelling, props.runId, terminal, tr, view]);
 
+  if((view as any)?.archived)return <>
+    <div className="page-heading v3r-detail-heading"><a href="#/workflows" className="btn-link">← 工作流</a><h1>{props.runId}</h1><span>归档只读</span></div>
+    <p role="status">此运行只能读取摘要和归档产物；原始日志未归档，不能恢复原 ID 执行。需要重新运行时，请在原聊天调用方上下文中克隆新草稿并重新审批。</p>
+    <WorkflowOperations runId={props.runId}/>
+  </>;
   return (
     <>
       <div className="page-heading v3r-detail-heading">

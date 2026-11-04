@@ -111,6 +111,19 @@ export function createRemoteExecutionBackend({home,runDir,request=requestPersist
           if(result.ask!==undefined)atomicWriteFileSync(join(req.attemptDir,'ask.json'),JSON.stringify(result.ask),{mode:0o600});
           for(const name of ['stdout','stderr'])if(typeof result[name]==='string')atomicWriteFileSync(join(req.attemptDir,name+'.log'),result[name],{mode:0o600});
           if(typeof result.ptyLog==='string')atomicWriteFileSync(join(req.attemptDir,'pty.log'),result.ptyLog.slice(-4*1024*1024),{mode:0o600});
+          // 先保全已确认的产物，再更新回执。旧 Control Plane 不识别新增事件时，
+          // 只对明确的格式拒绝使用已有事件记录最终快照；网络/租约错误仍然抛出。
+          if(state.runtime&&pooled()){
+            const journal=join(runDir,'journal.ndjson');
+            if(!readJournal(journal).some(e=>e.type==='nodeResourceSettled'&&e.jobId===id)){
+              const receipt={nodeId:req.node.id,attemptId:req.attemptId,jobId:id,runtime:state.runtime};
+              try{appendEvent(journal,{type:'nodeResourceSettled',...receipt});}
+              catch(error){
+                if(!(error instanceof PersistenceRequestError)||error.status!==400||error.code!=='invalid_journal_event')throw error;
+                appendEvent(journal,{type:'nodeResourceAllocated',...receipt});
+              }
+            }
+          }
           return{status:cancelling?'cancelled':result.status,manifestPath:join(req.attemptDir,'manifest.json')};
         }
         // Partitions retain ownership. Do not settle/redispatch a node while a

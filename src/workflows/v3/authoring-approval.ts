@@ -27,7 +27,8 @@ export function requestDagApproval(runId:string,baseDir=defaultBaseDir()){
  });
 }
 export function approvalCard(record:any){
- const summary={specRequirement:record.diff.specRequirement,specNodes:record.diff.specNodes,changedGoalDetails:record.diff.dagNodes.filter((n:any)=>record.diff.changedGoals.includes(n.id)).map((n:any)=>({id:n.id,goal:n.goal})),addedNodes:record.diff.addedNodes,removedSketches:record.diff.removedSketches,changedGoals:record.diff.changedGoals,unmatchedCapabilities:record.diff.unmatchedCapabilities,nodes:record.diff.dagNodes};
+ const deliveryMode=record.diff.deliveryMode??'feishu-doc';
+ const summary={deliveryMode,deliveryDestination:deliveryMode==='archive-only'?'仅归档产物，不创建飞书文档或发送交付回帖':'按发布配置交付飞书文档',specRequirement:record.diff.specRequirement,specNodes:record.diff.specNodes,changedGoalDetails:record.diff.dagNodes.filter((n:any)=>record.diff.changedGoals.includes(n.id)).map((n:any)=>({id:n.id,goal:n.goal})),addedNodes:record.diff.addedNodes,removedSketches:record.diff.removedSketches,changedGoals:record.diff.changedGoals,unmatchedCapabilities:record.diff.unmatchedCapabilities,nodes:record.diff.dagNodes};
  const text=JSON.stringify(summary,null,2);if(text.length>16000)throw Error('approval_diff_too_large_use_smaller_dag');
  return JSON.stringify({config:{wide_screen_mode:true},header:{template:'blue',title:{tag:'plain_text',content:'Workflow DAG 人工审批'}},elements:[{tag:'div',text:{tag:'plain_text',content:'Run: '+record.runId+'\nSpec SHA256: '+record.specSha256+'\nDAG SHA256: '+record.dagSha256}},{tag:'div',text:{tag:'plain_text',content:text}},{tag:'action',actions:['approve','reject'].map(selected=>({tag:'button',text:{tag:'plain_text',content:selected==='approve'?'批准 DAG':'拒绝'},type:selected==='approve'?'primary':'danger',value:{action:'v3_authoring_'+selected,runId:record.runId,nonce:record.nonce}}))}]});
 }

@@ -215,8 +215,8 @@ export function birthRun(opts: {
   let managed=process.env.BOTMUX_PLATFORM_MANAGED==='true';try{managed=managed||JSON.parse(readFileSync(join(homedir(),'.botmux','platform','workflow-storage.json'),'utf8')).baseUrl!==undefined;}catch{}
   if(managed&&opts.chatBinding?.ownerOpenId)state.approvalPolicy={spec:'agent',dag:'user'};
   writeGrillState(runDir, state);
-  const draft={schemaVersion:SPEC_SCHEMA_VERSION,runId,title:opts.goal,requirement:opts.goal,acceptance:'Define measurable completion criteria before finalizing.',nonGoals:[],nodes:[{sketchId:'analyze',goal:opts.goal,input_needs:['Describe the input repository or data and its advertised mounted path.'],expected_outputs:['report.md'],acceptance:'Provide findings with observed evidence.',risk_gate:false,unknowns:['Confirm input location and scope with the requester.']}]};
-  const path=join(runDir,'spec.md');if(!existsSync(path))writeFileSync(path,'# '+opts.goal+'\n\nDraft: refine inputs, goals, acceptance and unknowns before spec-finalize.\n\n```json\n'+JSON.stringify(draft,null,2)+'\n```\n',{flag:'wx',mode:0o600});
+  const draft={schemaVersion:SPEC_SCHEMA_VERSION,runId,title:opts.goal,requirement:opts.goal,acceptance:'Define measurable completion criteria before finalizing.',nonGoals:[],deliveryMode:'feishu-doc',nodes:[{sketchId:'analyze',goal:opts.goal,input_needs:['Describe the input repository or data and its advertised mounted path.'],expected_outputs:['report.md'],acceptance:'Provide findings with observed evidence.',risk_gate:false,unknowns:['Confirm input location and scope with the requester.']}]};
+  const path=join(runDir,'spec.md');if(!existsSync(path))writeFileSync(path,'# '+opts.goal+'\n\nDraft: refine inputs, goals, acceptance and unknowns before spec-finalize.\n用户要求仅归档或不发布时，必须将 deliveryMode 设为 archive-only；feishu-doc 表示允许按发布配置交付文档。不要只在叙事或 nonGoals 中注明。\n\n```json\n'+JSON.stringify(draft,null,2)+'\n```\n',{flag:'wx',mode:0o600});
   return { runId, runDir, state };
 }
 

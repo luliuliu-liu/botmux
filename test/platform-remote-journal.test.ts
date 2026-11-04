@@ -17,12 +17,13 @@ function fixture(){
   writeFileSync(join(platform,'workflow-storage.json'),JSON.stringify({baseUrl:'http://control-plane:8787',token:'registry-private',expiresAt:1e12}));
   writeFileSync(join(directory,'dag.json'),JSON.stringify({runId:'test',nodes:[]}));
   writeFileSync(join(directory,'bots.snapshot.json'),'{}');writeFileSync(join(directory,'grill.state.json'),'{}');
-  const state={events:[] as StoredEvent[],fence:0,holder:null as string|null,unavailable:false,loseAppend:false,loseRegister:false,revoked:false,registration:null as any,calls:[] as PersistenceRequest[]};
+  const state={events:[] as StoredEvent[],fence:0,holder:null as string|null,unavailable:false,loseAppend:false,loseRegister:false,revoked:false,registration:null as any,deliveryPolicySupported:true,calls:[] as PersistenceRequest[]};
   const receipts=new Map<string,any>();
   const request=(input:PersistenceRequest)=>{
     state.calls.push(structuredClone(input));if(state.unavailable)throw new PersistenceRequestError(0,'storage_unreachable');
     const data=input.body as any;
-    if(input.path==='/runs'){
+    if(input.path==='/runs-with-delivery-policy'&&!state.deliveryPolicySupported)throw new PersistenceRequestError(404,'not_found');
+    if(input.path==='/runs'||input.path==='/runs-with-delivery-policy'){
       expect(input.token).toBe('registry-private');
       if(state.registration)expect(data).toEqual(state.registration);else state.registration=structuredClone(data);
       if(state.loseRegister){state.loseRegister=false;throw new PersistenceRequestError(0,'storage_unreachable');}
@@ -48,6 +49,16 @@ function fixture(){
   const install=()=>configureJournalBackend(createPlatformJournalResolver({home,active:true,request,now:()=>1000,readCacheMs:0}));install();
   return {home,platform,directory,path,state,install};
 }
+it('仅归档走策略感知入口，旧服务不支持时不回退且不产生执行授权',()=>{
+ const f=fixture();writeFileSync(join(f.directory,'spec.json'),JSON.stringify({deliveryMode:'archive-only'}));
+ f.state.deliveryPolicySupported=false;
+ expect(()=>readJournal(f.path)).toThrow('workflow_delivery_policy_unsupported');
+ expect(f.state.registration).toBeNull();expect(existsSync(join(f.directory,'journal.api.json'))).toBe(false);
+ expect(f.state.calls.some(c=>c.path==='/runs')).toBe(false);
+ f.state.deliveryPolicySupported=true;expect(readJournal(f.path)).toEqual([]);
+ expect(JSON.parse(f.state.registration.authorizationSnapshot.artifacts['spec.json'])).toMatchObject({deliveryMode:'archive-only'});
+});
+
 it('routes the original native journal through API commits and preserves lazy mutation semantics',()=>{
   const f=fixture();expect(readJournal(f.path)).toEqual([]);expect(f.state.registration).not.toBeNull();
   appendEventDurable(f.path,{type:'runStarted',runId:'test'});

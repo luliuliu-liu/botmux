@@ -7707,6 +7707,7 @@ workflowDaemonMutationRoute('retry', async (reply, params, body, identity) => {
         : outcome.reason === 'loop-node' ? 'loop_node_use_grant'
         : outcome.reason === 'host-effect-uncertain' ? 'host_effect_reconcile_required'
         : outcome.reason === 'revise-workflow-required' ? 'workflow_revision_required'
+        : outcome.reason === 'node-failed' ? 'node_failed_use_clone'
         : 'not_blocked',
     });
   }

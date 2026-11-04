@@ -19,7 +19,7 @@ function deferred<T=void>(){
   const promise=new Promise<T>(res=>{resolve=res;});
   return {promise,resolve};
 }
-function fixture(opts:{loseSubmit?:boolean;malicious?:boolean;terminal?:boolean;request?:PersistenceRequester;skipAcquire?:boolean}={}){
+function fixture(opts:{loseSubmit?:boolean;malicious?:boolean;terminal?:boolean;request?:PersistenceRequester;skipAcquire?:boolean;runtime?:Record<string,unknown>}={}){
   const home=mkdtempSync(join(tmpdir(),'remote-executor-'));homes.push(home);
   const runId='remote-run',runDir=join(home,'.botmux','v3-runs',runId),attemptId='goal#001/attempts/001';
   const attemptDir=join(runDir,attemptId),outputDir=join(attemptDir,'work'),inputPath=join(runDir,'source.txt');
@@ -39,7 +39,7 @@ function fixture(opts:{loseSubmit?:boolean;malicious?:boolean;terminal?:boolean;
     if(input.path.endsWith('/cancel')){cancelled=true;return{closed:true,result:{closed:true,status:'cancelled'}};}
     if(input.method==='POST'&&!input.path.endsWith('/submit'))return{state:'reserved'};
     if(input.path.endsWith('/submit')){
-      const result={closed:true,...(opts.terminal?{session:{sessionId:'remote-session',webPort:43210,viewToken:'read-only-boot-capability'}}:{}),result:{closed:true,status:'ok',manifest,files:[{path:manifest.files[0]!.path,data:data.toString('base64'),sha256}],stdout:'ok',stderr:'',...(opts.terminal?{ptyLog:'\u001b[32mTASK OUTPUT\u001b[0m\n'}:{})}};
+      const result={closed:true,...(opts.runtime?{runtime:opts.runtime}:{}),...(opts.terminal?{session:{sessionId:'remote-session',webPort:43210,viewToken:'read-only-boot-capability'}}:{}),result:{closed:true,status:'ok',manifest,files:[{path:manifest.files[0]!.path,data:data.toString('base64'),sha256}],stdout:'ok',stderr:'',...(opts.terminal?{ptyLog:'\u001b[32mTASK OUTPUT\u001b[0m\n'}:{})}};
       if(lost){lost=false;throw new PersistenceRequestError(0,'storage_unreachable');}
       return result;
     }
@@ -56,6 +56,24 @@ function fixture(opts:{loseSubmit?:boolean;malicious?:boolean;terminal?:boolean;
     env:{BOTMUX_GOAL_PATH:join(attemptDir,'goal.txt')},timeoutMs:5000};
   return{home,runDir,attemptDir,outputDir,calls,backend,req,controller};
 }
+
+it('keeps products and records a compatible receipt when an older journal rejects the new event',async()=>{
+ const f=fixture({runtime:{status:'ok',sessionId:'session',endedAt:'2026-11-03T00:00:00Z'}});
+ const descriptor=join(f.runDir,'journal.api.json');writeFileSync(descriptor,JSON.stringify({...JSON.parse(readFileSync(descriptor,'utf8')),executionMode:'pool'}));
+ const journal=await import('../src/workflows/v3/journal.js'),append=journal.appendEvent;
+ const spy=vi.spyOn(journal,'appendEvent').mockImplementation((path,event)=>{
+  if(event.type==='nodeResourceSettled'){
+   // 即使回执协议不兼容，已验证的远程产物已经落盘。
+   expect(readFileSync(join(f.outputDir,'result.txt'),'utf8')).toBe('remote product');
+   throw new PersistenceRequestError(400,'invalid_journal_event');
+  }
+  return append(path,event);
+ });
+ try{
+  expect((await f.backend.runNode(f.req)).status).toBe('ok');
+  expect(readJournal(join(f.runDir,'journal.ndjson')).find(e=>e.type==='nodeResourceAllocated')).toMatchObject({runtime:{status:'ok',sessionId:'session'}});
+ }finally{spy.mockRestore();}
+});
 
 it('retries the exact durable submission after a lost ACK and materializes validated products idempotently',async()=>{
   const f=fixture({loseSubmit:true});

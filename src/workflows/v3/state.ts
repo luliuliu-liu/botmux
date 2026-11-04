@@ -480,7 +480,7 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
   }
 
   const resources=new Map<string,NonNullable<V3RunSnapshot['resources']>[number]>();
-  for(const e of events){if(e.type==='nodeResourceWaiting')resources.set(e.jobId,{nodeId:e.nodeId,attemptId:e.attemptId,jobId:e.jobId,waitReason:e.waitReason});if(e.type==='nodeResourceAllocated')resources.set(e.jobId,{nodeId:e.nodeId,attemptId:e.attemptId,jobId:e.jobId,runtime:e.runtime});}
+  for(const e of events){if(e.type==='nodeResourceWaiting')resources.set(e.jobId,{nodeId:e.nodeId,attemptId:e.attemptId,jobId:e.jobId,waitReason:e.waitReason});if(e.type==='nodeResourceAllocated'||e.type==='nodeResourceSettled')resources.set(e.jobId,{nodeId:e.nodeId,attemptId:e.attemptId,jobId:e.jobId,runtime:e.runtime});}
   return {
     ...(resources.size?{resources:[...resources.values()]}:{}),
     runStatus,

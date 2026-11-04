@@ -9,13 +9,16 @@ const roots:string[]=[];afterEach(()=>{for(const r of roots.splice(0))rmSync(r,{
 function fixture(createOAuth?:(options:any)=>any){
  const home=mkdtempSync(join(tmpdir(),'local-control-'));roots.push(home);mkdirSync(join(home,'.botmux'));
  const path=join(home,'.botmux','bots.json');writeFileSync(path,JSON.stringify([{larkAppId:'pi-bot',cliId:'pi',larkAppSecret:'private-bot',allowedUsers:['owner'],env:{PROJECT_MODE:'keep',PI_MODEL_API_KEY:'old'}},{larkAppId:'codex-bot',cliId:'codex',larkAppSecret:'other'}]));
- const state={busy:false,failStop:false,failAck:false,failStart:false,networkFailure:false,throwStop:false,rebuildState:{revision:0,status:null} as any,calls:[] as string[],prepared:0,rows:[] as any[],model:null as any};
+ const state={busy:false,failStop:false,failAck:false,failStart:false,networkFailure:false,throwStop:false,rebuildState:{revision:0,status:null} as any,upgradeNoop:false,loseUpgradeResponse:false,calls:[] as string[],prepared:0,rows:[] as any[],model:null as any};
  const agent=createLocalControlAgent({botsJsonPath:path,createOAuth,busy:async()=>state.busy,isStopped:async()=>true,
   stop:async id=>{state.calls.push('stop:'+id);if(state.throwStop&&id==='codex-bot')throw Error('stop unavailable');return {ok:!(state.failStop&&id==='codex-bot')};},start:async id=>{state.calls.push('start:'+id);return {ok:!state.failStart};},
   changeCli:async id=>{state.calls.push('cli:'+id);return {status:200,data:{ok:true}};},
   request:async(p,m,body:any)=>{
    if(p==='/control-workspace'&&!m)return {status:200,data:state.rebuildState};
    if(p==='/control-workspace'&&m==='POST'&&state.networkFailure)throw Error('network lost');
+   if(p==='/control-upgrade'&&!m)return {status:200,data:state.rebuildState};
+   if(p==='/control-upgrade'&&m==='POST'&&state.loseUpgradeResponse){state.loseUpgradeResponse=false;throw Error('network lost');}
+   if(p==='/control-upgrade'&&m==='POST')return state.upgradeNoop?{status:200,data:{queued:false,noop:true}}:{status:202,data:{queued:true}};
    if(m==='POST'&&p.endsWith('/ack')){state.calls.push('ack');return state.failAck?{status:503,data:{}}:{status:200,data:{applied:true}};}
    if(m==='POST'){state.prepared++;return {status:200,data:{revision:1,requestId:body.requestId,modelProfileId:'team',model:state.model??{provider:'team',baseUrl:'https://model.example/v1',modelId:'chosen',modelIds:['chosen'],protocol:'openai-completions',authMethod:'api-key',apiKey:'private-model'}}};}
    return {status:200,data:{agents:state.rows}};
@@ -142,4 +145,18 @@ it('recovers a lost rebuild response from durable state and compensates a confir
 it('surfaces failed compensation instead of silently leaving Bots stopped',async()=>{
  const f=fixture();f.state.failStop=true;f.state.failStart=true;
  await expect(f.agent.workspace(f.input)).rejects.toThrow('恢复未确认');expect(f.state.calls).toContain('start:pi-bot');
+});
+it('does not confuse historical applied state with a new rebuild after losing a noop response',async()=>{
+ const f=fixture();f.state.loseUpgradeResponse=true;f.state.upgradeNoop=true;
+ f.state.rebuildState={status:'applied',currentImage:'sha256:same'};
+ expect(await f.agent.upgrade({image:'sha256:same',confirmRestart:true})).toMatchObject({noop:true,recovered:true});
+ expect(f.state.calls).toEqual(['stop:pi-bot','stop:codex-bot','start:pi-bot','start:codex-bot']);
+});
+it('resumes Bots when Control already runs the requested image, and keeps them stopped for a real rebuild',async()=>{
+ const f=fixture();f.state.upgradeNoop=true;
+ expect(await f.agent.upgrade({image:'sha256:same',confirmRestart:true})).toMatchObject({noop:true});
+ expect(f.state.calls).toEqual(['stop:pi-bot','stop:codex-bot','start:pi-bot','start:codex-bot']);
+ f.state.calls=[];f.state.upgradeNoop=false;
+ expect(await f.agent.upgrade({image:'sha256:new',confirmRestart:true})).toMatchObject({queued:true});
+ expect(f.state.calls).toEqual(['stop:pi-bot','stop:codex-bot']);
 });

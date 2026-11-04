@@ -1,0 +1,14 @@
+/** 私有归档协议。原日志/凭据不在归档白名单，归档不会给予执行权限。 */
+export type ArchiveLifecycle='live'|'archiving'|'archive_verified'|'compacted';
+export type ArchiveArtifact={key:string;nodeId:string;attemptId:string;path:string;bytes:number;sha256:string;kind:string;blob:string};
+export type ArchivedJob={jobId:string;attemptId:string;state:string;status:string|null;runtime:{displayName?:string;agentType?:string;modelId?:string;slot?:number;queueMs?:number;startedAt?:string|null;endedAt?:string|null}|null};
+export type ArchiveSummary={runId:string;runStatus:string;title:string;createdAt:string;terminalAt:string|null;deliveryMode:'archive-only'|'feishu-doc';reportDelivery:{status:string;documentUrl?:string|null};jobs:ArchivedJob[];readOnly:true;logsArchived:false};
+export type WorkflowArchiveManifest={schema:'acp-workflow-archive-v1';runId:string;owner:{tenant:string;controlId:string};createdAt:string;summary:ArchiveSummary;spec:unknown|null;dag:unknown;approvals:unknown[];lineage:unknown|null;chatBinding?:{larkAppId:string;chatId:string;ownerOpenId?:string;rootMessageId?:string}|null;files:ArchiveArtifact[];sourceFingerprint:string;envelopeHash:string;totalBytes:number};
+export type RetentionArchiveRow={runId:string;revision:number;state:ArchiveLifecycle;pinned:boolean;archiveHash:string|null;archiveVerifiedAt:string|null;archiveBytes:number;lastError:string|null;summary:ArchiveSummary|null;files:ArchiveArtifact[];compactionReasons:string[];canCompact:boolean;recommendedArchiveUntil:string|null};
+export type RetentionArchives={schema:'acp-retention-archives-v1';automaticCleanup:false;rows:RetentionArchiveRow[]};
+export const ARCHIVE_MAX_BYTES=64*1024*1024;
+export const ARCHIVE_BATCH_MAX_BYTES=256*1024*1024;
+export const ARCHIVE_MAX_FILES=1000;
+export const ARCHIVE_MAX_JOBS=500;
+export const COMPACT_MIN_DAYS=30;
+export const RETENTION_BATCH_LIMIT=20;

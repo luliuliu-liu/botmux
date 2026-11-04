@@ -7,6 +7,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { appendEvent } from '../src/workflows/v3/journal.js';
 import { handleV3RunsApi } from '../src/dashboard/v3-runs-api.js';
 import type { V3RunsApiDeps } from '../src/dashboard/v3-runs-api.js';
+import {ArchiveReader} from '../src/platform/workflow/archive-reader.js';
 
 /** Minimal ServerResponse mock: a real Writable (so createReadStream.pipe
  *  works) with writeHead/end capture. */
@@ -315,6 +316,19 @@ describe('v3-runs-api', () => {
       expect(h2).toBe(false);
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
+});
+
+describe('v3 runs API — compacted archive guard',()=>{
+ const archiveRow={runId:'archived-run',revision:7,state:'compacted',pinned:false,archiveHash:'a'.repeat(64),archiveVerifiedAt:'2026-10-01T00:00:00Z',archiveBytes:5,lastError:null,summary:{runId:'archived-run',runStatus:'succeeded',title:'Archived',createdAt:'2026-09-01T00:00:00Z',terminalAt:'2026-09-02T00:00:00Z',deliveryMode:'archive-only',reportDelivery:{status:'not_applicable'},jobs:[],readOnly:true,logsArchived:false},files:[{key:'b'.repeat(64),nodeId:'report',attemptId:'report/1',path:'report.md',bytes:5,sha256:'c'.repeat(64),kind:'file',blob:'blob'}],compactionReasons:[],canCompact:false,recommendedArchiveUntil:null};
+ const archives={schema:'acp-retention-archives-v1',automaticCleanup:false,rows:[archiveRow]};
+ function archivedDeps(base:string,request=vi.fn(async()=>({status:200,data:archives}))){return {...apiDeps(base),archiveReader:new ArchiveReader({runsDir:base,active:true,request,rawRequest:async()=>new Response('hello')})};}
+ it('uses Gateway archive state before stale local detail, blocks mutation and never serves raw PTY',async()=>{
+  const base=mkdtempSync(join(tmpdir(),'v3-archive-'));try{const dir=buildRun(base,'archived-run'),attempt=join(dir,'research/attempts/001');mkdirSync(attempt,{recursive:true});writeFileSync(join(attempt,'pty.log'),'STALE LOCAL SECRET');
+   const deps=archivedDeps(base);for(const [path,status,error] of [['/api/v3/runs/archived-run',200,null],['/api/v3/runs/archived-run/nodes/research/pty-log',410,'not_archived'],['/api/v3/runs/archived-run/cancel',410,'archived_read_only']] as const){const call=path.endsWith('/cancel')?post(path):get(path),out=mockRes();await handleV3RunsApi(call.req,out.res,call.url,deps,true);expect(out.status).toBe(status);if(error)expect(out.json().error).toBe(error);else expect(out.json()).toMatchObject({archived:true,readOnly:true,nodes:[]});}
+   const artifact=mockRes(),call=get('/api/v3/runs/archived-run/artifacts/'+'b'.repeat(64));await handleV3RunsApi(call.req,artifact.res,call.url,deps,true);expect(artifact.status).toBe(200);expect(artifact.body()).toBe('hello');
+  }finally{rmSync(base,{recursive:true,force:true});}
+ });
+ it('does not treat Gateway failure as archive absence and fall back to local cache',async()=>{const base=mkdtempSync(join(tmpdir(),'v3-archive-fail-'));try{buildRun(base,'archived-run');const deps=archivedDeps(base,vi.fn(async()=>{throw Error('offline');}));const out=mockRes(),call=get('/api/v3/runs/archived-run');await handleV3RunsApi(call.req,out.res,call.url,deps,true);expect(out.status).toBe(503);expect(out.json().error).toBe('archive_gateway_unavailable');}finally{rmSync(base,{recursive:true,force:true});}});
 });
 
 describe('v3 runs API — remote journal reads never block the event loop', () => {

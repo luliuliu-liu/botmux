@@ -7,6 +7,20 @@ import {hostSpecFinalize,hostApproveSpec,authorizeAdHocRun} from '../src/workflo
 import {requestDagApproval,verifyDagApproval,handleAuthoringApproval,approvalCard} from '../src/workflows/v3/authoring-approval.js';
 const dirs:string[]=[];afterEach(()=>{vi.unstubAllEnvs();for(const d of dirs.splice(0))rmSync(d,{recursive:true,force:true});});
 function fixture(){vi.stubEnv('BOTMUX_PLATFORM_MANAGED','true');const baseDir=mkdtempSync(join(tmpdir(),'approval-ops-'));dirs.push(baseDir);const f=birthRun({baseDir,runId:'approval-run',goal:'Analysis',chatBinding:{larkAppId:'cli_fixture',chatId:'chat',ownerOpenId:'ou_user',rootMessageId:'message'}});hostSpecFinalize(f.runDir);hostApproveSpec(f.runDir);transition(f.runDir,'architect_running');const path=join(f.runDir,'dag.json');writeFileSync(path,JSON.stringify({schemaVersion:2,runId:f.runId,nodes:[{id:'analyze',type:'goal',goal:'Analyze',depends:[],inputs:[]}]}));transition(f.runDir,'dag_ready',{dagPath:path});return {...f,baseDir};}
+it('交付模式进入审批内容，审批后改为发布必须重新确认',async()=>{
+ const f=fixture(),path=join(f.runDir,'spec.json');
+ writeFileSync(path,JSON.stringify({...JSON.parse(readFileSync(path,'utf8')),deliveryMode:'archive-only'}));
+ const r=requestDagApproval(f.runId,f.baseDir);
+ expect(JSON.parse(readFileSync(path,'utf8')).deliveryMode).toBe('archive-only');
+ expect(r.diff.deliveryMode).toBe('archive-only');
+ expect(approvalCard(r)).toContain('archive-only');
+ writeFileSync(join(f.runDir,'dag.approval.json'),JSON.stringify({...r,status:'approved',byKind:'user',actor:'ou_user',messageId:'card'}));
+ expect(()=>verifyDagApproval(f.runDir)).not.toThrow();
+ writeFileSync(path,JSON.stringify({...JSON.parse(readFileSync(path,'utf8')),deliveryMode:'feishu-doc'}));
+ expect(()=>verifyDagApproval(f.runDir)).toThrow('dag_human_approval_required');
+ expect(requestDagApproval(f.runId,f.baseDir).specSha256).not.toBe(r.specSha256);
+});
+
 it('requires authenticated initiating-user evidence and rejects stale hashes or wrong card',async()=>{
  const f=fixture(),r=requestDagApproval(f.runId,f.baseDir);expect(requestDagApproval(f.runId,f.baseDir).nonce).toBe(r.nonce);expect(approvalCard(r)).toContain(r.dagSha256);
  expect(()=>verifyDagApproval(f.runDir)).toThrow('dag_human_approval_required');expect(()=>authorizeAdHocRun(f.runDir,[])).toThrow('dag_human_approval_required');

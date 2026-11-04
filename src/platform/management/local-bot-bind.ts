@@ -1,3 +1,4 @@
+import {isPlatformCli} from './supported-clis.js';
 /** Database desired state -> one native Bot. Never copies model/OAuth state. */
 import {createHash,randomUUID} from 'node:crypto';
 import {join,dirname} from 'node:path';
@@ -38,7 +39,7 @@ export function createLocalBotBinder(deps:{botsJsonPath:string;request:(path:str
  };
  return {
   async bind(id:string,input:any){
-   if(input.confirmRestart!==true||!['pi','codex','claude-code','zcode','traex'].includes(input.cliId))throw new LocalBindError(400,'请确认 CLI 并允许同步、启动此 Bot');
+   if(input.confirmRestart!==true||!isPlatformCli(input.cliId))throw new LocalBindError(400,'请确认 CLI 并允许同步、启动此 Bot');
    return withLocalInventoryLock(()=>withFileLock(operation,async()=>{
     await deps.assertNoLogin?.();
     const previous=roster().find(b=>b.larkAppId===id);

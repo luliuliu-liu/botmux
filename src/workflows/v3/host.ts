@@ -137,11 +137,15 @@ export function assertWorkflowHostCaller(
   current: RunChatBinding | undefined,
 ): void {
   const state = mustRead(runDir);
-  const target = state.chatBinding;
+  assertWorkflowPrincipal(state.runId,state.chatBinding,current);
+}
+
+/** live 与归档克隆共用同一调用方边界；归档不能省略原 chat owner 的认证。 */
+export function assertWorkflowPrincipal(runId:string,target:RunChatBinding|undefined,current:RunChatBinding|undefined):void {
   if (!target) {
     if (current?.ownerOpenId) {
       throw new HostGuardError(
-        `run ${state.runId} 是未绑定的 standalone/dev run，不能从 botmux chat turn 修改`,
+        `run ${runId} 是未绑定的 standalone/dev run，不能从 botmux chat turn 修改`,
       );
     }
     return;
@@ -150,13 +154,13 @@ export function assertWorkflowHostCaller(
   if (!target.ownerOpenId) {
     if (current?.ownerOpenId) {
       throw new HostGuardError(
-        `run ${state.runId} 的 chatBinding 缺少已认证 owner，不能从 botmux chat turn 修改`,
+        `run ${runId} 的 chatBinding 缺少已认证 owner，不能从 botmux chat turn 修改`,
       );
     }
     return;
   }
   if (!current?.ownerOpenId) {
-    throw new HostGuardError(`run ${state.runId} 绑定了 chat caller，当前命令缺少本轮调用者认证`);
+    throw new HostGuardError(`run ${runId} 绑定了 chat caller，当前命令缺少本轮调用者认证`);
   }
   if (
     current.ownerOpenId !== target.ownerOpenId
@@ -164,7 +168,7 @@ export function assertWorkflowHostCaller(
     || current.chatId !== target.chatId
   ) {
     throw new HostGuardError(
-      `当前 caller/chat/bot 与 run ${state.runId} 的 grill.chatBinding 不匹配`,
+      `当前 caller/chat/bot 与 run ${runId} 的 grill.chatBinding 不匹配`,
     );
   }
 }

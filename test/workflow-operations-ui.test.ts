@@ -17,6 +17,16 @@ it('clears prior run data on HTTP failure and recovers operations and artifacts 
  failFiles=false;await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});expect(JSON.stringify(component!.toJSON())).toContain('/run-b/artifacts');
  await act(async()=>component!.unmount());
 });
+it('完整展示执行行和产物，表格在独立可滚动区且只发读请求',async()=>{
+ const fetcher=vi.fn(async(url:string)=>({ok:true,json:async()=>url.endsWith('/artifacts')?{files:[{key:'report',nodeId:'summarize',path:'report.md',bytes:100,url:'/download/report'}]}:{runStatus:'succeeded',reportDelivery:{status:'awaiting_configuration'},jobs:[{jobId:'a',attemptId:'a/001',state:'closed',runtime:{displayName:'First',agentType:'pi',modelId:'model',slot:0,queueMs:20}},{jobId:'b',attemptId:'b/001',state:'closed',runtime:{displayName:'Second',agentType:'codex',modelId:'model',slot:1,queueMs:30}}]}}));
+ vi.stubGlobal('fetch',fetcher);let component:renderer.ReactTestRenderer;
+ await act(async()=>{component=renderer.create(React.createElement(WorkflowOperations,{runId:'run'}));});
+ const root=component!.root,table=root.findByProps({'aria-label':'执行与交付任务记录'});
+ expect(table.findByType('tbody').findAllByType('tr')).toHaveLength(2);
+ expect(table.parent?.props.tabIndex).toBe(0);expect(root.findAllByType('a').some(a=>a.props.href==='/download/report')).toBe(true);
+ expect(fetcher.mock.calls.map(([url])=>url)).toEqual(expect.arrayContaining(['/api/v3/runs/run/operations','/api/v3/runs/run/artifacts']));
+ await act(async()=>component!.unmount());
+});
 it('ignores responses from a previously selected run',async()=>{
  let release:(value:any)=>void=()=>{};
  vi.stubGlobal('fetch',vi.fn((url:string)=>url.includes('/run-a/')?new Promise(resolve=>{release=resolve;}):Promise.resolve({ok:true,json:async()=>url.endsWith('/artifacts')?{files:[]}:{runStatus:'running',jobs:[]}})));

@@ -7,6 +7,7 @@
  * place so host commands do not hand-roll goal-mode env/layout details.
  */
 
+import { randomUUID } from 'node:crypto';
 import {currentPoolCatalog} from '../../platform/workflow/agent-pool-client.js';
 import {conventionPrompt} from '../../platform/workflow/conventions.js';
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
@@ -78,6 +79,7 @@ export function buildArchitectGoal(specPath: string, specJsonPath: string,poolCa
     `- Read the canonical spec first; it must use schemaVersion ${SPEC_SCHEMA_VERSION}. Use the narrative spec only for context.`,
     `- Each node sketch has these fields: ${sketchFields}.`,
     '- Compile the spec into a valid botmux v3 DAG JSON.',
+    '- 遵守 Spec.deliveryMode。archive-only 只生成归档文件，任何节点都不得调用文档发布、读者授权或交付回帖工具；report.md 文件名不代表发布授权。不要自行扩大交付范围。',
     '- Resolve the exact output directory from `$BOTMUX_GOAL_OUTPUT_DIR`; do not infer it from `$BOTMUX_GOAL_MANIFEST_PATH`, the attempt directory, or previous runs.',
     '- Write exactly two primary files under `$BOTMUX_GOAL_OUTPUT_DIR`:',
     '  1. `$BOTMUX_GOAL_OUTPUT_DIR/dag.json`',
@@ -176,6 +178,9 @@ export async function runArchitect(input: RunArchitectInput): Promise<RunArchite
   const req: RunNodeRequest = {
     runId: input.runId,
     attemptId: ARCHITECT_ATTEMPT_ID,
+    // The attempt dir is wiped and reused on every (re-)architect; a retried
+    // Architect must not collide with the previous run's Claude session.
+    sessionKey: randomUUID(),
     node: {
       id: ARCHITECT_NODE_ID,
       type: 'goal',

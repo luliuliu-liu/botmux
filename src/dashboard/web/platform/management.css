@@ -1,3 +1,14 @@
+.workflow-retention { margin-bottom: 20px; }
+.workflow-retention-policy { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 16px 0; }
+.workflow-retention-policy label { display: grid; gap: 6px; font-size: 13px; }
+.workflow-retention-policy input { width: 100%; min-width: 0; padding: 8px; box-sizing: border-box; color: var(--fg); background: var(--surface); border: 1px solid var(--border-soft); border-radius: var(--radius-md); }
+.workflow-retention-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.workflow-retention-table { overflow-x: auto; border: 1px solid var(--border-soft); border-radius: var(--radius-md); }
+.workflow-retention-table table { width: 100%; min-width: 850px; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.workflow-retention-table th,.workflow-retention-table td { padding: 10px 12px; border-bottom: 1px solid var(--border-soft); text-align: left; vertical-align: top; }
+.workflow-retention-table th { color: var(--muted); font-weight: 500; }
+.workflow-retention-table code { display: block; max-width: 240px; overflow-wrap: anywhere; white-space: normal; word-break: break-word; text-transform: none; }
+.workflow-retention-table ul { margin: 0; padding-left: 18px; min-width: 190px; }
 .pm-page .pm-table-wrap { overflow-x: auto; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); }
 .pm-page table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .pm-page th,.pm-page td { text-align: left; padding: 13px 15px; border-bottom: 1px solid var(--border-soft); vertical-align: top; overflow-wrap: anywhere; }
@@ -132,6 +143,11 @@
 .pm-dialog label { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; font-size: 13px; }
 .pm-dialog input,.pm-dialog select,.pm-dialog textarea { width: 100%; min-width: 0; box-sizing: border-box; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--fg); font: inherit; }
 .pm-dialog textarea { resize: vertical; line-height: 1.6; }
+/* Platform dialogs keep a light surface in every theme; the global dark-theme
+   field rule is more specific than .pm-dialog and darkened only textareas. */
+:root[data-theme="dark"] .pm-dialog :is(input:not([type=checkbox],[type=radio]),select,textarea) { background: var(--surface); border-color: var(--border); }
+/* Fields focused or scrolled into view stay above the sticky action bar. */
+.pm-dialog { scroll-padding-bottom: 80px; }
 .pm-table-wrap td details { margin-top: 6px; max-width: 320px; }
 .pm-table-wrap td details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .pm-table-wrap td details[open] { max-height: 220px; overflow-y: auto; }
@@ -351,7 +367,13 @@
 .pm-action-popover { max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow-y: auto; }
 .pm-action-popover button { height: auto; min-height: 38px; overflow-wrap: anywhere; }
 
-.pm-table-wrap > table > :is(thead,tbody) > tr > :is(th,td):last-child { position: sticky; right: 0; z-index: 1; background: var(--surface); }
+/* The global table rule clips with overflow:hidden for its rounded corners,
+   which makes the table itself the sticky scroll box and lets the actions
+   column scroll out of the narrow wrapper. Clip at the wrapper instead. */
+.pm-table-wrap { border-radius: var(--radius); }
+.pm-table-wrap > table { overflow: visible; }
+.pm-table-wrap > table > :is(thead,tbody) > tr > :is(th,td):last-child { position: sticky; right: 0; z-index: 1; background: var(--surface); box-shadow: -1px 0 0 var(--border-soft); }
+.pm-management .pm-table-wrap > table > tbody > tr:hover > td:last-child { background: #fcfcff; }
 .pm-table-wrap > table > thead > tr > th:last-child { background: #f7f8fb; }
 
 .pm-config-help { display: inline-flex; align-items: center; vertical-align: middle; margin: 0 6px; }

@@ -9,6 +9,10 @@ import {readGrillState,defaultBaseDir,birthRun} from './grill-state.js';
 import {readAndValidateManifest} from './manifest.js';
 import {requestPersistenceSync,PersistenceRequestError} from '../../platform/workflow/sync-request.js';
 import {isValidRunId} from './ops-projection.js';
+import {parseWorkflowDeliveryMode} from './delivery-policy.js';
+import {archivedManifestForClone,archivedArtifactBytes} from '../../platform/workflow/archive-clone.js';
+import {validateSpec} from './spec.js';
+import type {WorkflowArchiveManifest} from '../../platform/workflow/archive-contract.js';
 export function operationsRunDir(runId:string,baseDir=defaultBaseDir()){
  if(!isValidRunId(runId))throw Error('invalid_run_id');const root=resolve(baseDir),path=join(root,runId);
  safeFile(root,path,true);return path;
@@ -31,6 +35,7 @@ export function operationEvents(runDir:string):StoredEvent[]{
 
 export const NEXT_ACTION:Record<string,string>={grilling:'Edit spec.md, then workflow spec-finalize',spec_ready:'workflow approve-spec (agent confirmation)',spec_approved:'workflow architect',architect_running:'Wait for architect or recover architect',dag_ready:'workflow diff, then workflow approve-dag (request human approval)',dag_approved:'workflow start',blocked:'Review error, then workflow retry or workflow clone',failed:'Review logs, then workflow clone',cancelled:'workflow clone',succeeded:'workflow artifacts'};
 export function workflowStatus(runId:string,baseDir=defaultBaseDir()){
+ const archive=archivedManifestForClone(runId);if(archive)return {runId,runStatus:archive.summary.runStatus,phase:'archived',nextAction:'clone 新ID并重新审批',blockedNodeId:null,resources:[],nodes:[],jobs:archive.summary.jobs,reportDelivery:archive.summary.reportDelivery,authoringApprovals:archive.approvals,lineage:archive.lineage,eventCount:null,readOnly:true,logsArchived:false};
  const runDir=operationsRunDir(runId,baseDir),grill=readGrillState(runDir),events=operationEvents(runDir);
  const started=events.some(e=>e.type==='runStarted'),snap=started?materialize(events):undefined;
  let remote:any={jobs:[],reportDelivery:{status:'not_applicable'}};const descriptor=join(runDir,'journal.api.json');
@@ -54,9 +59,10 @@ export function workflowStatus(runId:string,baseDir=defaultBaseDir()){
 export function workflowDiff(runId:string,baseDir=defaultBaseDir()){
  const dir=operationsRunDir(runId,baseDir);safeFile(dir,join(dir,'spec.json'));safeFile(dir,join(dir,'dag.json'));const spec=json(join(dir,'spec.json')),dag=json(join(dir,'dag.json'));
  const sketches=spec.nodes??[];const flatten=(nodes:any[],parent=''):any[]=>nodes.flatMap(n=>[{...n,id:parent+n.id},...(n.type==='loop'?flatten(n.body?.nodes??[],parent+n.id+'/'):[])]);const goals=flatten(dag.nodes??[]).map((n:any)=>({id:n.id,type:n.type,goal:n.goal,depends:n.depends??[],inputs:n.inputs??[],outputs:n.outputs??{},humanGate:n.humanGate??null,requiredMountNames:n.agentSelection?.requiredMountNames??[],requiredPaths:n.agentSelection?.requiredPaths??[],candidateIds:n.agentSelection?.candidateIds??[]}));
- return {runId,specRequirement:spec.requirement,specNodes:sketches,dagNodes:goals,addedNodes:goals.filter((n:any)=>!sketches.some((s:any)=>s.sketchId===n.id)).map((n:any)=>n.id),removedSketches:sketches.filter((s:any)=>!goals.some((n:any)=>n.id===s.sketchId)).map((s:any)=>s.sketchId),changedGoals:goals.filter((n:any)=>sketches.some((s:any)=>s.sketchId===n.id&&s.goal!==n.goal)).map((n:any)=>n.id),unmatchedCapabilities:goals.filter((n:any)=>n.type==='goal'&&n.candidateIds.length===0).map((n:any)=>n.id)};
+ return {runId,deliveryMode:parseWorkflowDeliveryMode(spec.deliveryMode)??'feishu-doc',specRequirement:spec.requirement,specNodes:sketches,dagNodes:goals,addedNodes:goals.filter((n:any)=>!sketches.some((s:any)=>s.sketchId===n.id)).map((n:any)=>n.id),removedSketches:sketches.filter((s:any)=>!goals.some((n:any)=>n.id===s.sketchId)).map((s:any)=>s.sketchId),changedGoals:goals.filter((n:any)=>sketches.some((s:any)=>s.sketchId===n.id&&s.goal!==n.goal)).map((n:any)=>n.id),unmatchedCapabilities:goals.filter((n:any)=>n.type==='goal'&&n.candidateIds.length===0).map((n:any)=>n.id)};
 }
 export async function workflowArtifacts(runId:string,baseDir=defaultBaseDir()){
+ const archive=archivedManifestForClone(runId);if(archive)return archive.files.map(({blob,...file})=>({...file,sourcePath:'',archiveRunId:runId}));
  const dir=operationsRunDir(runId,baseDir),events=operationEvents(dir),items:any[]=[];
  for(const e of events){if(e.type!=='nodeSucceeded')continue;
   const manifest=resolve(dir,e.manifestPath),work=join(manifest.slice(0,manifest.lastIndexOf(sep)),'work');safeFile(dir,manifest);safeFile(dir,work,true);
@@ -70,7 +76,7 @@ export async function workflowArtifacts(runId:string,baseDir=defaultBaseDir()){
  }
  return items;
 }
-export function publicArtifacts(items:Awaited<ReturnType<typeof workflowArtifacts>>){return items.map(({sourcePath,...v})=>v);}
+export function publicArtifacts(items:Awaited<ReturnType<typeof workflowArtifacts>>){return items.map(({sourcePath,archiveRunId,...v})=>v);}
 export async function exportWorkflowArtifacts(runId:string,destination:string,baseDir=defaultBaseDir()){
  const items=await workflowArtifacts(runId,baseDir),requested=resolve(destination),parent=dirname(requested);mkdirSync(parent,{recursive:true});const target=join(realpathSync(parent),basename(requested)),dir=realpathSync(operationsRunDir(runId,baseDir));
  if(target===dir||target.startsWith(dir+sep))throw Error('export_destination_inside_run');
@@ -81,13 +87,24 @@ export async function exportWorkflowArtifacts(runId:string,destination:string,ba
  save(join(target,'manifest.json'),JSON.stringify({schema:'botmux-deliverables-v1',runId,files:publicArtifacts(exported)},null,2)+'\n');return publicArtifacts(exported);
 }
 export function workflowLogs(runId:string,node:string,{baseDir=defaultBaseDir(),stream='stdout',tail=80,attempt}:{baseDir?:string;stream?:string;tail?:number;attempt?:string}={}){
+ if(archivedManifestForClone(runId))throw Error('not_archived: 原始日志未包含在归档中');
  if(!['stdout','stderr'].includes(stream)||!Number.isSafeInteger(tail)||tail<1||tail>10000)throw Error('invalid_log_options');
  const dir=operationsRunDir(runId,baseDir),events=operationEvents(dir);
  const event=[...events].reverse().find(e=>e.type==='nodeDispatched'&&e.nodeId===node&&(!attempt||e.attemptId===attempt));
  if(!event||event.type!=='nodeDispatched')throw Error('node_attempt_not_found');
  const path=resolve(dir,event.attemptId,stream+'.log');safeFile(dir,path);return readFileSync(path,'utf8').split('\n').slice(-tail).join('\n');
 }
+export async function cloneArchivedWorkflow(archive:WorkflowArchiveManifest,{baseDir=defaultBaseDir(),goal}:{baseDir?:string;goal?:string}={}){
+ const {assertWorkflowPrincipal,chatBindingFromEnv}=await import('./host.js');const current=chatBindingFromEnv();
+ if(archive.chatBinding===undefined)throw Error('archive_caller_binding_unknown');
+ assertWorkflowPrincipal(archive.runId,archive.chatBinding??undefined,current);
+ const spec=validateSpec(archive.spec);const born=birthRun({baseDir,goal:goal??spec.title,chatBinding:current??archive.chatBinding??undefined});
+ writeFileSync(join(born.runDir,'spec.md'),'# 归档运行的新草稿\n\n```json\n'+JSON.stringify({...spec,runId:born.runId},null,2)+'\n```\n',{mode:0o600});
+ const lineage={schema:'botmux-run-lineage-v1',parentRunId:archive.runId,supersedes:archive.runId,sourceDagSha256:createHash('sha256').update(JSON.stringify(archive.dag)).digest('hex'),sourceArchive:true};
+ writeFileSync(join(born.runDir,'lineage.json'),JSON.stringify(lineage,null,2)+'\n',{flag:'wx',mode:0o600});return {...born,lineage};
+}
 export async function cloneWorkflow(runId:string,{baseDir=defaultBaseDir(),goal}:{baseDir?:string;goal?:string}={}){
+ const archive=archivedManifestForClone(runId);if(archive)return cloneArchivedWorkflow(archive,{baseDir,goal});
  const {assertWorkflowHostCaller,chatBindingFromEnv}=await import('./host.js');const source=operationsRunDir(runId,baseDir);assertWorkflowHostCaller(source,chatBindingFromEnv());const old=readGrillState(source),born=birthRun({baseDir,goal:goal??old?.goal??'Workflow revision',chatBinding:old?.chatBinding});
  if(existsSync(join(source,'dag.json')))safeFile(source,join(source,'dag.json'));const origin=join(source,'spec.md');if(existsSync(origin)){safeFile(source,origin);writeFileSync(join(born.runDir,'spec.md'),readFileSync(origin),{mode:0o600});}
  const lineage={schema:'botmux-run-lineage-v1',parentRunId:runId,supersedes:runId,sourceDagSha256:existsSync(join(source,'dag.json'))?createHash('sha256').update(readFileSync(join(source,'dag.json'))).digest('hex'):null};
@@ -106,4 +123,4 @@ export function workflowPreflight(runId:string,baseDir=defaultBaseDir()){
  return {runId,ok:checks.every((c:any)=>c.ok),checks};
 }
 
-export function artifactBytes(item:{sourcePath:string;sha256:string}){if(lstatSync(item.sourcePath).isSymbolicLink())throw Error('unsafe_artifact');const data=readFileSync(item.sourcePath);if(createHash('sha256').update(data).digest('hex')!==item.sha256)throw Error('artifact_changed');return data;}
+export function artifactBytes(item:{sourcePath:string;sha256:string;archiveRunId?:string;key?:string}){if(item.archiveRunId&&item.key){const result=archivedArtifactBytes(item.archiveRunId,item.key),bytes=Buffer.from(result.data,'base64');if(bytes.toString('base64')!==result.data||bytes.length!==result.bytes||createHash('sha256').update(bytes).digest('hex')!==item.sha256)throw Error('archive_artifact_corrupt');return bytes;}if(lstatSync(item.sourcePath).isSymbolicLink())throw Error('unsafe_artifact');const data=readFileSync(item.sourcePath);if(createHash('sha256').update(data).digest('hex')!==item.sha256)throw Error('artifact_changed');return data;}

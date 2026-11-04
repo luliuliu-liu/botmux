@@ -1,5 +1,6 @@
 import {createHash,randomUUID} from 'node:crypto';
 import {conventionDigest} from './conventions.js';
+import {deliveryModeFromArtifacts,WORKFLOW_POLICY_REGISTRATION_PATH} from '../../workflows/v3/delivery-policy.js';
 import {existsSync,readFileSync,lstatSync,mkdirSync} from 'node:fs';
 import {basename,dirname,join,resolve} from 'node:path';
 import {withFileLockSync} from '../../utils/file-lock.js';
@@ -90,8 +91,15 @@ export function createPlatformJournalResolver(deps:{home:string;active:boolean;r
           const frozenHash=hash(Object.fromEntries(Object.entries(files).filter(([name])=>name!=='grill.state.json'))),pending=existsSync(pendingPath)?read(pendingPath):null;
           if(pending&&pending.frozenHash!==frozenHash)throw new Error('pending_workflow_registration_conflict');
           const registration=pending?.registration||fresh,registrationHash=hash(registration);
+          const archiveOnly=deliveryModeFromArtifacts(registration.authorizationSnapshot.artifacts)==='archive-only';
           const registry=identity();save(pendingPath,{registrationHash,frozenHash,registration});
-          const result=request({...registry,path:'/runs',method:'POST',body:registration});
+          let result;
+          try{result=request({...registry,path:archiveOnly?WORKFLOW_POLICY_REGISTRATION_PATH:'/runs',method:'POST',body:registration});}
+          catch(error){
+            // 旧服务不能通过忽略未知字段，把仅归档请求变成默认发布。
+            if(archiveOnly&&error instanceof PersistenceRequestError&&[404,405].includes(error.status))throw new PersistenceRequestError(409,'workflow_delivery_policy_unsupported');
+            throw error;
+          }
           descriptor={schema:'botmux-journal-api-v1',runId:id,baseUrl:registry.baseUrl,token:result.token,expiresAt:result.expiresAt,registrationHash,executionMode:registration.workspaceBinding.executionMode,...((registration.workspaceBinding as any).conventionsVersion===1?{conventionsVersion:1,...((registration.workspaceBinding as any).conventionsDigest?{conventionsDigest:(registration.workspaceBinding as any).conventionsDigest}:{})}: {})};
           save(descriptorPath,descriptor);return descriptor;
         });

@@ -7215,6 +7215,8 @@ async function cmdWorkflowRetry(runId: string | undefined, rest: string[]): Prom
   if (!response.ok) {
     if (response.bodyRaw.includes('loop_node_use_grant')) {
       console.error(`❌ 该受阻的是一个 loop（轮数耗尽），不是节点 attempt——用 \`botmux workflow grant ${runId}\` 追加一轮。`);
+    } else if (response.bodyRaw.includes('node_failed_use_clone')) {
+      console.error(`❌ 节点已失败（failed 不在原 DAG 内重试，只有 blocked 可以 retry）——用 \`botmux workflow clone ${runId}\` 新建草稿并重新审批后启动。`);
     } else {
       console.error(`❌ retry 失败 (HTTP ${response.status}): ${response.bodyRaw}`);
     }

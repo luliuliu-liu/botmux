@@ -54,6 +54,35 @@ const formValues=(values:Record<string,string>)=>vi.stubGlobal('FormData',class{
 const poolValues={displayName:'Edited',description:'Changed ability',taskCpu:'0.5',taskMemoryMiB:'1024',modelChoice:'["old","old"]'};
 const submitPool=(r:TestRenderer.ReactTestRenderer)=>r.root.findByType('form').props.onSubmit({preventDefault(){},currentTarget:{}});
 const writes=()=>fetcher.mock.calls.filter(([,init])=>init?.method!=='GET');
+describe('登录工作台关闭受理',()=>{
+ it('关闭意图覆盖旧轮询响应，202 后保持关闭中直到列表确认消失',async()=>{
+  const login={loginId:'close-fixture',containerId:'agent-1',profileId:'profile',state:'waiting',workerState:'waiting',expiresAt:'2099-01-01T00:00:00Z'};
+  let closing=false,finished=false,hold=false,release!:(value:any)=>void;
+  fetcher.mockImplementation(async(url:string,init?:any)=>{
+   const path=url.replace('/api/platform','');
+   if(path==='/logins/close-fixture'&&init?.method==='DELETE'){closing=true;return {ok:true,status:202,json:async()=>({closed:false,closing:true})};}
+   if(path==='/logins/close-fixture')return {ok:true,json:async()=>({...login})};
+   if(path==='/logins'){
+    if(hold){hold=false;return new Promise(resolve=>release=resolve);}
+    return {ok:true,json:async()=>({logins:finished?[]:[{...login,state:closing?'closing':'waiting'}]})};
+   }
+   return {ok:true,json:async()=>path==='/containers'?{containers:[]}:path==='/browser-profiles'?{profiles:[]}:{proxies:[]}};
+  });
+  const r=await mount(React.createElement(LoginWorkbench,{container:null,containers:[],onClose:()=>{}}));
+  hold=true;await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+  await act(async()=>button(r,'关闭工作台 · 保留数据').props.onClick());
+  expect(button(r,'正在关闭…').props.disabled).toBe(true);
+  await act(async()=>release({ok:true,json:async()=>({logins:[{...login}]})}));
+  expect(button(r,'正在关闭…').props.disabled).toBe(true);
+  const inspections=fetcher.mock.calls.filter(([url,init])=>url.endsWith('/logins/close-fixture')&&init?.method==='POST').length;
+  await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+  expect(fetcher.mock.calls.filter(([url,init])=>url.endsWith('/logins/close-fixture')&&init?.method==='POST')).toHaveLength(inspections);
+  finished=true;await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+  expect(r.root.findAllByType('article')).toHaveLength(0);
+  expect(fetcher.mock.calls.filter(([url,init])=>url.endsWith('/logins/close-fixture')&&init?.method==='DELETE')).toHaveLength(1);
+ });
+});
+
 describe('Agent pool behavior',()=>{
  it('loads the initial list and default detail once, and ignores a stale selected-pool response',async()=>{
   setupPools();const r=await mount(React.createElement(AgentPoolPage));

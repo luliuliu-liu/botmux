@@ -9,6 +9,7 @@ import type { WorkflowEventRecord } from './event-store.js';
 const V3_EVENT_TYPES = {
   nodeResourceWaiting:true,
   nodeResourceAllocated:true,
+  nodeResourceSettled:true,
   edgeResolved: true,
   gateDispatched: true,
   gateResolved: true,

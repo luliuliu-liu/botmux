@@ -14,7 +14,7 @@ import {AgentSkillError,validateAgentSkillBundle,skillBundleDigest,validSkillNam
 export {AgentSkillError,validateAgentSkillBundle,type AgentSkillBundle} from './agent-skill-format.js';
 
 const maxBytes=4*1024*1024,maxFiles=1000;
-export const agentSkillRoots:Record<string,string>={pi:'.pi/agent/skills',codex:'.codex/skills','claude-code':'.claude/skills',traex:'.trae/skills',zcode:'.zcode/skills'};
+export const agentSkillRoots:Record<string,string>={pi:'.pi/agent/skills',codex:'.codex/skills','claude-code':'.claude/skills',zcode:'.zcode/skills'};
 function fail(message:string):never{throw new AgentSkillError(409,message);}
 export function buildAgentSkillBundle(selectors:unknown,opts:{registry?:Record<string,SkillPackage>;packs?:Record<string,SkillPack>;trust?:SkillSnapshotTrust;dataDir?:string}={}):AgentSkillBundle{
  if(!Array.isArray(selectors)||selectors.length>100||selectors.some(s=>typeof s!=='string'||!/^(skill|pack):[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(s)))fail('请选择已安装 Skill 或专项包');

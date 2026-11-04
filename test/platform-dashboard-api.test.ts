@@ -19,7 +19,7 @@ describe('pool proxy boundaries',()=>{
    Object.assign(process.env,{BOTMUX_PLATFORM_MANAGED:'true',CONTROL_PLANE_URL:'http://resource.invalid',CONTROL_PLANE_SYNC_KEY:'fixture-sync',BOTMUX_PLATFORM_GATEWAY_ID:'fixture-gateway',BOTMUX_PLATFORM_GATEWAY_KEY:'fixture-key'});vi.stubGlobal('fetch',fetcher);
    const api=createPlatformDashboardApi({botsJsonPath:join(dir,'bots.json'),localOnboarding:{} as any,listLocalBots:()=>[]});
    const call=async(path:string,method:string,authorized=true,origin='http://localhost',contentType='application/json')=>{let status=0;await api({method,headers:{host:'localhost',origin,'content-type':contentType},async *[Symbol.asyncIterator](){yield '{"revision":7}';}} as any,{writeHead:(code:number)=>status=code,end:()=>{}} as any,new URL('http://localhost/api/platform'+path),authorized);return status;};
-   const allowed:Array<[string,string[]]>=[['/mcp-servers',['GET','POST']],['/mcp-servers/11111111-1111-4111-8111-111111111111',['PUT','DELETE']],['/host-mounts',['GET','POST']],['/host-mounts/11111111-1111-4111-8111-111111111111',['PUT','DELETE']],['/report-settings',['GET','PUT']],['/agent-pools',['GET','POST']],[pool,['GET','DELETE']],[pool+'/members',['POST']],[pool+'/enroll',['POST']],[member,['PUT','DELETE']],...[ '/rebuild','/reconcile','/configuration','/configuration/cancel'].map(suffix=>[member+suffix,['POST']] as [string,string[]]),['/workflow-resources',['GET']],['/workflow-resources/run',['GET']],['/workflow-resources/run/22222222-2222-4222-8222-222222222222/resolve',['POST']],['/workflow-resources/run/22222222-2222-4222-8222-222222222222/cancel',['POST']]];
+   const allowed:Array<[string,string[]]>=[['/mcp-servers',['GET','POST']],['/mcp-servers/11111111-1111-4111-8111-111111111111',['PUT','DELETE']],['/host-mounts',['GET','POST']],['/host-mounts/11111111-1111-4111-8111-111111111111',['PUT','DELETE']],['/report-settings',['GET','PUT']],['/workflow-retention/capacity',['GET']],['/workflow-retention/preview?successLogDays=7&limit=1',['GET']],['/agent-pools',['GET','POST']],[pool,['GET','DELETE']],[pool+'/members',['POST']],[pool+'/enroll',['POST']],[member,['PUT','DELETE']],...[ '/rebuild','/reconcile','/configuration','/configuration/cancel'].map(suffix=>[member+suffix,['POST']] as [string,string[]]),['/workflow-resources',['GET']],['/workflow-resources/run',['GET']],['/workflow-resources/run/22222222-2222-4222-8222-222222222222/resolve',['POST']],['/workflow-resources/run/22222222-2222-4222-8222-222222222222/cancel',['POST']]];
    for(const [path,methods] of allowed){
     for(const method of ['GET','POST','PUT','PATCH','DELETE']){
      fetcher.mockClear();expect(await call(path,method,false)).toBe(401);expect(fetcher).not.toHaveBeenCalled();
@@ -139,12 +139,16 @@ describe('v2 platform boundaries',()=>{
       }
     }finally{vi.unstubAllGlobals();for(const name of names){if(previous[name]===undefined)delete process.env[name];else process.env[name]=previous[name];}}
   });
-  it('does not let a mutable worker env impersonate the immutable image role',()=>{
-    const role=process.env.BOTMUX_AGENT_ROLE, managed=process.env.BOTMUX_PLATFORM_MANAGED;
+  it('immutable Worker stays unprivileged and Dev requires an explicit Control role',()=>{
+    const role=process.env.BOTMUX_AGENT_ROLE, managed=process.env.BOTMUX_PLATFORM_MANAGED,dir=mkdtempSync(join(tmpdir(),'image-role-boundary-')),path=join(dir,'role');
     try {
-      process.env.BOTMUX_AGENT_ROLE='worker';process.env.BOTMUX_PLATFORM_MANAGED='true';
-      expect(platformManagementEnabled()).toBe(true);
+      process.env.BOTMUX_PLATFORM_MANAGED='true';process.env.BOTMUX_AGENT_ROLE='control';
+      writeFileSync(path,'worker');expect(platformManagementEnabled(path)).toBe(false);
+      writeFileSync(path,'dev');expect(platformManagementEnabled(path)).toBe(true);
+      process.env.BOTMUX_AGENT_ROLE='worker';expect(platformManagementEnabled(path)).toBe(false);
+      expect(platformManagementEnabled(join(dir,'not-installed'))).toBe(true);
     } finally {
+      rmSync(dir,{recursive:true,force:true});
       if(role===undefined)delete process.env.BOTMUX_AGENT_ROLE;else process.env.BOTMUX_AGENT_ROLE=role;
       if(managed===undefined)delete process.env.BOTMUX_PLATFORM_MANAGED;else process.env.BOTMUX_PLATFORM_MANAGED=managed;
     }

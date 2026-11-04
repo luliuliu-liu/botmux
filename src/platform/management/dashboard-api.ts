@@ -1,4 +1,7 @@
 import {createMcpManagement,McpManagementError} from './mcp-management.js';
+import {Readable} from 'node:stream';
+import {pipeline} from 'node:stream/promises';
+import {cleanupArchivedRunCache} from '../workflow/local-archive-cache.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dirname, join } from 'node:path';
 import { accessSync, constants, mkdirSync, readFileSync } from 'node:fs';
@@ -24,14 +27,14 @@ export function platformWorkerImage():boolean{
   return containerRole()==='worker';
 }
 function cliLoginCapabilities(home:string){const executable=(path:string)=>{try{accessSync(path,constants.X_OK);return true;}catch{return false;}};return {github:executable('/usr/bin/gh')&&executable('/usr/bin/git')&&executable('/usr/bin/ssh'),docker:executable('/usr/local/bin/docker'),applied:cliLoginReceipts(home)};}
-export function platformManagementEnabled(): boolean {
+export function platformManagementEnabled(imageRolePath='/etc/botmux-platform-role'): boolean {
   // A worker's root-owned image role cannot be promoted with container env.
   // Native Botmux transport, credentials, sessions and Dashboard stay intact.
   let imageRole: string | undefined;
-  try { imageRole = readFileSync('/etc/botmux-platform-role', 'utf8').trim(); }
+  try { imageRole = readFileSync(imageRolePath, 'utf8').trim(); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false; }
   if (imageRole === 'worker') return false;
-  if (imageRole === 'dev'&&containerRole()!=='control')return false;
+  if (imageRole === 'dev'&&containerRole(imageRolePath)!=='control')return false;
   return process.env.BOTMUX_PLATFORM_MANAGED === 'true';
 }
 
@@ -224,10 +227,10 @@ export function createPlatformDashboardApi(deps:{
       if(botRefresh&&req.method==='POST'){await read();jsonRes(res,200,await existingBots.refresh(botRefresh[1]));return true;}
       const mcpTarget=suffix.match(/^\/mcp-targets\/(control|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/);
       if(mcpTarget){if(!['GET','POST'].includes(req.method||'')){jsonRes(res,405,{error:'method_not_allowed'});return true;}jsonRes(res,200,await mcps.target(mcpTarget[1]!,req.method==='POST'?await read():undefined));return true;}
-      if(suffix==='/control-upgrade'&&['GET','POST'].includes(req.method||'')){jsonRes(res,req.method==='POST'?202:200,await localAgent.upgrade(req.method==='POST'?await read():undefined));return true;}
+      if(suffix==='/control-upgrade'&&['GET','POST'].includes(req.method||'')){const result=await localAgent.upgrade(req.method==='POST'?await read():undefined);jsonRes(res,req.method==='POST'&&result?.noop!==true?202:200,result);return true;}
       if(suffix==='/control-workspace'){
         if(!['GET','POST'].includes(req.method||'')){jsonRes(res,405,{error:'method_not_allowed'});return true;}
-        jsonRes(res,req.method==='POST'?202:200,await localAgent.workspace(req.method==='POST'?await read():undefined));return true;
+        const result=await localAgent.workspace(req.method==='POST'?await read():undefined);jsonRes(res,req.method==='POST'&&result?.noop!==true?202:200,result);return true;
       }
       if(suffix==='/control-proxy'&&['GET','PUT'].includes(req.method||'')){jsonRes(res,200,await localAgent.proxy(req.method==='PUT'?await read():undefined));return true;}
       if(suffix==='/local-agent'&&req.method==='GET'){jsonRes(res,200,await localAgent.status());return true;}
@@ -297,6 +300,17 @@ export function createPlatformDashboardApi(deps:{
         }
         if(req.method==='GET'&&!jobMatch[3]){jsonRes(res,200,{job});return true;}
       }
+      const archiveCache=suffix.match(/^\/workflow-retention\/runs\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/cache-cleanup$/);
+      if(archiveCache){if(req.method!=='POST'){jsonRes(res,405,{error:'method_not_allowed'});return true;}const snapshot=await platformRequest('/workflow-retention/archives/'+encodeURIComponent(archiveCache[1]!));if(snapshot.status!==200){jsonRes(res,snapshot.status,snapshot.data);return true;}const row=snapshot.data.rows?.find((r:any)=>r.runId===archiveCache[1]);if(row?.state!=='compacted'){jsonRes(res,409,{error:'archive_not_compacted'});return true;}const result=await cleanupArchivedRunCache(join(dirname(dirname(deps.botsJsonPath)),'.botmux','v3-runs'),row);jsonRes(res,200,result);return true;}
+      if(/^\/workflow-retention\/archives\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/files\/[a-f0-9]{64}$/.test(suffix)){
+        if(req.method!=='GET'){jsonRes(res,405,{error:'method_not_allowed'});return true;}
+        const base=process.env.CONTROL_PLANE_URL?.trim();if(!base)throw Error('平台后台尚未配置');
+        const upstream=await fetch(base.replace(/\/$/,'')+'/internal/v1/platform'+suffix,{headers:{'x-api-key':process.env.CONTROL_PLANE_SYNC_KEY||'','x-platform-gateway-id':process.env.BOTMUX_PLATFORM_GATEWAY_ID||'local-gateway','x-platform-gateway-key':process.env.BOTMUX_PLATFORM_GATEWAY_KEY||''},signal:AbortSignal.timeout(60000)});
+        if(!upstream.ok){jsonRes(res,upstream.status,await upstream.json());return true;}
+        if(!upstream.body){jsonRes(res,502,{error:'archive_download_unavailable'});return true;}
+        res.writeHead(200,{'content-type':'application/octet-stream','content-disposition':upstream.headers.get('content-disposition')||'attachment','cache-control':'no-store'});
+        try{await pipeline(Readable.fromWeb(upstream.body as any),res);}catch{res.destroy();}return true;
+      }
       const uuid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
       const poolRoutes:Array<[string,string[]]>=[
         ['/mcp-servers',['GET','POST']],
@@ -309,31 +323,45 @@ export function createPlatformDashboardApi(deps:{
         [`/agent-pools/${uuid}/(?:members|enroll)`,['POST']],
         [`/agent-pools/${uuid}/members/${uuid}`,['PUT','DELETE']],
         [`/agent-pools/${uuid}/members/${uuid}/(?:rebuild|reconcile|configuration|configuration/cancel)`,['POST']],
+        ['/workflow-retention/(?:capacity|preview|archives)',['GET']],
+        ['/workflow-retention/archives/[A-Za-z0-9][A-Za-z0-9._-]{0,127}',['GET']],
+        ['/workflow-retention/batch',['POST']],
+        ['/workflow-retention/runs/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/plan',['GET']],
+        ['/workflow-retention/runs/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/(?:pin|archive|cancel-archive|compact)',['POST']],
+        ['/workflow-retention/archives/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/manifest',['GET']],
         ['/workflow-resources(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})?',['GET']],
         [`/workflow-resources/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/${uuid}/(?:resolve|cancel)`,['POST']],
       ];
       const poolRoute=poolRoutes.find(([pattern])=>new RegExp('^'+pattern+'$').test(suffix));
       if(poolRoute){
         if(!poolRoute[1].includes(req.method||'')){jsonRes(res,405,{error:'method_not_allowed'});return true;}
-        const result=await platformRequest(suffix,req.method,req.method==='GET'?undefined:await read());jsonRes(res,result.status,result.data);return true;
+        const target=suffix.startsWith('/workflow-retention/')?suffix+url.search:suffix;
+        const result=await platformRequest(target,req.method,req.method==='GET'?undefined:await read());
+        if(result.status===200&&req.method==='POST'){
+          const clean=async(row:any)=>{try{return {...row,...await cleanupArchivedRunCache(join(dirname(dirname(deps.botsJsonPath)),'.botmux','v3-runs'),row)};}catch{return {...row,localCacheCleanup:false,cacheCleanupError:'数据库已清理，本地运行缓存未确认删除'};}};
+          if(suffix.endsWith('/compact')&&result.data.compacted)result.data=await clean(result.data);
+          if(suffix==='/workflow-retention/batch'&&Array.isArray(result.data.results))for(const item of result.data.results)if(item.ok&&item.result?.compacted)item.result=await clean(item.result);
+        }
+        jsonRes(res,result.status,result.data);return true;
       }
       if(/^\/(?:proxies|credentials)(?:\/[A-Za-z0-9._-]+)?$/.test(suffix)&&['GET','PUT','DELETE'].includes(req.method||'')){const result=await platformRequest(suffix,req.method,req.method==='GET'?undefined:await read());jsonRes(res,result.status,result.data);return true;}
-      if((req.method==='GET'&&['/image-cache','/browsers/retained-volumes'].includes(suffix))||(req.method==='POST'&&/^\/image-cache\/(refresh|registry|pull|pull-latest|remove)$/.test(suffix))||(req.method==='POST'&&suffix==='/browsers')||(/^\/browsers\/[0-9a-f-]{36}(?:\/(dashboard-route|reconcile))?$/.test(suffix)&&['GET','POST','PUT','DELETE'].includes(req.method||''))){const result=await platformRequest(suffix,req.method,req.method==='GET'?undefined:await read());jsonRes(res,result.status,result.data);return true;}
+      if((req.method==='POST'&&/^\/browsers\/retained-volumes\/[0-9a-f-]{36}\/remove$/.test(suffix))||(req.method==='GET'&&['/image-cache','/browsers/retained-volumes'].includes(suffix))||(req.method==='POST'&&/^\/image-cache\/(refresh|registry|pull|pull-latest|remove)$/.test(suffix))||(req.method==='POST'&&suffix==='/browsers')||(/^\/browsers\/[0-9a-f-]{36}(?:\/(dashboard-route|reconcile))?$/.test(suffix)&&['GET','POST','PUT','DELETE'].includes(req.method||''))){const result=await platformRequest(suffix,req.method,req.method==='GET'?undefined:await read());jsonRes(res,result.status,result.data);return true;}
       if((suffix==='/images'&&req.method==='GET')||(/^\/containers\/[0-9a-f-]{36}\/upgrade$/.test(suffix)&&req.method==='POST')){const result=await platformRequest(suffix,req.method,req.method==='GET'?undefined:await read());jsonRes(res,result.status,result.data);return true;}
-      const accessRoute=/^\/(?:browser-profiles(?:\/[0-9a-f-]{36})?|logins(?:\/[0-9a-f-]{36})?|local-login-workbench(?:\/[0-9a-f-]{36}(?:\/(?:ack|dashboard-route))?)?|containers\/[0-9a-f-]{36}\/(?:login|upgrade))$/.test(suffix);
+      const accessRoute=/^\/(?:browser-profiles(?:\/[0-9a-f-]{36}(?:\/remove)?)?|logins(?:\/[0-9a-f-]{36})?|local-login-workbench(?:\/[0-9a-f-]{36}(?:\/(?:ack|dashboard-route))?)?|containers\/[0-9a-f-]{36}\/(?:login|upgrade))$/.test(suffix);
       // Per-CLI configuration lives under the container: list, save, re-sync
       // and explicit activation all reach the control plane through here.
-      const cliRoute=/^\/containers\/[0-9a-f-]{36}\/clis(?:\/(?:pi|codex|claude-code|zcode|dsh|traex)(?:\/(?:sync|activate))?)?$/.test(suffix);
+      const cliRoute=/^\/containers\/[0-9a-f-]{36}\/clis(?:\/(?:pi|codex|claude-code|zcode)(?:\/(?:sync|activate))?)?$/.test(suffix);
       if((!accessRoute&&!cliRoute&&!/^\/(catalog|workspaces|bots(?:\/[A-Za-z0-9._-]+\/unbind)?|containers(?:\/[0-9a-f-]+(?:\/reconcile)?)?|models(?:\/[A-Za-z0-9._-]+(?:\/clone)?)?)$/.test(suffix))||
         !['GET','POST','PUT','DELETE'].includes(req.method||'')){
         jsonRes(res,404,{error:'not_found'});return true;
       }
       const allowed = cliRoute&&(req.method==='GET'&&/^\/containers\/[0-9a-f-]{36}\/clis$/.test(suffix)
-        ||req.method==='PUT'&&/^\/containers\/[0-9a-f-]{36}\/clis\/(?:pi|codex|claude-code|zcode|dsh|traex)$/.test(suffix)
-        ||req.method==='POST'&&/^\/containers\/[0-9a-f-]{36}\/clis\/(?:pi|codex|claude-code|zcode|dsh|traex)\/(?:sync|activate)$/.test(suffix))
+        ||req.method==='PUT'&&/^\/containers\/[0-9a-f-]{36}\/clis\/(?:pi|codex|claude-code|zcode)$/.test(suffix)
+        ||req.method==='POST'&&/^\/containers\/[0-9a-f-]{36}\/clis\/(?:pi|codex|claude-code|zcode)\/(?:sync|activate)$/.test(suffix))
         || accessRoute&&(req.method==='GET'&&/^\/(?:browser-profiles|logins|local-login-workbench\/[0-9a-f-]{36}\/dashboard-route)$/.test(suffix)
         ||req.method==='POST'&&/^\/(?:browser-profiles|logins\/[0-9a-f-]{36}|local-login-workbench(?:\/[0-9a-f-]{36}(?:\/ack)?)?|containers\/[0-9a-f-]{36}\/(?:login))$/.test(suffix)
         ||req.method==='PUT'&&/^\/(?:browser-profiles\/[0-9a-f-]{36})$/.test(suffix)
+        ||req.method==='POST'&&/^\/browser-profiles\/[0-9a-f-]{36}\/remove$/.test(suffix)
         ||req.method==='DELETE'&&/^\/(?:logins|local-login-workbench)\/[0-9a-f-]{36}$/.test(suffix))
         || req.method === 'GET' && ['/catalog','/workspaces','/bots','/containers','/models'].includes(suffix)
         || req.method === 'POST' && (suffix === '/containers' || /^\/models\/[A-Za-z0-9._-]+(?:\/clone)?$/.test(suffix)|| /^\/containers\/[0-9a-f-]+\/reconcile$/.test(suffix)||/^\/bots\/[A-Za-z0-9._-]+\/unbind$/.test(suffix))

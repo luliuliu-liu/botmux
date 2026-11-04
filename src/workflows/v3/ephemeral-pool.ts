@@ -170,7 +170,7 @@ async function runNodeImpl(
   }
 
   const cwd = expandWorkflowWorkingDir(req.botSnapshot.workingDir) ?? process.cwd();
-  const sessionId = syntheticSessionUuid(`v3-${req.runId}-${req.attemptId}`);
+  const sessionId = syntheticSessionUuid(`v3-${req.runId}-${req.attemptId}${req.sessionKey ? `-${req.sessionKey}` : ''}`);
   const workerEnv: Record<string, string | undefined> = {
     // v3 ephemeral workers fork straight from the daemon here (not via
     // workerForkEnv), so strip the PM2 graceful-exit sentinel to keep the
