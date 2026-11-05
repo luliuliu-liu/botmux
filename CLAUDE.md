@@ -1,3 +1,11 @@
+<!-- platform-development-entry -->
+## 本 fork 的平台开发约定
+
+开始工作前，必须读取 `docs/platform-development.md`。本 fork 的分支、标签、构建、发布及部署规则以该文件为准；下文其他工程规范继续适用。
+
+@docs/platform-development.md
+<!-- /platform-development-entry -->
+
 # botmux
 
 飞书话题群 ↔ AI 编程 CLI 桥接。Daemon 监听飞书消息，每个新话题自动 spawn 一个独立 CLI 进程（Claude Code / Codex / Gemini 等 20+ 种，完整列表见 README）。
