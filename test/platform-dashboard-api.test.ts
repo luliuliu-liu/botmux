@@ -1,5 +1,8 @@
-import { describe,expect,it,vi } from 'vitest';
+import { afterEach,beforeEach,describe,expect,it,vi } from 'vitest';
 import { platformManagementEnabled, createPlatformDashboardApi, localBotDisplayNames } from '../src/platform/management/dashboard-api.js';
+// Management fixtures explicitly select Control; a Dev image defaults to Worker.
+beforeEach(()=>vi.stubEnv('BOTMUX_AGENT_ROLE','control'));
+afterEach(()=>vi.unstubAllEnvs());
 import { readFileSync,mkdtempSync,writeFileSync,rmSync } from 'node:fs';
 import React from 'react';
 import TestRenderer,{act} from 'react-test-renderer';

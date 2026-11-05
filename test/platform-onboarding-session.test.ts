@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createOnboardingSessionConfirmation } from '../src/platform/management/onboarding-session.js';
 import { createPlatformDashboardApi } from '../src/platform/management/dashboard-api.js';
 import { BotOnboardingManager, type BotOnboardingSessionStatus } from '../src/dashboard/bot-onboarding.js';
@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const ready:BotOnboardingSessionStatus={status:'ready',source:'botmux_cache',identity:{userId:'private-user',tenantId:'private-tenant',userName:'Account',tenantName:'Org',email:'user@example.com'}};
 const dirs:string[]=[];
+// The fixture tests management onboarding, so select the Control role explicitly.
+beforeEach(()=>vi.stubEnv('BOTMUX_AGENT_ROLE','control'));
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();vi.unstubAllEnvs();for(const dir of dirs.splice(0))rmSync(dir,{recursive:true,force:true});});
 describe('platform onboarding account confirmation',()=>{
   it('distinguishes expired credentials from inconclusive native inspection',async()=>{
