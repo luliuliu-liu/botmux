@@ -1148,7 +1148,7 @@ export async function cmdWorkflowHost(
   rest: string[],
   deps: WorkflowHostCommandDeps = {},
 ): Promise<void> {
-  if(rest.includes('--help')||rest.includes('-h')){const {WORKFLOW_HELP}=await import('../../cli/workflow-operations.js');console.log(WORKFLOW_HELP);return;}
+  if(rest.includes('--help')||rest.includes('-h')){const {printWorkflowHelp}=await import('../../cli/workflow.js');printWorkflowHelp();return;}
   if(argValue(rest,'--by')==='user')throw Error('User approval must come from the authenticated approval card, not --by user');
   const baseDir = argValue(rest, '--base-dir') ?? defaultBaseDir();
   const guardedRunDir = (runId: string): string => {

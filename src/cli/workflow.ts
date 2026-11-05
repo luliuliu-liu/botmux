@@ -1,6 +1,7 @@
 /** Workflow command dispatch after the v2 runtime retirement. */
 
 import { isWorkflowFeatureEnabled } from '../global-config.js';
+import {WORKFLOW_HELP,WORKFLOW_RUN_OPERATIONS_HELP} from './workflow-operations.js';
 
 const WORKFLOW_DISABLED_CLI_MESSAGE =
   '⛔ 本机已关闭「工作流(Workflow)」功能：即兴 grill、architect 编排与 Saved Workflow 的运行/保存均不可用。' +
@@ -34,7 +35,7 @@ const RETIRED_TEMPLATE_SUBCOMMANDS = new Set([
 ]);
 
 export async function cmdWorkflow(sub: string, rest: string[]): Promise<void> {
-  if(sub==='--help'||sub==='-h'||rest.some(a=>a==='--help'||a==='-h')){const {WORKFLOW_HELP}=await import('./workflow-operations.js');console.log(WORKFLOW_HELP);return;}
+  if(sub==='--help'||sub==='-h'||rest.some(a=>a==='--help'||a==='-h')){printWorkflowHelp();return;}
   // Machine-wide workflow kill-switch. Authoring (host verbs) and launching
   // (saved `run` / `save`) are refused when the feature is off; read-only
   // `list`/`show` and `help` stay available so an operator can still inspect
@@ -102,7 +103,7 @@ function failRetired(command: string): never {
   process.exit(1);
 }
 
-function printWorkflowHelp(): void {
+export function printWorkflowHelp(): void {
   // Surface the machine-wide kill-switch in the CLI help too, so `botmux
   // workflow help` on a disabled host doesn't advertise commands that refuse
   // (mirrors the IM `/help` omission). In-flight management stays listed since
@@ -112,6 +113,7 @@ function printWorkflowHelp(): void {
 进行中的 run 仍可管理: botmux workflow <cancel|retry|grant> [...]
 v2 资产离线处理: botmux template <migrate-v3|archive-runs>
 `);
+    console.log(WORKFLOW_RUN_OPERATIONS_HELP);
     return;
   }
   console.log(`用法: botmux workflow <目标控制|save|run|list|show|start|cancel|retry|grant|status|edit|ask-human> [...]
@@ -135,6 +137,7 @@ Saved Workflow:
 
 v2 资产离线处理: botmux template <migrate-v3|archive-runs>
 `);
+  console.log(WORKFLOW_HELP);
 }
 
 function printTemplateHelp(): void {

@@ -28,11 +28,14 @@ export interface PostJsonOptions {
   signal?: AbortSignal;
 }
 
-function bindAbort(req: { destroy(err?: Error): unknown }, signal: AbortSignal | undefined): void {
-  if (!signal) return;
+function bindAbort(req: { destroy(err?: Error): unknown; once(event: 'close', listener: () => void): unknown }, signal: AbortSignal | undefined): () => void {
+  if (!signal) return () => {};
   const abort = () => req.destroy(new Error('请求已中止'));
-  if (signal.aborted) { abort(); return; }
-  signal.addEventListener('abort', abort, { once: true });
+  const cleanup = () => signal.removeEventListener('abort', abort);
+  req.once('close', cleanup);
+  if (signal.aborted) abort();
+  else signal.addEventListener('abort', abort, { once: true });
+  return cleanup;
 }
 
 export function postJson(url: string, body: unknown, opts: PostJsonOptions = {}): Promise<PostJsonResult> {
@@ -41,6 +44,7 @@ export function postJson(url: string, body: unknown, opts: PostJsonOptions = {})
   const doRequest = u.protocol === 'https:' ? httpsRequest : httpRequest;
   const payload = Buffer.from(JSON.stringify(body), 'utf8');
   return new Promise((resolve, reject) => {
+    let cleanupAbort = () => {};
     const req = doRequest(
       {
         host: u.hostname,
@@ -69,14 +73,15 @@ export function postJson(url: string, body: unknown, opts: PostJsonOptions = {})
           } catch {
             /* 非 JSON 响应按空对象处理，调用方看 status */
           }
+          cleanupAbort();
           resolve({ status: res.statusCode || 0, json });
         });
-        res.on('error', reject);
+        res.on('error', error => { cleanupAbort(); reject(error); });
       },
     );
     req.on('timeout', () => req.destroy(new Error(`连接超时（${timeoutMs}ms）`)));
-    req.on('error', reject);
-    bindAbort(req, signal);
+    req.on('error', error => { cleanupAbort(); reject(error); });
+    cleanupAbort = bindAbort(req, signal);
     req.end(payload);
   });
 }
@@ -87,6 +92,7 @@ export function getJson(url: string, opts: PostJsonOptions = {}): Promise<PostJs
   const u = new URL(url);
   const doRequest = u.protocol === 'https:' ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
+    let cleanupAbort = () => {};
     const req = doRequest(
       {
         host: u.hostname,
@@ -108,14 +114,15 @@ export function getJson(url: string, opts: PostJsonOptions = {}): Promise<PostJs
           } catch {
             /* 非 JSON 响应按空对象处理，调用方看 status */
           }
+          cleanupAbort();
           resolve({ status: res.statusCode || 0, json });
         });
-        res.on('error', reject);
+        res.on('error', error => { cleanupAbort(); reject(error); });
       },
     );
     req.on('timeout', () => req.destroy(new Error(`连接超时（${timeoutMs}ms）`)));
-    req.on('error', reject);
-    bindAbort(req, signal);
+    req.on('error', error => { cleanupAbort(); reject(error); });
+    cleanupAbort = bindAbort(req, signal);
     req.end();
   });
 }
