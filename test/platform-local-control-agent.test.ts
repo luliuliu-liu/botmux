@@ -1,4 +1,4 @@
-import {afterEach,describe,it,expect} from 'vitest';
+import {afterEach,describe,it,expect,vi} from 'vitest';
 import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -6,11 +6,11 @@ import {createLocalControlAgent} from '../src/platform/management/local-control-
 import {readContainerAgentEnvironment,readContainerAgentModel,writeContainerAgentEnvironment} from '../src/platform/management/container-agent-files.mjs';
 import {writeNativeAgentModel} from '../src/platform/management/native-worker-config.js';
 const roots:string[]=[];afterEach(()=>{for(const r of roots.splice(0))rmSync(r,{recursive:true,force:true});});
-function fixture(createOAuth?:(options:any)=>any){
+function fixture(createOAuth?:(options:any)=>any,activity?:(ids:string[])=>Promise<'idle'|'busy'|'unavailable'>){
  const home=mkdtempSync(join(tmpdir(),'local-control-'));roots.push(home);mkdirSync(join(home,'.botmux'));
  const path=join(home,'.botmux','bots.json');writeFileSync(path,JSON.stringify([{larkAppId:'pi-bot',cliId:'pi',larkAppSecret:'private-bot',allowedUsers:['owner'],env:{PROJECT_MODE:'keep',PI_MODEL_API_KEY:'old'}},{larkAppId:'codex-bot',cliId:'codex',larkAppSecret:'other'}]));
  const state={busy:false,failStop:false,failAck:false,failStart:false,networkFailure:false,throwStop:false,rebuildState:{revision:0,status:null} as any,upgradeNoop:false,loseUpgradeResponse:false,calls:[] as string[],prepared:0,rows:[] as any[],model:null as any};
- const agent=createLocalControlAgent({botsJsonPath:path,createOAuth,busy:async()=>state.busy,isStopped:async()=>true,
+ const agent=createLocalControlAgent({botsJsonPath:path,createOAuth,activity,busy:async()=>state.busy,isStopped:async()=>true,
   stop:async id=>{state.calls.push('stop:'+id);if(state.throwStop&&id==='codex-bot')throw Error('stop unavailable');return {ok:!(state.failStop&&id==='codex-bot')};},start:async id=>{state.calls.push('start:'+id);return {ok:!state.failStart};},
   changeCli:async id=>{state.calls.push('cli:'+id);return {status:200,data:{ok:true}};},
   request:async(p,m,body:any)=>{
@@ -26,6 +26,23 @@ function fixture(createOAuth?:(options:any)=>any){
  return {home,path,state,agent,input:{revision:0,requestId:'00000000-0000-4000-8000-000000000001',modelProfileId:'team',modelId:'chosen',authMethod:'api-key',confirmRestart:true}};
 }
 describe('local Control Agent management',()=>{
+ it('MCP停启后要等认证就绪再返回，缺失注册不是假忙任务',async()=>{
+  vi.useFakeTimers();let ready=false,count=0,entered!:()=>void;
+  const probing=new Promise<void>(r=>entered=r);
+  const f=fixture(undefined,async()=>{if(++count>1)entered();return count===1||ready?'idle':'unavailable';});let completed=false;
+  try{const pending=f.agent.configureMcp(async()=>({applied:true})).then(r=>{completed=true;return r;});await probing;await vi.advanceTimersByTimeAsync(600);expect(completed).toBe(false);expect(f.state.calls).toContain('start:codex-bot');ready=true;await vi.advanceTimersByTimeAsync(200);expect(await pending).toEqual({applied:true});}finally{vi.useRealTimers();}
+ });
+ it('unknown的Control状态禁止挂载，在任何停止或排队前拒绝',async()=>{
+  const f=fixture(undefined,async()=> 'unavailable');await expect(f.agent.workspace({confirmRestart:true})).rejects.toThrow('未就绪');expect(f.state.calls).toEqual([]);expect(f.state.prepared).toBe(0);
+ });
+ it('代理直连已同步必须核对本地文件和CLI环境，pending不能假作同步',async()=>{
+  const f=fixture();const parent=join(f.home,'.botmux/platform');writeFileSync(join(parent,'proxy.json'),'null');
+  f.state.rows=[];
+  const request={revision:1,appliedRevision:1,proxyProfileId:null,appliedProxyRevision:0};
+  const read=createLocalControlAgent({botsJsonPath:f.path,request:async()=>({status:200,data:request}),busy:async()=>false,stop:async()=>({ok:true}),start:async()=>({ok:true}),isStopped:async()=>true});
+  expect((await read.proxy()).synchronized).toBe(true);request.appliedRevision=0;expect((await read.proxy()).synchronized).toBe(false);request.appliedRevision=1;
+  writeContainerAgentEnvironment(f.home,'pi',{HTTP_PROXY:'http://modified:1234'});expect((await read.proxy()).synchronized).toBe(false);
+ });
  it('reports managed API keys from each CLI environment without exposing secrets',async()=>{
   const f=fixture();
   const examples={pi:{PI_MODEL_API_KEY:'pi-private'},codex:{PLATFORM_MODEL_API_KEY:'codex-private'},'claude-code':{ANTHROPIC_AUTH_TOKEN:'claude-private'},zcode:{ZCODE_CODING_PLAN_API_KEY:'zcode-private'}};

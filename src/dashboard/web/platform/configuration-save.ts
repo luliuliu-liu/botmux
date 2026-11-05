@@ -22,13 +22,25 @@ export async function saveLocalConfiguration(api:Api,base:any,draft:any,requestI
  let stage='MCP';try{
   const change=draft.workspaceKind!==base.initial.workspaceKind||draft.workspaceSource!==base.initial.workspaceSource||!sameIds(draft.hostMountIds,base.initial.hostMountIds);
   if(change&&!draft.confirmRestart)throw Error('请确认重建');
-  await syncMcp(api,'control',base,draft,requestId);
-  stage='Proxy';const proxy=await api('/control-proxy','PUT',{revision:base.proxy.revision,proxyProfileId:draft.proxyProfileId||null});if(!proxy.applied)throw Error('Proxy 未确认');
+  let mcpUnchanged=false;
+  if(base.mcp.synchronized===true&&!base.mcp.pendingRequestId&&sameIds(draft.mcpServerIds,base.mcp.serverIds)){
+   const observed=await api('/mcp-targets/control');
+   if(observed.revision!==base.mcp.revision||!sameIds(observed.serverIds,base.mcp.serverIds))throw Error('MCP 配置已变化，请刷新后核对');
+   mcpUnchanged=observed.synchronized===true&&!observed.pendingRequestId;
+  }
+  if(!mcpUnchanged)await syncMcp(api,'control',base,draft,requestId);
+  stage='Proxy';let proxyUnchanged=false;
+  if(base.proxy.synchronized===true&&(draft.proxyProfileId||null)===(base.proxy.proxyProfileId||null)){
+   const observed=await api('/control-proxy');
+   if(observed.revision!==base.proxy.revision||(observed.proxyProfileId||null)!==(base.proxy.proxyProfileId||null))throw Error('Proxy 配置已变化，请刷新后核对');
+   proxyUnchanged=observed.synchronized===true;
+  }
+  if(!proxyUnchanged){const proxy=await api('/control-proxy','PUT',{revision:base.proxy.revision,proxyProfileId:draft.proxyProfileId||null});if(proxy.applied!==true)throw Error('Proxy 未确认');}
   stage='机器人与 Agent';const bot=base.row.bots.find((b:any)=>b.appId===draft.botId);
-  if(bot){const r=await api('/local-agent/bots/'+bot.appId,'PUT',{cliId:draft.agentType,confirmRestart:true});if(!r.changed)throw Error('Agent 切换未确认');}
+  if(bot){if(bot.cliId!==draft.agentType){const r=await api('/local-agent/bots/'+bot.appId,'PUT',{cliId:draft.agentType,confirmRestart:true});if(!r.changed)throw Error('Agent 切换未确认');}}
   else if(draft.botId){const b=base.bots.find((b:any)=>b.appId===draft.botId);const r=await api('/local-bots/'+draft.botId+'/bind','POST',{bindingRevision:b?.bindingRevision,cliId:draft.agentType,confirmRestart:true,...(draft.owner?{owner:draft.owner}:{})});if(!r.applied)throw Error('绑定未确认');if(draft.originalBotId){const original=(await api('/bots')).bots.find((b:any)=>b.appId===draft.originalBotId);if(original?.localConfigured)await api('/local-bots/'+draft.originalBotId+'/unbind','POST',{localRevision:original.localRevision,confirmLocalStop:true});}}
   else if(draft.originalBotId){const b=(await api('/bots')).bots.find((b:any)=>b.appId===draft.originalBotId);await api('/local-bots/'+draft.originalBotId+'/unbind','POST',{localRevision:b.localRevision,confirmLocalStop:true});}
-  if(change){stage='挂载重建';if(!draft.confirmRestart)throw Error('请确认重建');const r=await api('/control-workspace','POST',{revision:base.controlWorkspace.revision,expectedContainerId:base.controlWorkspace.actual.containerId,workspaceKind:draft.workspaceKind,workspaceSource:draft.workspaceSource,hostMountIds:draft.hostMountIds,confirmRestart:true});if(!r.queued)throw Error('重建排队未确认');return {queued:true};}
+  if(change){stage='挂载重建';if(!draft.confirmRestart)throw Error('请确认重建');const r=await api('/control-workspace','POST',{revision:base.controlWorkspace.revision,expectedContainerId:base.controlWorkspace.actual.containerId,workspaceKind:draft.workspaceKind,workspaceSource:draft.workspaceSource,hostMountIds:draft.hostMountIds,confirmRestart:true});if(r.noop===true)return {applied:true,noop:true};if(r.queued!==true)throw Error('重建排队未确认');return {queued:true};}
   return {applied:true};
  }catch(e){throw Error(stage+'未完成；此前确认的步骤已保留，可重试。'+String(e));}
 }

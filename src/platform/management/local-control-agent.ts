@@ -1,5 +1,5 @@
 /** Container-local Control Agent lifecycle. No upstream host behavior changes. */
-import {existsSync,mkdirSync,readFileSync} from 'node:fs';
+import {existsSync,mkdirSync,readFileSync,lstatSync,realpathSync} from 'node:fs';
 import {join,dirname} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
@@ -9,11 +9,12 @@ import {readBotsJsonOrEmpty,mutateBotsJsonAtomic} from '../../setup/bots-store.j
 import {readContainerAgentEnvironment,readContainerAgentModel,agentEnvironmentKeys,writeContainerAgentEnvironment} from './container-agent-files.mjs';
 import {proxyFile,proxyEnvironment,proxyEnvironmentKeys} from './container-proxy.mjs';
 import {writeNativeAgentModel} from './native-worker-config.js';
+import {waitForLocalAgentReady,type LocalAgentActivity} from './local-agent-activity.js';
 export class LocalControlError extends Error{constructor(readonly status:number,message:string){super(message);}}
 type Result={status:number;data:any};
 type Dependencies={botsJsonPath:string;request:(path:string,method?:string,body?:unknown)=>Promise<Result>;
  stop:(id:string)=>Promise<{ok:boolean}>;start:(id:string)=>Promise<{ok:boolean}>;isStopped:(id:string)=>Promise<boolean>;busy:(ids:string[])=>Promise<boolean>;
- changeCli?:(id:string,cli:string)=>Promise<Result>;createOAuth?:(options:any)=>any};
+ activity?:(ids:string[])=>Promise<LocalAgentActivity>;changeCli?:(id:string,cli:string)=>Promise<Result>;createOAuth?:(options:any)=>any};
 const types=['pi','codex','claude-code','zcode'];
 export function createLocalControlAgent(deps:Dependencies){
  const home=dirname(dirname(deps.botsJsonPath)),directory=join(home,'.botmux','platform');mkdirSync(directory,{recursive:true,mode:0o700});
@@ -48,10 +49,17 @@ export function createLocalControlAgent(deps:Dependencies){
   delete owner.workbenchGeneration;delete owner.profileId;saveOwner();
  }
  async function ensureNoLogin(){if(owner){await loginManager();await restoring;if(oauth.busy())throw new LocalControlError(409,'本地原生登录仍在进行，请先完成或取消登录');}}
+ const activity=async(ids:string[]):Promise<LocalAgentActivity>=>deps.activity?deps.activity(ids):(await deps.busy(ids)?'busy':'idle');
+ async function assertIdle(ids:string[],busyMessage:string){
+  const state=await activity(ids);
+  if(state==='busy')throw new LocalControlError(409,busyMessage);
+  if(state!=='idle')throw new LocalControlError(409,'本地 Agent 未就绪或通信不可确认，请稍后重试；尚未执行此配置步骤');
+ }
  async function resumeStopped(ids:string[]){
   let failed=false;
   for(const id of ids){try{if(!(await deps.start(id)).ok)failed=true;}catch{failed=true;}}
   if(failed)throw new LocalControlError(502,'Bot 恢复未确认，请在总体操作中恢复');
+  if(ids.length&&deps.activity){try{await waitForLocalAgentReady(()=>activity(ids));}catch(e){throw new LocalControlError(409,e instanceof Error?e.message:'Bot恢复后状态不可确认');}}
  }
  async function withStoppedBots<T>(ids:string[],operation:()=>Promise<T>,keepStopped:()=>boolean=()=>false):Promise<T>{
   const stopped:string[]=[];
@@ -91,17 +99,37 @@ export function createLocalControlAgent(deps:Dependencies){
    retained=true;return result.data;
   },()=>retained);
  }
+ function canonical(v:any):any{return v&&typeof v==='object'?(Array.isArray(v)?v.map(canonical):Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]))):v;}
+ async function proxySynchronized(state:any){
+  try{
+   if(!Number.isSafeInteger(state.revision)||state.revision!==state.appliedRevision)return false;
+   let expected:any=null;
+   if(state.proxyProfileId){
+    const response=await deps.request('/proxies');if(response.status!==200||!Array.isArray(response.data.proxies))return false;
+    const p=response.data.proxies.find((p:any)=>p.profileId===state.proxyProfileId);
+    if(!p?.enabled||p.revision!==state.appliedProxyRevision)return false;
+    expected={profileId:p.profileId,revision:p.revision,...p.configuration};
+   }else if(state.appliedProxyRevision!==0)return false;
+   const root=realpathSync(home),parts=['.botmux','platform','proxy.json'];let path=root;
+   for(const part of parts){path=join(path,part);if(lstatSync(path).isSymbolicLink())return false;}
+   const stat=lstatSync(path);if(!stat.isFile()||stat.size>1024*1024)return false;
+   const current=JSON.parse(readFileSync(path,'utf8'));if(JSON.stringify(canonical(current))!==JSON.stringify(canonical(expected)))return false;
+   const env=proxyEnvironment(expected);
+   for(const type of types){const configured=readContainerAgentEnvironment(home,type);if(configured&&proxyEnvironmentKeys.some(key=>configured[key]!==env[key]))return false;}
+   return true;
+  }catch{return false;}
+ }
  return {
   async configureMcp(operation:()=>Promise<any>){return withFileLock(join(directory,'local-agent-operation'),async()=>{
-   await ensureNoLogin();const ids=allBots().map(bot=>bot.larkAppId);if(await deps.busy(ids))throw new LocalControlError(409,'Control 正在运行任务或会话，不能同步 MCP');
-   const stopped:string[]=[];try{for(const id of ids){if(!(await deps.stop(id)).ok)throw new LocalControlError(409,'Bot 停止未确认');stopped.push(id);}return await operation();}finally{let failed=false;for(const id of stopped){try{if(!(await deps.start(id)).ok)failed=true;}catch{failed=true;}}if(failed)throw new LocalControlError(502,'Bot 恢复未确认，请在总体操作中恢复');}
+   await ensureNoLogin();const ids=allBots().map(bot=>bot.larkAppId);await assertIdle(ids,'Control 正在运行任务或会话，不能同步 MCP');
+   const stopped:string[]=[];try{for(const id of ids){if(!(await deps.stop(id)).ok)throw new LocalControlError(409,'Bot 停止未确认');stopped.push(id);}return await operation();}finally{await resumeStopped(stopped);}
   });},
   async workspace(input?:any){
    if(input===undefined){const result=await deps.request('/control-workspace');if(result.status!==200)throw new LocalControlError(result.status,'无法读取 Control 挂载');return result.data;}
    if(input.confirmRestart!==true)throw new LocalControlError(400,'请确认重建空闲 Control');
    return withFileLock(join(directory,'local-agent-operation'),async()=>{
     await ensureNoLogin();const ids=allBots().map(bot=>bot.larkAppId);
-    if(await deps.busy(ids))throw new LocalControlError(409,'Control 正忙，空闲后再重建挂载');
+    await assertIdle(ids,'Control 正忙，空闲后再重建挂载');
     return queueRebuild('/control-workspace',input,ids);
    });
   },
@@ -110,15 +138,15 @@ export function createLocalControlAgent(deps:Dependencies){
    if(input.confirmRestart!==true)throw new LocalControlError(400,'请确认重启 Dev Agent');
    return withFileLock(join(directory,'local-agent-operation'),async()=>{
     await ensureNoLogin();const ids=allBots().map(bot=>bot.larkAppId);
-    if(await deps.busy(ids))throw new LocalControlError(409,'Agent 正忙，空闲后再升级');
+    await assertIdle(ids,'Agent 正忙，空闲后再升级');
     return queueRebuild('/control-upgrade',input,ids);
    });
   },
   async proxy(input?:any){
-   if(input===undefined){const result=await deps.request('/control-proxy');if(result.status!==200)throw new LocalControlError(result.status,'无法读取代理配置');return result.data;}
+   if(input===undefined){const result=await deps.request('/control-proxy');if(result.status!==200)throw new LocalControlError(result.status,'无法读取代理配置');return {...result.data,synchronized:await proxySynchronized(result.data)};}
    return withFileLock(join(directory,'local-agent-operation'),async()=>{
     await ensureNoLogin();const ids=allBots().map(bot=>bot.larkAppId);
-    if(await deps.busy(ids))throw new LocalControlError(409,'Agent 正忙，请空闲后同步代理');
+    await assertIdle(ids,'Agent 正忙，请空闲后同步代理');
     const prepared=await deps.request('/control-proxy','PUT',input);if(prepared.status!==200)throw new LocalControlError(prepared.status,prepared.data.message||'代理配置未准备完成');
     await withStoppedBots(ids,async()=>{
     const configuration=prepared.data.proxy,environment=proxyEnvironment(configuration);

@@ -134,6 +134,7 @@ import { handleFederationSpokeApi, syncAllMemberships, autoBindOwnerIfUnambiguou
 import type { TeamGroupCreateResult, TeamGroupOwnerTransferResult } from './dashboard/federated-group-core.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import { createPlatformDashboardApi,localBotDisplayNames,platformManagementEnabled,platformRequest,platformWorkerImage } from './platform/management/dashboard-api.js';
+import {probeLocalAgentActivity} from './platform/management/local-agent-activity.js';
 import {localBotManagedDigest} from './platform/management/local-bot-bind.js';
 import {withLocalInventoryLock} from './platform/management/local-inventory-lock.js';
 import {readFleetStatus} from './core/fleet-runtime.js';
@@ -1979,6 +1980,7 @@ const platformDashboardApi = createPlatformDashboardApi({
   localOnboarding: botOnboarding,
   stopLocalBot:spawnStopBotLive,
   startLocalBot:spawnStartBotLive,
+  localAgentActivity:ids=>probeLocalAgentActivity(ids,async id=>registry.getByAppId(id)?proxyToDaemon(id,'/api/sessions',{method:'GET'}):null),
   localAgentBusy:async ids=>{
     for(const id of ids){
       if(!registry.getByAppId(id))return true;

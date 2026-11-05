@@ -17,6 +17,33 @@ it('preserves fixed single-CLI models and rejects mount confirmation before dest
  await expect(saveInstanceConfiguration(api,b,{...initial,workspaceSource:'new',confirmRestart:false},'request')).rejects.toThrow('确认');
  expect(api.mock.calls.some(c=>c[0].endsWith('/upgrade'))).toBe(false);expect(api).not.toHaveBeenCalled();
 });
+it('仅改挂载时跳过明确已同步且未变化的MCP、Proxy和Bot CLI',async()=>{
+ const b:any={...base(),row:{bots:[{appId:'bot',cliId:'codex'}]},proxy:{revision:2,proxyProfileId:null,synchronized:true},controlWorkspace:{revision:1,actual:{containerId:'control'}}};b.mcp.synchronized=true;
+ const api=vi.fn(async p=>p==='/mcp-targets/control'?b.mcp:p==='/control-proxy'?b.proxy:{queued:true});
+ expect(await saveLocalConfiguration(api,b,{...initial,hostMountIds:['mount'],confirmRestart:true},'request')).toEqual({queued:true});
+ expect(api.mock.calls.map(c=>[c[0],c[1]])).toEqual([['/mcp-targets/control',undefined],['/control-proxy',undefined],['/control-workspace','POST']]);
+});
+it('无变化保存只核对同步证据，不进行任何写入',async()=>{
+ const b:any={...base(),row:{bots:[{appId:'bot',cliId:'codex'}]},proxy:{revision:2,proxyProfileId:null,synchronized:true},controlWorkspace:{}};b.mcp.synchronized=true;
+ const api=vi.fn(async p=>p==='/mcp-targets/control'?b.mcp:b.proxy);
+ expect(await saveLocalConfiguration(api,b,initial,'request')).toEqual({applied:true});expect(api.mock.calls.every(c=>c[1]===undefined)).toBe(true);
+});
+it('同步证据不足或当前配置修订改变不能跳过，保留pending冻结请求',async()=>{
+ const b:any={...base(),row:{bots:[{appId:'bot',cliId:'codex'}]},proxy:{revision:2},controlWorkspace:{}};b.mcp.pendingRequestId='pending';
+ const api=vi.fn(async(p,m)=>p.startsWith('/mcp')?{applied:true}:{applied:true});await saveLocalConfiguration(api,b,{...initial,mcpServerIds:['new']},'new');
+ expect(api.mock.calls[0][2]).toMatchObject({requestId:'pending',serverIds:['mcp']});expect(api.mock.calls[1][1]).toBe('PUT');
+ delete b.mcp.pendingRequestId;b.mcp.synchronized=true;api.mockClear();api.mockImplementation(async()=>({...b.mcp,revision:3}));
+ await expect(saveLocalConfiguration(api,b,initial,'request')).rejects.toThrow('已变化');expect(api.mock.calls).toHaveLength(1);
+});
+it('本地漂移或同ID修订使同步证据变为false时，仍执行确认步骤',async()=>{
+ const b:any={...base(),row:{bots:[{appId:'bot',cliId:'codex'}]},proxy:{revision:2,proxyProfileId:null,synchronized:true},controlWorkspace:{}};b.mcp.synchronized=true;
+ const api=vi.fn(async(p,m)=>m==='POST'||m==='PUT'?{applied:true}:p==='/mcp-targets/control'?{...b.mcp,synchronized:false}:{...b.proxy,synchronized:false});
+ await saveLocalConfiguration(api,b,initial,'request');expect(api.mock.calls.map(c=>c[1])).toEqual([undefined,'POST',undefined,'PUT']);
+});
+it('明确挂载noop为成功，不假报排队或重做已确认步骤',async()=>{
+ const b:any={...base(),row:{bots:[]},proxy:{revision:0},controlWorkspace:{revision:1,actual:{containerId:'control'}}};
+ const api=vi.fn(async p=>p==='/control-workspace'?{noop:true,queued:false}:{applied:true});expect(await saveLocalConfiguration(api,b,{...initial,botId:'',hostMountIds:['mount'],confirmRestart:true},'request')).toEqual({applied:true,noop:true});
+});
 it('applies local MCP, proxy and selected Bot CLI, queues workspace rebuild last and retains other operations',async()=>{
  const b:any={...base(),row:{bots:[{appId:'bot',cliId:'codex'}]},proxy:{revision:2},controlWorkspace:{revision:1,actual:{containerId:'control'}}};
  const api=vi.fn(async p=>p.startsWith('/mcp')?{applied:true}:p==='/control-proxy'?{applied:true}:p.startsWith('/local-agent')?{changed:true}:{queued:true});

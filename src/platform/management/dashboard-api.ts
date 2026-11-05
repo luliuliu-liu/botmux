@@ -65,6 +65,7 @@ export function createPlatformDashboardApi(deps:{
   isLocalBotStopped?:(appId:string)=>Promise<boolean>;
   startLocalBot?:(appId:string)=>Promise<{ok:boolean}>;
   localAgentBusy?:(ids:string[])=>Promise<boolean>;
+  localAgentActivity?:(ids:string[])=>Promise<import('./local-agent-activity.js').LocalAgentActivity>;
   localBotRuntime?:(appId:string)=>Promise<{running:boolean;generation:string|null}>;
   changeLocalCli?:(appId:string,cli:string)=>Promise<{status:number;data:any}>;
   openWorkerDashboard?:(containerId:string,req:IncomingMessage)=>Promise<{url:string}>;
@@ -73,7 +74,7 @@ export function createPlatformDashboardApi(deps:{
   const readFeishuSession = deps.readFeishuSession ?? createFeishuSessionReader();
   const localAgent=createLocalControlAgent({botsJsonPath:deps.botsJsonPath,request:platformRequest,
     stop:id=>deps.stopLocalBot?.(id)??Promise.resolve({ok:false}),start:id=>deps.startLocalBot?.(id)??Promise.resolve({ok:false}),
-    isStopped:id=>deps.isLocalBotStopped?.(id)??Promise.resolve(false),busy:ids=>deps.localAgentBusy?.(ids)??Promise.resolve(ids.length>0)});
+    isStopped:id=>deps.isLocalBotStopped?.(id)??Promise.resolve(false),busy:ids=>deps.localAgentBusy?.(ids)??Promise.resolve(ids.length>0),activity:deps.localAgentActivity});
   const mcps=createMcpManagement(deps.botsJsonPath,platformRequest,op=>localAgent.configureMcp(op));
   const onboardingSession=createOnboardingSessionConfirmation(()=>deps.localOnboarding.sessionStatus());
   const path=join(dirname(deps.botsJsonPath),'platform','pool-bots.json');

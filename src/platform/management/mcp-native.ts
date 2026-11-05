@@ -2,7 +2,7 @@ import {existsSync,lstatSync,mkdirSync,readFileSync,writeFileSync,renameSync,unl
 import {dirname,join,resolve,sep} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {parse,stringify} from 'smol-toml';
-import {mcpTargets,type McpCli} from './mcp-schema.js';
+import {MCP_CLIS,mcpTargets,type McpCli} from './mcp-schema.js';
 import {mcpDigest,validateMcpBundle} from './mcp-bundle.js';
 export {mcpDigest,validateMcpBundle,type McpBundle} from './mcp-bundle.js';
 function checkedDir(home:string,path:string){const root=realpathSync(home),target=resolve(path);if(target!==root&&!target.startsWith(root+sep))throw Error('mcp_path_outside_state');let current=root;for(const part of target.slice(root.length).split(sep).filter(Boolean)){current=join(current,part);try{const stat=lstatSync(current);if(stat.isSymbolicLink()||!stat.isDirectory())throw Error('unsafe_mcp_path');}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;mkdirSync(current,{mode:0o700});}}}
@@ -10,6 +10,7 @@ const NATIVE_LIMIT=16*1024*1024,RECOVERY_LIMIT=256*1024*1024;
 function limit(path:string){return path.endsWith('/mcp-pending.json')?RECOVERY_LIMIT:NATIVE_LIMIT;}
 function bounded(path:string,value:string){if(Buffer.byteLength(value)>limit(path))throw Error('mcp_configuration_too_large');}
 function text(home:string,path:string){checkedDir(home,dirname(path));try{const s=lstatSync(path);if(!s.isFile()||s.isSymbolicLink()||s.size>limit(path))throw Error('unsafe_mcp_file');return readFileSync(path,'utf8');}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return '';throw e;}}
+function probeText(home:string,path:string){const root=realpathSync(home),target=resolve(path);if(target!==root&&!target.startsWith(root+sep))throw Error('mcp_path_outside_state');let current=root;for(const part of target.slice(root.length).split(sep).filter(Boolean)){current=join(current,part);let stat;try{stat=lstatSync(current);}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw e;}if(stat.isSymbolicLink())throw Error('unsafe_mcp_path');if(current!==target&&!stat.isDirectory())throw Error('unsafe_mcp_path');if(current===target&&(!stat.isFile()||stat.size>limit(target)))throw Error('unsafe_mcp_file');}return readFileSync(target,'utf8');}
 function syncDirectory(path:string){const fd=openSync(path,'r');try{fsyncSync(fd);}finally{closeSync(fd);}}
 function atomic(home:string,path:string,value:string){bounded(path,value);checkedDir(home,dirname(path));text(home,path);const temporary=path+'.platform-'+randomUUID();try{const fd=openSync(temporary,'wx',0o600);try{writeFileSync(fd,value);fsyncSync(fd);}finally{closeSync(fd);}renameSync(temporary,path);syncDirectory(dirname(path));}finally{try{unlinkSync(temporary);}catch{}}}
 export function nativeMcpPath(home:string,cli:McpCli){return cli==='pi'?join(home,'.pi/agent/mcp.json'):cli==='claude-code'?join(home,'.claude.json'):cli==='zcode'?join(home,'.zcode/cli/config.json'):cli==='codex'?join(home,'.codex/config.toml'):cli==='traex'?join(home,'.trae/traecli.toml'):join(home,'.dsh/platform-mcp.patch.json');}
@@ -30,6 +31,18 @@ export function mergeNativeMcp(raw:string,cli:McpCli,next:Record<string,any>,own
  if(toml){const names=new Set([...Object.keys(owned),...Object.keys(next)]);const rest=stripTables(raw,names);const untouched={...existing};for(const n of names)delete untouched[n];const parsed:any=rest.trim()?parse(rest):{};if(mcpDigest(parsed.mcp_servers??{})!==mcpDigest(untouched))throw Error('mcp_toml_inline_table_conflict');return rest.trimEnd()+'\n'+(Object.keys(written).length?stringify({mcp_servers:written}):'');}
  if(cli==='dsh')return JSON.stringify(Object.keys(merged).length?[{insert:Object.values(merged)}]:[],null,2)+'\n';if(cli==='zcode')data.mcp.servers=merged;else data.mcpServers=merged;return JSON.stringify(data,null,2)+'\n';
 }
+const sameSet=(a:string[],b:string[])=>a.length===b.length&&new Set(a).size===a.length&&a.every(v=>b.includes(v));
+export function isNativeMcpSynchronized(home:string,target:any,imageCliIds:string[]){try{
+ if(!target||!Number.isSafeInteger(target.revision)||target.revision<1||target.pendingRequestId!=null||!Array.isArray(target.serverIds)||!Array.isArray(target.cliIds)||!Array.isArray(target.servers))return false;
+ const clis=imageCliIds.filter((v):v is McpCli=>MCP_CLIS.includes(v as McpCli));if(!clis.length||clis.length!==imageCliIds.length||!sameSet(target.cliIds,clis))return false;
+ const root=realpathSync(home),state=join(root,'.botmux/platform');if(probeText(root,join(state,'mcp-pending.json'))!==undefined)return false;
+ const ledgerRaw=probeText(root,join(state,'mcp-configuration.json'));if(ledgerRaw===undefined)return false;const ledger=JSON.parse(ledgerRaw);
+ if(ledger?.schema!=='platform-mcp-runtime-v1'||ledger.revision!==target.revision||typeof ledger.digest!=='string'||!ledger.entries||typeof ledger.entries!=='object'||Array.isArray(ledger.entries)||!Array.isArray(ledger.servers)||!sameSet(Object.keys(ledger.entries),clis))return false;
+ const catalogue=new Map<string,any>();for(const server of target.servers){if(!server||typeof server.id!=='string'||!Number.isSafeInteger(server.revision)||typeof server.configuration?.name!=='string'||catalogue.has(server.id))return false;catalogue.set(server.id,server);}
+ if(!sameSet(target.serverIds,ledger.servers.map((s:any)=>s?.id)))return false;for(const server of ledger.servers){const remote=catalogue.get(server?.id);if(!remote||server.revision!==remote.revision||server.name!==remote.configuration.name||!mcpTargets(remote.configuration,clis).length)return false;}
+ for(const cli of clis){const owned=ledger.entries[cli];if(!owned||typeof owned!=='object'||Array.isArray(owned))return false;const expectedNames=target.serverIds.map((id:string)=>catalogue.get(id)).filter((s:any)=>mcpTargets(s.configuration,[cli]).length).map((s:any)=>s.configuration.name);if(!sameSet(Object.keys(owned),expectedNames))return false;if(!Object.keys(owned).length)continue;const raw=probeText(root,nativeMcpPath(root,cli));if(raw===undefined)return false;const data:any=cli==='codex'||cli==='traex'?parse(raw):JSON.parse(raw),existing=cli==='codex'||cli==='traex'?(data.mcp_servers??{}):mapIn(data,cli);if(!existing||typeof existing!=='object'||Array.isArray(existing))return false;for(const [name,value] of Object.entries(owned)){const current=existing[name];if(current===undefined)return false;const compared=(cli==='codex'||cli==='traex')&&current?.tools!==undefined&&(value as any)?.tools===undefined?Object.fromEntries(Object.entries(current).filter(([k])=>k!=='tools')):current;if(mcpDigest(compared)!==mcpDigest(value))return false;}}
+ return true;
+ }catch{return false;}}
 export function recoverPendingMcp(home:string){const root=realpathSync(home),state=join(root,'.botmux/platform'),ledgerPath=join(state,'mcp-configuration.json'),pendingPath=join(state,'mcp-pending.json');checkedDir(root,state);
  const pendingRaw=text(root,pendingPath);if(!pendingRaw)return;
  const p=JSON.parse(pendingRaw);for(const f of p.files){const current=text(root,f.path);if(current!==f.before&&current!==f.after)throw Error('mcp_recovery_conflict');}
