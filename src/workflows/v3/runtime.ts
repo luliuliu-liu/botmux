@@ -17,7 +17,7 @@ import {
 import type { AttemptLeaseProvider } from './runtime-host-contract.js';
 import {join} from 'node:path';
 import {resolveExecutionBackend} from './execution-backend.js';
-import {assertPoolExecutionAvailable} from './pool-execution-policy.js';
+import {assertPoolExecutionAvailable,requiresAgentPool} from './pool-execution-policy.js';
 
 export {
   classifyTerminal,
@@ -29,6 +29,7 @@ export {
   readRevisitRequest,
   renderGoalFile,
   revisitBudgetStatus,
+  v3AcceptanceProbeUnknownSince,
   validateResult,
 } from './shared-node-runtime.js';
 export type {
@@ -50,6 +51,9 @@ export async function runWorkflow(
 ): Promise<V3RunOutcome> {
   const backend=resolveExecutionBackend(join(options.baseDir,dag.runId));
   assertPoolExecutionAvailable(dag, backend ?? deps);
+  if (options.nodeExecutor === 'bot' && (requiresAgentPool(dag) || backend?.resourceManaged?.() || deps.resourceManaged?.())) {
+    throw new Error('agent_pool_external_executor_conflict: 托管 Agent 池不能使用外部 Bot 执行方式');
+  }
   return runSharedWorkflow(dag, {
     ...deps,
     ...(backend?{runNode:backend.runNode,prepareResource:backend.prepareResource,resourceManaged:backend.resourceManaged}:{}),

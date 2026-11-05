@@ -25,6 +25,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
 
 import { loadBotConfigs, type BotConfig } from '../../bot-registry.js';
+import { workflowConcurrencyConfig, type WorkflowConcurrencyConfig } from '../../global-config.js';
+import { resolveV3Concurrency } from './concurrency-config.js';
 import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import { withFileLock, withFileLockSync } from '../../utils/file-lock.js';
 import { isHostNode, isLoopNode, type V3Dag } from './dag.js';
@@ -68,6 +70,7 @@ import {
   canResolveGateWait,
   normalizeGateWaitInput,
   readWait,
+  markWaitVoided,
   resolveWaitOnce,
   selectedResolution,
   v3GateWaitId,
@@ -84,7 +87,19 @@ import {
   type V3ErrorClass,
 } from './journal.js';
 import { materialize } from './state.js';
+import { loadEffectiveV3Dag, v3PendingProposalHolds } from './dag-revision.js';
+import {
+  reconcileV3RevisionProposals,
+  type V3RevisionCardView,
+  type V3CarriedProposal,
+  type V3VoidedProposal,
+} from './run-edit.js';
 import { openV3WorkerAttempts } from './attempt-ledger.js';
+import { openV3ExternalAttempts } from './external-attempt-ledger.js';
+import {
+  V3_DEFAULT_HANDOFF_ACCEPT_TIMEOUT_MS,
+  type V3ExternalNodeExecutor,
+} from './external-executor.js';
 import { openV3HostEffects } from './host-effect-ledger.js';
 import { readAndVerifyV3PreparedHostInput } from './host-execution.js';
 import { composeV3HostGatePrompt, renderV3HostInputPreview } from './host-bindings.js';
@@ -582,9 +597,50 @@ export function readV3RunChatBinding(runDir: string): RunChatBinding | undefined
   return readGrillState(runDir)?.chatBinding;
 }
 
-/** Verified DAG for recovery/display logic, with the same missing-only legacy
- * fallback as the start path. */
+/** Verified EFFECTIVE DAG (authorized DAG + applied runtime revisions) for
+ * recovery/display logic, with the same missing-only legacy fallback as the
+ * start path. A revision that fails its digest check yields undefined, like
+ * any other integrity failure here. */
 export function loadV3RunDagForRecovery(runDir: string): V3Dag | undefined {
+  const base = loadV3RunAuthorizedDag(runDir);
+  if (!base) return undefined;
+  const journalPath = join(runDir, 'journal.ndjson');
+  try {
+    return loadEffectiveV3Dag(runDir, base, readJournal(journalPath)).dag;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A bot-executed run as the workflow-node layer sees it (handoff contracts,
+ * submissions, node cards). Its DAG is the EFFECTIVE flow (design §13.3), so a
+ * node a revision changed is validated against its new contract; a revision
+ * failing its digest check makes the run unloadable (fail closed).
+ */
+export function loadV3BotExecutedRun(runDir: string):
+  | { dag: V3Dag; authorizedDag: V3Dag; nodeExecutor: 'bot'; chatId?: string; title: string }
+  | undefined {
+  try {
+    const read = readRunEnvelope(runDir);
+    if (read.kind !== 'ok' || !('nodeExecutor' in read.envelope) || read.envelope.nodeExecutor !== 'bot') return undefined;
+    const loaded = loadAuthorizedV3Run(runDir);
+    const journalPath = join(runDir, 'journal.ndjson');
+    const effective = loadEffectiveV3Dag(runDir, loaded.dag, readJournal(journalPath));
+    return {
+      dag: effective.dag,
+      authorizedDag: loaded.dag,
+      nodeExecutor: 'bot',
+      ...(loaded.envelope.chatBinding?.chatId ? { chatId: loaded.envelope.chatBinding.chatId } : {}),
+      title: loaded.spec?.title?.trim() || basename(runDir),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Revision-1 (authorized) DAG with the legacy grill fallback. */
+export function loadV3RunAuthorizedDag(runDir: string): V3Dag | undefined {
   const envelope = readRunEnvelope(runDir);
   if (envelope.kind === 'ok') {
     try { return loadAuthorizedV3Run(runDir).dag; } catch { return undefined; }
@@ -698,12 +754,26 @@ export interface V3BlockedInfo {
   revisitTo?: string;
   /** No generic retry may mint a fresh idempotency key for this attempt. */
   retryForbidden?: 'host-effect-uncertain' | 'revise-workflow-required';
+  /** The ask is moot: a flow revision changed this node after its gate was
+   *  passed, so its next run is a fresh instance that must pass the gate again
+   *  (an answer would never reach it). The card offers the re-run instead. */
+  askVoided?: boolean;
 }
 
 /** Latest `nodeBlocked` details for a node (card content).  Falls back to a
  *  bare nodeId/attempt when the journal has no blocked event (shouldn't
  *  happen for a blocked run, but the card must still render). */
 export function blockedInfoFor(events: StoredEvent[], nodeId: string): V3BlockedInfo {
+  const found = lastBlockedInfoFor(events, nodeId);
+  if (found?.ask) {
+    const snap = materialize(events);
+    const instanceId = snap.nodes.get(nodeId)?.effectiveInstanceId;
+    if (instanceId && snap.regatePending?.has(instanceId)) return { ...found, askVoided: true };
+  }
+  return found ?? { nodeId, attemptId: latestAttemptIdFor(events, nodeId) ?? `${nodeId}/attempts/001` };
+}
+
+function lastBlockedInfoFor(events: StoredEvent[], nodeId: string): V3BlockedInfo | undefined {
   let found: V3BlockedInfo | undefined;
   for (const e of events) {
     if (e.type === 'nodeBlocked' && e.nodeId === nodeId) {
@@ -728,7 +798,7 @@ export function blockedInfoFor(events: StoredEvent[], nodeId: string): V3Blocked
       };
     }
   }
-  return found ?? { nodeId, attemptId: latestAttemptIdFor(events, nodeId) ?? `${nodeId}/attempts/001` };
+  return found;
 }
 
 /** What the daemon needs to render a revisit-budget grant card.  Derived from
@@ -807,9 +877,23 @@ export interface V3DaemonRunDeps {
   postRevisitGrantCard?: (binding: RunChatBinding, info: V3RevisitBudgetBlockedInfo, runId: string) => Promise<void>;
   /** Report a terminal run (final card / message).  Optional. */
   onTerminal?: (runId: string, outcome: V3TerminalOutcome, binding?: RunChatBinding) => Promise<void>;
+  /** Explicit global cap; wins over `workflow.concurrency.global`. */
   maxParallel?: number;
+  /** Host concurrency config source (default: `workflow.concurrency` in
+   *  `~/.botmux/config.json`, read on every drive). Tests inject. */
+  concurrencyConfig?: () => WorkflowConcurrencyConfig | undefined;
   /** Low-latency interrupt delivery. Durable intent always lives in journal. */
   cancelSignal?: AbortSignal;
+  /**
+   * EXTERNAL EXECUTOR INJECTION POINT. Transport for runs whose `run.json`
+   * pins `nodeExecutor: "bot"`. The daemon does not construct one yet, so such
+   * a run fails closed at start; runs without the field never consult it.
+   */
+  externalExecutor?: V3ExternalNodeExecutor;
+  /** Engine clock for external handoff deadlines (tests inject a fake). */
+  now?: () => number;
+  /** Observability sink for external transport failures. */
+  onExternalError?: V3RuntimeDeps['onExternalError'];
 }
 
 /**
@@ -858,7 +942,8 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
   const binding = context.binding;
   // Secret resolver by larkAppId from live bots.json; no env fallback (contract).
   const secretById = new Map(bots.map((b) => [b.larkAppId, b.larkAppSecret]));
-  const resolveLarkAppSecret = (larkAppId: string): string | undefined => secretById.get(larkAppId);
+  const resolveLarkAppSecret = (larkAppId: string): string | undefined => secretById.get(larkAppId)
+    ?? (deps.loadBots ?? loadBotConfigs)().find(bot => bot.larkAppId === larkAppId)?.larkAppSecret;
 
   // codex's throw-based validator → runtime's result-style seam (override-able for tests).
   const validateManifest: ValidateManifest = deps.validateManifest ?? (async (manifestPath, outputDir) => {
@@ -874,12 +959,26 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
   // Provider credentials are live spawn inputs, not part of the frozen
   // BotSnapshot/run envelope. Resolve them by the same selector only when a
   // worker is about to launch; the ephemeral pool keeps them in memory.
-  const resolveBotEnv = (botId: string | undefined) => resolveBotConfig(botId, bots).env;
+  const resolveBotEnv = (botId: string | undefined, snapshot?: ReturnType<typeof botToSnapshot>) => {
+    const frozen = snapshot ?? context.botSnapshots?.get(botId ?? '');
+    const currentBots = frozen && !bots.some(bot => bot.larkAppId === frozen.larkAppId)
+      ? (deps.loadBots ?? loadBotConfigs)() : bots;
+    const live = frozen ? currentBots.find(bot => bot.larkAppId === frozen.larkAppId)
+      : currentBots.find(bot => bot.larkAppId === botId) ?? currentBots.find(bot => bot.name === botId) ?? (!botId ? currentBots[0] : undefined);
+    // The authorized snapshot remains executable without a current bot row;
+    // native credential resolution still happens at the actual worker launch.
+    return live?.env;
+  };
 
   const runNode = (deps.makeRunNode ?? defaultMakeRunNode)(resolveLarkAppSecret);
   const dag = context.dag;
   const imWriteOptions = chatBoundWorkflowWriteOptions(context.resolvedWorkflowData, 'send');
   const replyWriteOptions = chatBoundWorkflowWriteOptions(context.resolvedWorkflowData, 'reply');
+
+  // Frozen per run: only an envelope can opt a run into bot-executed nodes.
+  const nodeExecutor = context.envelope && 'nodeExecutor' in context.envelope
+    ? context.envelope.nodeExecutor
+    : undefined;
 
   // suspend mode → no resolveGate (runtime writes the wait + returns awaitingGate).
   const runtimeDeps: V3RuntimeDeps = {
@@ -889,14 +988,23 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
     resolveBotEnv,
     hostExecutors: createDefaultHostExecutorRegistry(imWriteOptions, replyWriteOptions),
     hostReconcilers: createDefaultProviderReconcilers(imWriteOptions, replyWriteOptions),
+    ...(deps.now ? { now: deps.now } : {}),
+    ...(nodeExecutor === 'bot' && deps.externalExecutor ? { externalExecutor: deps.externalExecutor } : {}),
+    ...(nodeExecutor === 'bot' && deps.onExternalError ? { onExternalError: deps.onExternalError } : {}),
   };
   const opts: V3RuntimeOptions = {
+    ...(nodeExecutor === 'bot'
+      ? { nodeExecutor, externalAcceptTimeoutMs: handoffAcceptTimeoutMs() }
+      : {}),
     baseDir,
     gateMode: 'suspend',
     ...(context.botSnapshots ? { frozenBotSnapshots: context.botSnapshots } : {}),
     ...(context.authorizedArtifacts ? { authorizedArtifacts: true } : {}),
     ...(context.resolvedWorkflowData ? { resolvedWorkflowData: context.resolvedWorkflowData } : {}),
-    ...(deps.maxParallel ? { globalConcurrency: deps.maxParallel } : {}),
+    ...resolveV3Concurrency(
+      (deps.concurrencyConfig ?? workflowConcurrencyConfig)(),
+      deps.maxParallel ? { global: deps.maxParallel } : {},
+    ),
     ...(deps.cancelSignal ? { cancelSignal: deps.cancelSignal } : {}),
     // Real BOTMUX_* identity env for worker CLI children (see RunNodeRequest.chatBinding).
     ...(binding ? { chatBinding: binding } : {}),
@@ -914,8 +1022,9 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
     if(binding&&deps.postResourceCard)for(const wait of outcome.resourceWaits)if(wait.waitReason==='capability')await deps.postResourceCard(binding,wait,runId);
     return outcome;
   }
-  if (outcome.reason === 'awaitingGate') {
-    if (!binding) {
+  if (outcome.reason === 'awaitingGate' || outcome.reason === 'awaitingExternal') {
+    // An external wait may coexist with pending gates; those still need cards.
+    if (outcome.pendingWaits.length > 0 && !binding) {
       // No chat binding (e.g. not born via grill) → can't post a card.  The
       // wait files are on disk; surface rather than silently strand the run.
       throw new Error(
@@ -924,7 +1033,7 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
     }
     if(binding&&deps.postResourceCard)for(const wait of outcome.resourceWaits??[])if(wait.waitReason==='capability')await deps.postResourceCard(binding,wait,runId);
     for (const gate of outcome.pendingWaits) {
-      await deps.postGateCard(binding, gate, runId);
+      await deps.postGateCard(binding!, gate, runId);
     }
   } else if (outcome.runStatus === 'blocked' && outcome.blockedNodeId && binding) {
     // Blocked = terminal-for-now.  Two distinct causes, two distinct cards:
@@ -936,7 +1045,7 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
     const revisitBudget = revisitBudgetBlockedInfoFor(events, outcome.blockedNodeId);
     if (isLoop && deps.postLoopGrantCard) {
       const info = loopExhaustedInfoFor(events, outcome.blockedNodeId);
-      const loopNode = dag.nodes.find((n) => n.id === outcome.blockedNodeId);
+      const loopNode = (loadV3RunDagForRecovery(runDir) ?? dag).nodes.find((n) => n.id === outcome.blockedNodeId);
       if (loopNode && isLoopNode(loopNode)) info.maxIterations = loopNode.maxIterations;
       await deps.postLoopGrantCard(binding, info, runId);
     } else if (revisitBudget && deps.postRevisitGrantCard) {
@@ -954,6 +1063,15 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
   return outcome;
 }
 
+/** Acceptance window for bot handoffs: the same knob and default as
+ *  `botmux dispatch` acceptance. */
+function handoffAcceptTimeoutMs(): number {
+  const configured = Number(process.env.BOTMUX_DISPATCH_ACCEPT_TIMEOUT_MS);
+  return Number.isSafeInteger(configured) && configured >= 0
+    ? configured
+    : V3_DEFAULT_HANDOFF_ACCEPT_TIMEOUT_MS;
+}
+
 function defaultMakeRunNode(
   resolveLarkAppSecret: (larkAppId: string) => string | undefined,
 ): V3RuntimeDeps['runNode'] {
@@ -963,6 +1081,9 @@ function defaultMakeRunNode(
 
 export type V3GateClickOutcome =
   | { kind: 'resolved'; resolution: 'approved' | 'rejected' }
+  /** A runtime flow revision voided this gate before the decision reached
+   *  the journal: the click changed nothing. */
+  | { kind: 'voided' }
   | { kind: 'already-settled'; status: GateWaitStatus }
   | { kind: 'unauthorized' }
   | { kind: 'stale-run'; reason: 'terminal' | 'missing' | 'no-wait' | 'stale-node' };
@@ -1044,22 +1165,43 @@ export function resolveV3GateClick(
     return { kind: 'resolved', resolution: 'rejected' };
   }
   const instanceId = snap.nodes.get(resolvedWait.nodeId)?.effectiveInstanceId;
-  appendEvent(journalPath, {
-    type: 'gateResolved',
-    // nodeId from the WAIT FILE, not caller input (codex review #1): the wait is
-    // the authoritative state — a wrong/stale caller nodeId must not let us write
-    // gateResolved for a different node.
-    nodeId: resolvedWait.nodeId,
-    ...(instanceId ? { instanceId } : {}),
-    waitId: input.waitId,
-    resolution,
-    by: input.by,
-    selected: input.selected,
-    ...(trustedHost
-      ? { hostApproval: trustedHost.hostApproval }
-      : resolvedWait.hostApproval ? { hostApproval: resolvedWait.hostApproval } : {}),
+  // Re-check under the journal lock: an edit may have voided this gate
+  // between the wait CAS and here (design §13.4). Then the decision is moot —
+  // the node re-gates under its new definition — and the wait must say so.
+  const recorded = withJournalMutationSync(journalPath, ({ events: latest, append }) => {
+    if (gateVoidedByRevision(latest, input.waitId)) return false;
+    append({
+      type: 'gateResolved',
+      // nodeId from the WAIT FILE, not caller input (codex review #1): the wait is
+      // the authoritative state — a wrong/stale caller nodeId must not let us write
+      // gateResolved for a different node.
+      nodeId: resolvedWait.nodeId,
+      ...(instanceId ? { instanceId } : {}),
+      waitId: input.waitId,
+      resolution,
+      by: input.by,
+      selected: input.selected,
+      ...(trustedHost
+        ? { hostApproval: trustedHost.hostApproval }
+        : resolvedWait.hostApproval ? { hostApproval: resolvedWait.hostApproval } : {}),
+    });
+    return true;
   });
+  if (!recorded) {
+    markWaitVoided(runDir, input.waitId, 'system-flow-revision');
+    return { kind: 'voided' };
+  }
   return { kind: 'resolved', resolution };
+}
+
+/** Did a runtime flow revision void this gate wait (changed or removed its
+ *  node while it was pending)? */
+function gateVoidedByRevision(events: readonly StoredEvent[], waitId: string): boolean {
+  return events.some((event) =>
+    event.type === 'dagRevised' && (
+      event.effects?.supersede?.some((item) => item.waitId === waitId) === true ||
+      event.effects?.cancel?.some((item) => item.waitId === waitId) === true
+    ));
 }
 
 export type V3RunCancelOutcome =
@@ -1122,7 +1264,16 @@ export function requestV3RunCancel(
 export type V3RetryOutcome =
   | { kind: 'requested'; nodeId: string; previousAttemptId: string; nextAttemptId: string }
   | { kind: 'already-requested'; nodeId: string }
-  | { kind: 'stale-run'; reason: 'missing' | 'not-blocked' | 'node-failed' | 'stale-attempt' | 'loop-node' | 'invalid-answer' | 'host-effect-uncertain' | 'revise-workflow-required' };
+  | {
+    kind: 'stale-run';
+    reason:
+      | 'missing' | 'not-blocked' | 'node-failed' | 'stale-attempt' | 'loop-node' | 'invalid-answer'
+      | 'host-effect-uncertain' | 'revise-workflow-required'
+      /** The answer's instance was revised: it re-runs fresh through its gate. */
+      | 'revised'
+      /** A pending flow-revision proposal touches this node: decide it first. */
+      | 'revision-pending';
+  };
 
 type V3RetryAnswerInput =
   | { selected: string; by: string }
@@ -1165,7 +1316,14 @@ function answerPreview(s: string): string {
 export function requestV3Retry(
   baseDir: string,
   runId: string,
-  input: { nodeId?: string; expectedAttemptId?: string; answer?: V3RetryAnswerInput } = {},
+  input: {
+    nodeId?: string;
+    expectedAttemptId?: string;
+    answer?: V3RetryAnswerInput;
+    /** Who decided the retry and why (`v3ActionRecord`); absent = the
+     *  event keeps its original shape (card clicks, human turns). */
+    record?: { by?: string; auto?: { reason: string }; note?: string };
+  } = {},
 ): V3RetryOutcome {
   const runDir = safeRunDir(baseDir, runId);
   const journalPath = join(runDir, 'journal.ndjson');
@@ -1239,6 +1397,19 @@ export function requestV3Retry(
   // blocked retries pass no answer and this whole block is skipped.  Core
   // validates membership against the current ask, because a card nonce proves
   // freshness/integrity but not that `selected` is one of the authored options.
+  // A flow revision changed this node after its gate was passed: its next
+  // retry is a fresh instance that must pass the gate again, so an answer to
+  // the OLD instance's question would never reach it. Refuse visibly instead
+  // of reporting an answer that is silently dropped.
+  if (input.answer && instanceId && snap.regatePending?.has(instanceId)) {
+    return { kind: 'stale-run', reason: 'revised' };
+  }
+  // A pending proposal touching this node would, once approved, re-run it as
+  // a fresh instance — the answer would be silently dropped. Keep the card
+  // answerable and ask for the proposal to be decided first.
+  if (input.answer && v3PendingProposalHolds(events, nodeId)) {
+    return { kind: 'stale-run', reason: 'revision-pending' };
+  }
   let answer: { path: string; preview: string; by: string } | undefined;
   if (input.answer) {
     if (!info.ask) {
@@ -1277,6 +1448,9 @@ export function requestV3Retry(
     previousErrorCode: info.errorCode,
     ...(resetGate ? { resetGate: true } : {}),
     ...(answer ? { answer } : {}),
+    ...(input.record?.by ? { by: input.record.by } : {}),
+    ...(input.record?.auto ? { auto: input.record.auto } : {}),
+    ...(input.record?.note ? { note: input.record.note } : {}),
   });
   return { kind: 'requested', nodeId, previousAttemptId, nextAttemptId };
 }
@@ -1457,6 +1631,14 @@ export interface V3GateRunnerDeps {
   postLoopGrantCard?: (binding: RunChatBinding, info: V3LoopExhaustedInfo, runId: string) => Promise<void>;
   /** Post (or re-post) a revisit-budget-exhausted node's grant card. */
   postRevisitGrantCard?: (binding: RunChatBinding, info: V3RevisitBudgetBlockedInfo, runId: string) => Promise<void>;
+  /** Re-post a pending 「流程修改确认」card on cold attach (design §9.5). */
+  postRevisionCard?: (binding: RunChatBinding, view: V3RevisionCardView, runId: string) => Promise<void>;
+  /** Freeze confirmation cards whose proposal went void while down. */
+  freezeRevisionCards?: (binding: RunChatBinding, runId: string, voided: V3VoidedProposal[]) => Promise<void>;
+  /** Show proposals whose carry a crash interrupted (finished on cold
+   *  attach) in their old card's messages, or post a card. Without it they
+   *  are re-posted like any pending proposal. */
+  moveRevisionCards?: (binding: RunChatBinding, runId: string, carried: V3CarriedProposal[]) => Promise<void>;
   /** Notify a terminal run (optional, daemon-supplied). */
   notifyTerminal?: (binding: RunChatBinding | undefined, runId: string, outcome: V3TerminalOutcome) => Promise<void>;
   /** Best-effort observability hooks. They must never affect run semantics. */
@@ -1469,6 +1651,14 @@ export interface V3GateRunnerDeps {
   maxParallel?: number;
   /** error sink (default: swallow).  Daemon passes its logger.warn. */
   onError?: (runId: string, err: unknown) => void;
+  /** External executor injection point (see V3DaemonRunDeps.externalExecutor). */
+  externalExecutor?: V3DaemonRunDeps['externalExecutor'];
+  now?: V3DaemonRunDeps['now'];
+  onExternalError?: V3DaemonRunDeps['onExternalError'];
+  /** Arm a re-drive at an engine deadline (`awaitingExternal.wakeAt`), or
+   *  cancel the run's pending wake when `wakeAt` is undefined (any other
+   *  outcome). The default keeps one unref'd timer per run. */
+  scheduleWake?: (runId: string, wakeAt: number | undefined, wake: () => void) => void;
 }
 
 /**
@@ -1483,6 +1673,69 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
   const rerunRequested = new Set<string>();
   const activeControllers = new Map<string, AbortController>();
   const resourcePollGates=new Set<string>();
+  const wakeTimers = new Map<string, NodeJS.Timeout>();
+  // Cards already posted by this process, per BOT-EXECUTED run. Every drive
+  // re-derives what to show from the journal, and such runs are re-driven on
+  // every acceptance / submission / deadline: without this one gate or
+  // blocked node would be announced once per drive. Other runs keep their
+  // historical posting behaviour untouched.
+  const postedCards = new Map<string, Set<string>>();
+  const isBotRun = (runId: string): boolean => {
+    try {
+      const envelope = readRunEnvelope(safeRunDir(baseDir, runId));
+      return envelope.kind === 'ok' && 'nodeExecutor' in envelope.envelope && envelope.envelope.nodeExecutor === 'bot';
+    } catch {
+      return false;
+    }
+  };
+  async function postOnce(runId: string, key: string, post: () => Promise<void>): Promise<void> {
+    if (!isBotRun(runId)) return post();
+    const seen = postedCards.get(runId) ?? new Set<string>();
+    if (seen.has(key)) return;
+    await post();
+    seen.add(key);
+    postedCards.set(runId, seen);
+  }
+  /** Keep only keys for what is still awaiting a human: a gate key lives
+   *  while its wait is pending (a later re-dispatch is announced again), a
+   *  blocked-family key while the run is blocked. */
+  function forgetSettledCards(runId: string, outcome: V3RunOutcome): void {
+    const seen = postedCards.get(runId);
+    if (!seen) return;
+    const pendingGates = new Set(outcome.reason === 'awaitingGate' || outcome.reason === 'awaitingExternal' ? outcome.pendingWaits.map((gate) => `gate:${gate.waitId}`) : []);
+    const blocked = outcome.reason === 'terminal' && outcome.runStatus === 'blocked';
+    for (const key of [...seen]) {
+      if (key.startsWith('gate:') ? !pendingGates.has(key) : !blocked) seen.delete(key);
+    }
+    if (seen.size === 0) postedCards.delete(runId);
+  }
+  const postGateCardOnce = (binding: RunChatBinding, gate: V3PendingGate, runId: string) =>
+    postOnce(runId, `gate:${gate.waitId}`, () => deps.postCard(binding, gate, runId));
+  const postBlockedCardOnce = deps.postBlockedCard
+    ? (binding: RunChatBinding, info: V3BlockedInfo, runId: string) =>
+        postOnce(runId, `blocked:${info.nodeId}:${info.attemptId}`, () => deps.postBlockedCard!(binding, info, runId))
+    : undefined;
+  const postLoopGrantCardOnce = deps.postLoopGrantCard
+    ? (binding: RunChatBinding, info: V3LoopExhaustedInfo, runId: string) =>
+        postOnce(runId, `loop:${info.loopId}:${info.iteration}`, () => deps.postLoopGrantCard!(binding, info, runId))
+    : undefined;
+  const postRevisitGrantCardOnce = deps.postRevisitGrantCard
+    ? (binding: RunChatBinding, info: V3RevisitBudgetBlockedInfo, runId: string) =>
+        postOnce(runId, `revisit:${info.sourceNodeId}:${info.attemptId}`, () => deps.postRevisitGrantCard!(binding, info, runId))
+    : undefined;
+  const now = deps.now ?? Date.now;
+  const scheduleWake = deps.scheduleWake ?? ((runId: string, wakeAt: number | undefined, wake: () => void): void => {
+    const prior = wakeTimers.get(runId);
+    if (prior) clearTimeout(prior);
+    wakeTimers.delete(runId);
+    if (wakeAt === undefined) return;
+    const timer = setTimeout(() => {
+      if (wakeTimers.get(runId) === timer) wakeTimers.delete(runId);
+      wake();
+    }, Math.max(0, wakeAt - now()));
+    timer.unref?.();
+    wakeTimers.set(runId, timer);
+  });
 
   const invokeLifecycleHook = (
     hook: ((runId: string) => void | Promise<void>) | undefined,
@@ -1532,22 +1785,33 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
                 // Re-fold under the SAME lease before releasing ownership so
                 // the request cannot be stranded between runtime and transport.
                 do {
-                  const result=await driveV3Run(runId, {
+                  const outcome = await driveV3Run(runId, {
                     baseDir,
                     loadBots: deps.loadBots,
                     makeRunNode: deps.makeRunNode,
                     validateManifest: deps.validateManifest,
                     maxParallel: deps.maxParallel,
                     cancelSignal: controller.signal,
+                    ...(deps.externalExecutor ? { externalExecutor: deps.externalExecutor } : {}),
+                    ...(deps.now ? { now: deps.now } : {}),
+                    ...(deps.onExternalError ? { onExternalError: deps.onExternalError } : {}),
                     postResourceCard:deps.postResourceCard,
-                    postGateCard: async(binding,gate,rid)=>{const key=rid+'/'+gate.waitId;const managed=resolveExecutionBackend(join(baseDir,rid))?.resourceManaged?.();if(managed&&resourcePollGates.has(key))return;await deps.postCard(binding,gate,rid);if(managed)resourcePollGates.add(key);},
-                    postBlockedCard: deps.postBlockedCard,
-                    postLoopGrantCard: deps.postLoopGrantCard,
-                    postRevisitGrantCard: deps.postRevisitGrantCard,
-                    onTerminal: (rid, outcome, binding) =>
-                      deps.notifyTerminal ? deps.notifyTerminal(binding, rid, outcome) : Promise.resolve(),
+                    postGateCard: async(binding,gate,rid)=>{const key=rid+'/'+gate.waitId;const managed=resolveExecutionBackend(join(baseDir,rid))?.resourceManaged?.();if(managed&&resourcePollGates.has(key))return;await postGateCardOnce(binding,gate,rid);if(managed)resourcePollGates.add(key);},
+                    postBlockedCard: postBlockedCardOnce,
+                    postLoopGrantCard: postLoopGrantCardOnce,
+                    postRevisitGrantCard: postRevisitGrantCardOnce,
+                    onTerminal: (rid, terminal, binding) =>
+                      deps.notifyTerminal ? deps.notifyTerminal(binding, rid, terminal) : Promise.resolve(),
                   });
-                  if(result.reason==='awaitingResources'||result.reason==='awaitingGate'&&result.resourceWaits?.length){const timer=setTimeout(()=>driveDetached(runId),3000);timer.unref();}
+                  // External attempts wait on disk; deadlines need a re-drive
+                  // even when no settle event arrives. Any other outcome
+                  // cancels a stale wake (it would only re-announce the run).
+                  scheduleWake(
+                    runId,
+                    outcome.reason === 'awaitingExternal' ? outcome.wakeAt : outcome.reason === 'awaitingResources' || outcome.reason === 'awaitingGate' && outcome.resourceWaits?.length ? now()+3000 : undefined,
+                    () => driveDetached(runId),
+                  );
+                  forgetSettledCards(runId, outcome);
                 } while (currentRunStatus(baseDir, runId) === 'cancelling');
               }, { maxWaitMs: V3_DRIVE_LEASE_MAX_WAIT_MS });
               leaseSettled = true;
@@ -1591,6 +1855,38 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
   }
 
   async function coldAttach(ownerLarkAppId?: string): Promise<void> {
+    // Pending flow-revision proposals: re-post like pending gates, finish a
+    // decision whose journal half was lost, void proposals of ended runs.
+    try {
+      for (const rec of reconcileV3RevisionProposals(baseDir, ownerLarkAppId)) {
+        if (rec.followUpError) {
+          deps.onError?.(rec.runId, new Error(
+            `cold attach: a flow revision's lost reassign / re-run was not finished — the effective flow failed to load: ${rec.followUpError}`,
+          ));
+        }
+        if (rec.binding) {
+          if (rec.voided.length > 0) {
+            await deps.freezeRevisionCards?.(rec.binding, rec.runId, rec.voided).catch((err) => deps.onError?.(rec.runId, err));
+          }
+          if (rec.moved.length > 0 && deps.moveRevisionCards) {
+            await deps.moveRevisionCards(rec.binding, rec.runId, rec.moved).catch((err) => deps.onError?.(rec.runId, err));
+          }
+          const reposts = deps.moveRevisionCards ? rec.repost : [...rec.repost, ...rec.moved.map((item) => item.view)];
+          for (const view of reposts) {
+            try {
+              await postOnce(rec.runId, `revision:${view.revision}`, () => deps.postRevisionCard
+                ? deps.postRevisionCard(rec.binding!, view, rec.runId)
+                : Promise.resolve());
+            } catch (err) {
+              deps.onError?.(rec.runId, err);
+            }
+          }
+        }
+        if (rec.resume) driveDetached(rec.runId);
+      }
+    } catch (err) {
+      deps.onError?.('(cold-attach revisions)', err);
+    }
     let recs: V3GateRecovery[] = [];
     try {
       recs = reconcileV3PendingGates(baseDir, ownerLarkAppId);
@@ -1609,29 +1905,29 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
         if (!rec.resume) {
           for (const gate of rec.repost) {
             try {
-              await deps.postCard(rec.binding, gate, rec.runId);
+              await postGateCardOnce(rec.binding, gate, rec.runId);
             } catch (err) {
               deps.onError?.(rec.runId, err);
             }
           }
         }
-        if (rec.repostBlocked && deps.postBlockedCard) {
+        if (rec.repostBlocked && postBlockedCardOnce) {
           try {
-            await deps.postBlockedCard(rec.binding, rec.repostBlocked, rec.runId);
+            await postBlockedCardOnce(rec.binding, rec.repostBlocked, rec.runId);
           } catch (err) {
             deps.onError?.(rec.runId, err);
           }
         }
-        if (rec.repostLoopGrant && deps.postLoopGrantCard) {
+        if (rec.repostLoopGrant && postLoopGrantCardOnce) {
           try {
-            await deps.postLoopGrantCard(rec.binding, rec.repostLoopGrant, rec.runId);
+            await postLoopGrantCardOnce(rec.binding, rec.repostLoopGrant, rec.runId);
           } catch (err) {
             deps.onError?.(rec.runId, err);
           }
         }
-        if (rec.repostRevisitGrant && deps.postRevisitGrantCard) {
+        if (rec.repostRevisitGrant && postRevisitGrantCardOnce) {
           try {
-            await deps.postRevisitGrantCard(rec.binding, rec.repostRevisitGrant, rec.runId);
+            await postRevisitGrantCardOnce(rec.binding, rec.repostRevisitGrant, rec.runId);
           } catch (err) {
             deps.onError?.(rec.runId, err);
           }
@@ -1686,8 +1982,12 @@ export function reconcileV3PendingGates(baseDir: string = defaultBaseDir(), owne
 
       const events = readJournal(journalPath);
       const snap = materialize(events);
+      // Open external (bot-executed) attempts are resumed, not killed: the
+      // drive reconciles each against its durable handoff phase (§9.5).
       const hasOpenAttempts =
-        openV3WorkerAttempts(events).length > 0 || openV3HostEffects(events).length > 0;
+        openV3WorkerAttempts(events).length > 0 ||
+        openV3HostEffects(events).length > 0 ||
+        openV3ExternalAttempts(events).length > 0;
       if (
         snap.runStatus === 'succeeded' ||
         snap.runStatus === 'failed' ||
@@ -1941,6 +2241,11 @@ function reconcileOneRun(
           ? { hostApproval: trustedHostGate.hostApproval }
           : wait.hostApproval ? { hostApproval: wait.hostApproval } : {}),
       });
+    } else if (wait.status === 'voided') {
+      // A revision voids a wait only after its dagRevised superseded the
+      // node, so a voided wait under a still-gateWaiting node is not a lost
+      // human decision: never heal it into an approval/rejection.
+      continue;
     } else {
       // resolved wait but node still gateWaiting → journal lost gateResolved → heal.
       // nodeId from the wait file (authoritative, codex #1).

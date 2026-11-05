@@ -33,3 +33,9 @@ describe('PostgreSQL v3 event codec', () => {
     }])).toThrow('shadows envelope fields');
   });
 });
+
+it('preserves flow revision and external handoff records through PostgreSQL replay',()=>{
+  const rows=[{runId:'run-1',sequence:1,eventType:'dagRevisionProposed',payload:{revision:2,baseRevision:1,sha256:'digest',patchSha256:'patch',summary:'change',by:'owner',reasons:[],touched:['work']},occurredAt:'2026-11-05T12:00:00.000Z'},
+    {runId:'run-1',sequence:2,eventType:'nodeHandoffAccepted',payload:{nodeId:'work',attemptId:'work/001',acceptedAt:1},occurredAt:'2026-11-05T12:00:01.000Z'}];
+  const events=decodeStoredEvents(rows);expect(events[0]).toMatchObject({type:'dagRevisionProposed',revision:2,touched:['work']});expect(events[1]).toMatchObject({type:'nodeHandoffAccepted',attemptId:'work/001'});
+});

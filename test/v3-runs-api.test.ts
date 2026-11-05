@@ -1,3 +1,4 @@
+import {matchXtermVendorPath} from '../src/core/xterm-vendor-assets.js';
 import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -75,7 +76,9 @@ it('serves an authenticated standalone xterm replay page for a completed node wi
     const denied = mockRes(), a = get(path); await handleV3RunsApi(a.req, denied.res, a.url, deps, false); expect(denied.status).toBe(401);
     const allowed = mockRes(), b = get(path); await handleV3RunsApi(b.req, allowed.res, b.url, deps, true);
     expect(allowed.status).toBe(200); expect(allowed.headers['content-type']).toContain('text/html');
-    expect(allowed.body()).toContain('/assets/xterm.umd.js'); expect(allowed.body()).toContain('/nodes/research/pty-log');
+    const script=allowed.body().match(/<script src="([^"]+)"/)?.[1];expect(script).toBeDefined();
+    expect(matchXtermVendorPath(script!,'root')?.asset?.packageKey).toBe('xterm');
+    expect(allowed.body()).toContain('/nodes/research/pty-log');
     expect(allowed.body()).not.toContain(base); expect(allowed.body()).not.toContain('viewToken'); expect(proxy).not.toHaveBeenCalled();
     const raw = mockRes(), c = get(path.replace('terminal-replay', 'pty-log')); await handleV3RunsApi(c.req, raw.res, c.url, deps, true); await raw.done;
     expect(raw.body()).toBe('\u001b[31mRED OUTPUT\u001b[0m\n');
@@ -163,6 +166,25 @@ describe('v3-runs-api', () => {
       expect(view.nodes[0].id).toBe('research');
       // read-only DTO：webTerminal 无 token
       expect((view.nodes[0].webTerminal as Record<string, unknown>).token).toBeUndefined();
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  it('GET /api/v3/runs/:id 用宿主提供的 Bot 名称解析器标注负责 Bot', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-api-'));
+    try {
+      const runDir = buildRun(base, 'r-261103-0101');
+      writeFileSync(join(runDir, 'bots.snapshot.json'), JSON.stringify({
+        '': { larkAppId: 'cli_owner', cliId: 'claude-code', workingDir: '/private/wd' },
+      }));
+      const { req, url } = get('/api/v3/runs/r-261103-0101');
+      const m = mockRes();
+      const botName = vi.fn((appId: string) => (appId === 'cli_owner' ? '主Bot' : undefined));
+      await handleV3RunsApi(req, m.res, url, { ...apiDeps(base), botName }, true);
+      expect(m.status).toBe(200);
+      const view = m.json() as { generatedAt: number; nodes: Array<{ bot?: Record<string, unknown> }> };
+      expect(view.nodes[0].bot).toEqual({ larkAppId: 'cli_owner', cliId: 'claude-code', name: '主Bot' });
+      expect(typeof view.generatedAt).toBe('number');
+      expect(m.body()).not.toContain('/private/wd');
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
 

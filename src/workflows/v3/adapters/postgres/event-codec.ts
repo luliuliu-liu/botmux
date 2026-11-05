@@ -7,6 +7,19 @@ import type { WorkflowEventRecord } from './event-store.js';
 // compile error here. A rebase must explicitly decide how the new event is
 // projected before PostgreSQL recovery can accept it.
 const V3_EVENT_TYPES = {
+  checkpointReleased: true,
+  dagRevised: true,
+  dagRevisionApproved: true,
+  dagRevisionProposed: true,
+  dagRevisionRejected: true,
+  nodeHandedToHuman: true,
+  nodeHandoffAccepted: true,
+  nodeHandoffPrepared: true,
+  nodeHandoffSent: true,
+  nodeHandoffStarted: true,
+  nodeReassigned: true,
+  nodeStalled: true,
+
   nodeResourceWaiting:true,
   nodeResourceAllocated:true,
   nodeResourceSettled:true,

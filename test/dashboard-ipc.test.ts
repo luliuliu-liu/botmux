@@ -2183,7 +2183,7 @@ describe('GET /api/bot-default-oncall — oncall chat counts', () => {
 });
 
 describe('GET /api/bot-default-oncall — schedule host paths', () => {
-  it('reports the execution cwd and trusted file root without persisting either as bot config', async () => {
+  it('reports the validated Bot default and trusted file root without persisting either as extra bot config', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-schedule-cwd-'));
     const configPath = join(dir, 'bots.json');
     const appId = 'test-schedule-cwd-app';
@@ -2192,6 +2192,7 @@ describe('GET /api/bot-default-oncall — schedule host paths', () => {
     try {
       process.env.BOTS_CONFIG = configPath;
       config.session.dataDir = join(dir, 'daemon-data');
+      mkdirSync(join(dir, 'session-default'));
       writeFileSync(configPath, JSON.stringify([{
         larkAppId: appId,
         larkAppSecret: 'secret',
@@ -2206,7 +2207,7 @@ describe('GET /api/bot-default-oncall — schedule host paths', () => {
       const response = await fetch(`${base}/api/bot-default-oncall`);
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({
-        scheduleWorkingDir: process.cwd(),
+        scheduleWorkingDir: join(dir, 'session-default'),
         schedulePreconditionFileRoot: join(
           config.session.dataDir,
           'schedule-preconditions',
@@ -2513,6 +2514,23 @@ describe('PUT /api/bot-card-prefs — Codex browser bridge', () => {
       expect(await on.json()).toMatchObject({ ok: true, codexBrowser: true });
       expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].codexBrowser).toBe(true);
 
+      expect(await (await fetch(`${base}/api/bot-default-oncall`)).json())
+        .toMatchObject({ codexBrowserAutoApproveOrigins: false });
+      const approvalOn = await fetch(`${base}/api/bot-card-prefs`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ codexBrowserAutoApproveOrigins: true }),
+      });
+      expect(approvalOn.status).toBe(200);
+      expect(await approvalOn.json()).toMatchObject({ codexBrowserAutoApproveOrigins: true });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].codexBrowser)
+        .toMatchObject({ enabled: true, autoApproveOrigins: true });
+      expect(getBot(appId).config.codexBrowser?.autoApproveOrigins).toBe(true);
+      const malformed = await fetch(`${base}/api/bot-card-prefs`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ codexBrowserAutoApproveOrigins: 'true' }),
+      });
+      expect(malformed.status).toBe(400);
+
       const off = await fetch(`${base}/api/bot-card-prefs`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
@@ -2520,6 +2538,13 @@ describe('PUT /api/bot-card-prefs — Codex browser bridge', () => {
       });
       expect(off.status).toBe(200);
       expect(await off.json()).toMatchObject({ ok: true, codexBrowser: false });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].codexBrowser).toBeUndefined();
+
+      const disabledBridge = await fetch(`${base}/api/bot-card-prefs`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ codexBrowserAutoApproveOrigins: true }),
+      });
+      expect(disabledBridge.status).toBe(409);
       expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].codexBrowser).toBeUndefined();
 
       getBot(appId).config.sandbox = true;
@@ -2842,14 +2867,18 @@ describe('PUT /api/bot-card-prefs — streaming card buttons', () => {
 });
 
 describe('PUT /api/bot-reply-delivery — 最终回复投递方式', () => {
-  async function withBot(cliId: string, run: (base: string, configPath: string, appId: string) => Promise<void>): Promise<void> {
+  async function withBot(
+    cliId: string,
+    run: (base: string, configPath: string, appId: string) => Promise<void>,
+    extraConfig: Record<string, unknown> = {},
+  ): Promise<void> {
     const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-reply-delivery-'));
     const configPath = join(dir, 'bots.json');
     const appId = `test-reply-delivery-${cliId}`;
     const prevBotsConfig = process.env.BOTS_CONFIG;
     try {
       process.env.BOTS_CONFIG = configPath;
-      writeFileSync(configPath, JSON.stringify([{ larkAppId: appId, larkAppSecret: 'secret', cliId }], null, 2));
+      writeFileSync(configPath, JSON.stringify([{ larkAppId: appId, larkAppSecret: 'secret', cliId, ...extraConfig }], null, 2));
       loadBotConfigs().forEach((c: any) => registerBot(c));
       setLarkAppId(appId);
       handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
@@ -2944,6 +2973,42 @@ describe('PUT /api/bot-reply-delivery — 最终回复投递方式', () => {
       expect(await off.json()).toMatchObject({ ok: true, replyDelivery: 'send' });
       expect(persisted(configPath).replyDelivery).toBe('send');
     });
+  });
+
+  it('doubao: GET 缺省 transcript/supported（共享常驻 service 进程下 send 归属不可靠），PUT send 显式落盘可退回', async () => {
+    await withBot('doubao', async (base, configPath, appId) => {
+      const initial = await (await fetch(`${base}/api/bot-default-oncall`)).json();
+      expect(initial).toMatchObject({ replyDelivery: 'transcript', replyDeliveryDefault: 'transcript', replyDeliverySupported: true });
+      expect('replyDelivery' in persisted(configPath)).toBe(false);
+
+      const off = await put(base, 'send');
+      expect(off.status).toBe(200);
+      expect(await off.json()).toMatchObject({ ok: true, replyDelivery: 'send', replyDeliveryDefault: 'transcript' });
+      expect(persisted(configPath).replyDelivery).toBe('send');
+      expect(getBot(appId).config.replyDelivery).toBe('send');
+
+      // '' 清 key，回到 doubao 的缺省 transcript（而不是通用缺省 send）。
+      const cleared = await put(base, '');
+      expect(cleared.status).toBe(200);
+      expect(await cleared.json()).toMatchObject({ ok: true, replyDelivery: 'transcript', replyDeliveryDefault: 'transcript' });
+      expect('replyDelivery' in persisted(configPath)).toBe(false);
+    });
+  });
+
+  it('doubao + scratch: GET 生效值回落 send、缺省值仍 transcript、开关 unsupported，PUT transcript 4xx（#2828 静默边）', async () => {
+    await withBot('doubao', async (base) => {
+      const initial = await (await fetch(`${base}/api/bot-default-oncall`)).json();
+      expect(initial).toMatchObject({ replyDelivery: 'send', replyDeliveryDefault: 'transcript', replyDeliverySupported: false });
+
+      const rejected = await put(base, 'transcript');
+      expect(rejected.status).toBe(400);
+      expect(await rejected.json()).toMatchObject({ ok: false, error: 'reply_delivery_unsupported' });
+
+      // 显式 send 在 scratch 下仍可写（doubao scratch 回旧行为，不静默）。
+      const send = await put(base, 'send');
+      expect(send.status).toBe(200);
+      expect(await send.json()).toMatchObject({ ok: true, replyDelivery: 'send', replyDeliveryDefault: 'transcript' });
+    }, { sandbox: 'scratch' });
   });
 
   it('antigravity: 只有零注入转写，PUT transcript 4xx reply_delivery_unsupported 且不落盘，PUT send 落盘', async () => {
@@ -6744,6 +6809,7 @@ describe('POST /api/schedules — creator identity binding', () => {
       const bot = registerBot({
         larkAppId: appId, larkAppSecret: '', cliId: 'codex', apiOnly: true,
         allowedUsers: [ownerOpenId],
+        defaultWorkingDir: dir,
       });
       bot.resolvedAllowedUsers = [ownerOpenId];
       bot.rawAllowedUserResolution.set(ownerUnionId, ownerOpenId);
@@ -6784,6 +6850,7 @@ describe('POST /api/schedules — creator identity binding', () => {
       const bot = registerBot({
         larkAppId: appId, larkAppSecret: '', cliId: 'codex', apiOnly: true,
         allowedUsers: ['ou_owner'],
+        defaultWorkingDir: dir,
       });
       bot.resolvedAllowedUsers = ['ou_owner'];
       bot.rawAllowedUserResolution.set('on_owner', 'ou_someone_else');
@@ -6827,7 +6894,14 @@ describe('POST/PATCH /api/schedules — per-task model & effort', () => {
       config.session.dataDir = join(dir, 'data');
       scheduleStore.setScheduleScope(APP);
       setLarkAppId(APP);
-      registerBot({ larkAppId: APP, larkAppSecret: '', cliId: cliId as any, apiOnly: true, ...(model ? { model } : {}) });
+      registerBot({
+        larkAppId: APP,
+        larkAppSecret: '',
+        cliId: cliId as any,
+        apiOnly: true,
+        defaultWorkingDir: dir,
+        ...(model ? { model } : {}),
+      });
       local = await startIpcServer({ port: 0, host: '127.0.0.1' });
       return await run(`http://127.0.0.1:${local.port}`);
     } finally {
@@ -6929,7 +7003,13 @@ describe('POST/PATCH /api/schedules — local work calendar', () => {
       process.env.BOTMUX_SCHEDULE_TIMEZONE = 'Asia/Shanghai';
       scheduleStore.setScheduleScope(app);
       setLarkAppId(app);
-      registerBot({ larkAppId: app, larkAppSecret: '', cliId: 'opencode', apiOnly: true });
+      registerBot({
+        larkAppId: app,
+        larkAppSecret: '',
+        cliId: 'opencode',
+        apiOnly: true,
+        defaultWorkingDir: dir,
+      });
       const { workCalendarPath } = await import('../src/services/work-calendar.js');
       const fixture = JSON.parse(readFileSync(new URL('./fixtures/work-calendar/demo.json', import.meta.url), 'utf8'));
       mkdirSync(join(dir, 'bots', app), { recursive: true });
@@ -7993,6 +8073,7 @@ describe('POST /api/schedules execution position', () => {
         name: '每日巡检',
         schedule: 'every 30m',
         prompt: '检查发布状态',
+        workingDir: process.cwd(),
         chatId: 'oc_target',
         executionPosition: 'new-topic',
         topicTitle: '每日发布巡检',
@@ -8032,6 +8113,7 @@ describe('POST /api/schedules execution position', () => {
         name: '多群巡检',
         schedule: 'every 30m',
         prompt: '检查发布状态',
+        workingDir: process.cwd(),
         chatId: 'oc_first',
         chatIds: ['oc_first', 'oc_second', 'oc_second'],
         executionPosition: 'top-level',
@@ -8093,6 +8175,7 @@ describe('POST /api/schedules execution position', () => {
         name: '静默巡检',
         schedule: 'every 30m',
         prompt: '检查发布状态',
+        workingDir: process.cwd(),
         chatId: 'oc_target',
         executionPosition: 'new-topic',
         silent: true,

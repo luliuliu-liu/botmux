@@ -28,3 +28,12 @@ it('requires resource admission for pool nodes nested in a loop', () => {
 it('preserves ordinary local Workflow execution', () => {
   expect(() => assertPoolExecutionAvailable(validateDag({ runId: 'local', nodes: [{ id: 'code', type: 'goal', goal: 'code' }] }))).not.toThrow();
 });
+
+it('rejects external Bot execution for a pool before admission or journal creation', async () => {
+  const baseDir=mkdtempSync(join(tmpdir(),'pool-external-')),runNode=vi.fn(),prepareResource=vi.fn(()=>({ready:true}));
+  const dag=validateDag({runId:'pool-external',nodes:[{id:'code',type:'goal',goal:'code',agentSelection:selection}]});
+  try {
+    await expect(runWorkflow(dag,{runNode,prepareResource,resolveBotSnapshot:()=>({larkAppId:'fixture',cliId:'pi',workingDir:baseDir}),validateManifest:vi.fn()},{baseDir,nodeExecutor:'bot'})).rejects.toThrow('agent_pool_external_executor_conflict');
+    expect(runNode).not.toHaveBeenCalled();expect(prepareResource).not.toHaveBeenCalled();expect(existsSync(join(baseDir,dag.runId))).toBe(false);
+  }finally{rmSync(baseDir,{recursive:true,force:true});}
+});

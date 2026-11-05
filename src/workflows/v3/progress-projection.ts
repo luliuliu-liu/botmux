@@ -8,7 +8,8 @@
  * files from disk.
  *
  * The card is intentionally less detailed than the dashboard projection:
- * - the outer DAG fixes `counts.total` (loop body instances and revisit
+ * - the EFFECTIVE outer DAG (authorized DAG + runtime revisions, passed in
+ *   by the caller) fixes `counts.total` (loop body instances and revisit
  *   instances never inflate progress);
  * - only path-safe DAG ids and enum/token metadata are exposed;
  * - goals, parameters, free-form errors/reasons, and filesystem paths are not
@@ -21,6 +22,7 @@ import type { StoredEvent, V3ErrorClass } from './journal.js';
 import type { V3NodeStatus } from './orchestrator.js';
 import type { V3RunEnvelope } from './run-envelope.js';
 import { materialize } from './state.js';
+import { foldV3Revisions } from './dag-revision.js';
 
 export type V3ProgressStatus =
   | 'starting'
@@ -110,6 +112,16 @@ export interface V3ProgressView {
     sessionId: string;
     webPort?: number;
     viewToken: string;
+  };
+  /** Runtime flow revisions (design §13.7). Absent for a run never edited.
+   *  Only the generated count summary is exposed, never the free-text note. */
+  revision?: {
+    current: number;
+    /** Revisions that took effect (direct or confirmed). */
+    edits: number;
+    lastSummary?: string;
+    /** A proposal waiting for the initiator. */
+    pending?: number;
   };
   /** Last usable journal timestamp, falling back to run.json.createdAt. */
   updatedAt: string;
@@ -351,6 +363,22 @@ export function projectV3Progress(input: V3ProgressProjectionInput): V3ProgressV
   if (issue) issue.phase = issuePhase(issueNode);
   const feishuHostFailed = status === 'failed' && isFeishuHostNode(issueNode);
   const lastTs = usableEventTimestamp(events);
+  let revision: V3ProgressView['revision'];
+  try {
+    const history = foldV3Revisions(events);
+    if (history.records.length > 0) {
+      const last = history.applied[history.applied.length - 1];
+      revision = {
+        current: history.current,
+        edits: history.applied.length,
+        ...(last ? { lastSummary: last.summary } : {}),
+        ...(history.pending ? { pending: history.pending.revision } : {}),
+      };
+    }
+  } catch {
+    // A corrupt revision chain fails the run closed elsewhere; the card just
+    // omits the line.
+  }
 
   return {
     runId: envelope.runId,
@@ -370,6 +398,7 @@ export function projectV3Progress(input: V3ProgressProjectionInput): V3ProgressV
       : {}),
     ...(terminal ? { terminal } : {}),
     ...(terminalReplay ? { terminalReplay } : {}),
+    ...(revision ? { revision } : {}),
     updatedAt: lastTs === undefined ? envelope.createdAt : new Date(lastTs).toISOString(),
   };
 }
