@@ -7,6 +7,7 @@
  *   - replay fetches the cookie-auth `/api/v3/.../pty-log` endpoint
  */
 import type { RunNodeView } from '../../workflows/v3/ops-projection.js';
+import { XTERM_VENDOR_ASSETS, xtermVendorRootUrl } from '../../core/xterm-vendor-assets.js';
 
 export type NodeTerminalRenderKind = 'live' | 'replay' | 'empty';
 
@@ -97,7 +98,6 @@ function browserHost(): string {
 /** Same-origin dashboard assets (copied by scripts/build-dashboard.mjs). The
  * replay must work without internet access, so it never loads xterm from a CDN;
  * if the assets are missing it still falls back to plain text below. */
-const REPLAY_ASSET_BASE = '/assets';
 
 /** Boundaries after synchronized full-screen updates; older TUIs may instead
  * start each repaint by homing the cursor. Offsets leave the PTY bytes intact. */
@@ -123,13 +123,19 @@ export function replayFrameEnds(text: string): number[] {
 export function buildReplayTerminalSrcdoc(endpoint: string, title: string): string {
   const endpointJson = JSON.stringify(endpoint);
   const titleText = escapeHtml(title);
+  // xterm 由 Dashboard 自己在根路径下提供（#1940 固定的 5.5.0 组），不走外部 CDN。
+  // srcdoc 文档的相对地址按父页面（Dashboard，总在源站根路径）解析，与下面 fetch 的
+  // `/api/v3/…` 同理。
+  const css = escapeAttr(xtermVendorRootUrl(XTERM_VENDOR_ASSETS.css));
+  const xtermJs = escapeAttr(xtermVendorRootUrl(XTERM_VENDOR_ASSETS.xterm));
+  const fitJs = escapeAttr(xtermVendorRootUrl(XTERM_VENDOR_ASSETS.fit));
   return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>${titleText}</title>
-  <link rel="stylesheet" href="${REPLAY_ASSET_BASE}/xterm.css">
+  <link rel="stylesheet" href="${css}">
   <style>
     html,body{margin:0;height:100%;background:#0d1117;color:#c9d1d9;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
     #bar{height:31px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#161b22;border-bottom:1px solid #30363d;box-sizing:border-box}
@@ -150,8 +156,8 @@ export function buildReplayTerminalSrcdoc(endpoint: string, title: string): stri
   <div id="bar"><span>${titleText}</span><span id="status">loading...</span></div>
   <div id="history" hidden><span>屏幕历史</span><button id="history-first" type="button">最早</button><button id="history-prev" type="button">上一屏</button><input id="history-position" type="range" min="0" value="0" aria-label="历史屏幕位置"><button id="history-next" type="button">下一屏</button><button id="history-last" type="button">最新</button><span id="history-label" aria-live="polite"></span></div>
   <div id="term" tabindex="0" aria-label="终端回放，可上下浏览"></div>
-  <script src="${REPLAY_ASSET_BASE}/xterm.umd.js"><\/script>
-  <script src="${REPLAY_ASSET_BASE}/xterm-addon-fit.umd.js"><\/script>
+  <script src="${xtermJs}"><\/script>
+  <script src="${fitJs}"><\/script>
   <script>
   (function(){
     var endpoint=${endpointJson};

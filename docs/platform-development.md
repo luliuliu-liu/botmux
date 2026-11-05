@@ -36,3 +36,11 @@
 - 同步从 `dev/platform` 建立 `sync/upstream-<日期>`，merge 指定的 `upstream/master` SHA，解决冲突并验证后合回 `dev/platform`，验收后再合入 `stable/platform`。
 - 保留上游 `CLAUDE.md` 正文与 `AGENTS.md -> CLAUDE.md`；平台规则仅通过固定入口引入。本文件为 fork 专有规则，合并时逐段解决冲突，不能整文件选择 ours/theirs。
 - 平台 tag 使用 `acp-*` 前缀，不触发上游 `v*` npm/GitHub Release 流程。
+
+## 本轮同步兼容边界
+
+托管Agent池运行暂不支持运行中DAG修订或切换为外部Bot执行；操作在写入前明确拒绝，修改需求通过克隆新Workflow并重新审批完成。普通Botmux的非池运行保留上游动态DAG与Bot执行功能。
+
+## workflow-core 与平台兼容
+
+workflow-core 保留实际值依赖与公开类型的精确允许列表。新增叶子模块须确认无 daemon、Lark SDK、配置读取或 Worker 启动依赖；纯路径 DTO 和 Node 文件/摘要工具可以在核对依赖图后逐项加入，不能关闭或改成宽泛前缀允许。Agent 池与外部群 Bot 分配在架构提示生成前拒绝混用；资源补建只显示 `PLATFORM_CLI_IDS` 中当前维护的四类 Worker。

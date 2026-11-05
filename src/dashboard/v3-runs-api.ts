@@ -29,6 +29,7 @@ import { readRunEnvelope, V3_RUN_ENVELOPE_FILE } from '../workflows/v3/run-envel
 import { readGrillState } from '../workflows/v3/grill-state.js';
 import { buildReplayTerminalSrcdoc } from './web/v3-terminal.js';
 import {ArchiveReader,ArchiveReadUnavailable,archivedFiles,archivedOperations,type ArchiveRead} from '../platform/workflow/archive-reader.js';
+import { isWorkflowDraftDir, workflowDraftRunDir } from '../workflows/v3/draft-store.js';
 
 export type V3RunsApiDeps = {
   /** Root of the v3 run dirs (`~/.botmux/v3-runs` in production). */
@@ -37,6 +38,8 @@ export type V3RunsApiDeps = {
   proxyToDaemon: (larkAppId: string, daemonPath: string, init: RequestInit) => Promise<Response>;
   /** Injectable in tests; production uses the managed platform Gateway. */
   archiveReader?: ArchiveReader;
+  /** Feishu display name for a bot app id, used for the per-node bot label. */
+  botName?: (larkAppId: string) => string | undefined;
 };
 
 /** Cap a single pty-log response so a runaway log can't exhaust the dashboard. */
@@ -100,7 +103,14 @@ export async function handleV3RunsApi(
       jsonRes(res,200,{runId,runStatus:archived.row.summary?.runStatus??'unknown',nodes:[],archived:true,archiveState:archived.state,readOnly:true,logsArchived:false,summary:archived.row.summary,files:archivedFiles(archived.row)});
       return true;
     }
-    const view=await projectRunByIdAsync(deps.runsDir,runId);
+    // A Dashboard draft (D2) is a run dir without run.json: it is listed by
+    // /api/v3/orchestration/drafts, never projected as an empty run.
+    const draftDir = workflowDraftRunDir(deps.runsDir, runId);
+    if (draftDir && isWorkflowDraftDir(draftDir)) {
+      jsonRes(res, 404, { error: 'unknown_run' });
+      return true;
+    }
+    const view=await projectRunByIdAsync(deps.runsDir,runId,{botName:deps.botName});
     if(!view){jsonRes(res,404,{error:'unknown_run'});return true;}
     jsonRes(res,200,view);
     return true;

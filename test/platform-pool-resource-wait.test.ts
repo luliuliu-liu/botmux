@@ -71,3 +71,19 @@ it('submits an authorized provision with a stable request ID and does not recrea
   expect(await handleV3ResourceAction(value,'owner',deps,form)).toMatchObject({toast:{type:'info'}});expect(request).toHaveBeenCalledTimes(1);expect(driveRun).toHaveBeenCalledTimes(2);
  }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+it('keeps live provider environment bound to the frozen app identity rather than the selector',async()=>{
+ const baseDir=mkdtempSync(join(tmpdir(),'workflow-env-')),seen:any[]=[];
+ const snapshot={larkAppId:'stable-app',cliId:'pi' as const,workingDir:baseDir};
+ const dag=validateDag({runId:'env-binding',nodes:[{id:'work',type:'goal',goal:'work',bot:'display-name'}]});
+ try{
+  const result=await runWorkflow(dag,{resolveBotSnapshot:()=>snapshot,resolveBotEnv:(_selector,frozen)=>({PROVIDER_KEY:'fixture-'+frozen!.larkAppId}),runNode:async(req:any)=>{seen.push(req.workerEnv);const path=join(req.attemptDir,'manifest.json');writeFileSync(path,'{}');return{status:'ok' as const,manifestPath:path};},validateManifest:async()=>({ok:true as const,manifest:{schemaVersion:1 as const,status:'ok' as const,summary:'done',files:[]}})},{baseDir});
+  expect(result).toMatchObject({reason:'terminal',runStatus:'succeeded'});expect(seen).toEqual([{PROVIDER_KEY:'fixture-stable-app'}]);
+ }finally{rmSync(baseDir,{recursive:true,force:true});}
+});
+
+it('rejects mutually exclusive pool and external Bot prompts before architecture execution',()=>{
+ const assignment={roster:{mainLarkAppId:'main',bots:[],excluded:[]},assignees:[]};
+ expect(()=>buildArchitectGoal('/spec','/spec.json',{poolId:selection.poolId,members:[]},assignment)).toThrow('agent_pool_external_executor_conflict');
+ expect(buildArchitectGoal('/spec','/spec.json',assignment)).not.toContain('Workspace Agent pool');
+});

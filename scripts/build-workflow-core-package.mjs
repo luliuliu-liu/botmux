@@ -103,6 +103,7 @@ function assertBundleInputsAllowed(metafile) {
   // module means adding it to this set on purpose — that review is the point.
   const allowedSourceInputs = new Set([
     'src/utils/canonical-input-hash.ts',
+    'src/utils/atomic-write.ts', // node built-ins only; durable file replacement
     'src/utils/proc-stat.ts',        // leaf: no imports (pure /proc/<pid>/stat parsing)
     'src/utils/process-alive.ts',    // leaf: no imports (kill(pid, 0) predicates)
     'src/utils/file-lock.ts',
@@ -113,9 +114,16 @@ function assertBundleInputsAllowed(metafile) {
     'src/workflows/v3/artifact-contract.ts',
     'src/workflows/v3/artifact-contract-declarations.ts',
     'src/workflows/v3/attempt-ledger.ts',
+    'src/workflows/v3/attempt-numbering.ts',          // leaf: journal-derived attempt ids
+    'src/workflows/v3/checkpoint-hold.ts',            // pure journal fold + allowlisted v3 modules
     'src/workflows/v3/contract.ts',
     'src/workflows/v3/core-control.ts',
     'src/workflows/v3/dag.ts',
+    'src/workflows/v3/dag-loader.ts',                 // node:fs + dag.ts
+    'src/workflows/v3/dag-revision.ts',               // node:fs/crypto/path + allowlisted v3 modules
+    'src/workflows/v3/external-attempt-ledger.ts',    // pure journal fold
+    'src/workflows/v3/external-control.ts',           // node built-ins + allowlisted v3 modules
+    'src/workflows/v3/external-executor.ts',          // transport-neutral seam (constants + types)
     'src/workflows/v3/gate-policy.ts',
     'src/workflows/v3/gate-wait-store.ts',
     'src/workflows/v3/host-bindings.ts',
@@ -123,13 +131,22 @@ function assertBundleInputsAllowed(metafile) {
     'src/workflows/v3/host-execution.ts',
     'src/workflows/v3/in-process-attempt-lease.ts',
     'src/workflows/v3/journal.ts',
+    'src/workflows/v3/manifest.ts',                   // node built-ins + contract.ts
     'src/workflows/v3/orchestrator.ts',
+    'src/workflows/v3/placement.ts',                  // pure §5.2 placement rules + dag.ts
     'src/workflows/v3/portable-artifact-snapshot.ts',
     'src/workflows/v3/portable-final-outputs.ts',
     'src/workflows/v3/portable-run-snapshot.ts',
     'src/workflows/v3/portable-runtime.ts',
+    'src/workflows/v3/result-contract.ts',            // node:fs/path + dag/artifact types
+    'src/workflows/v3/revisit-plan.ts',               // node:fs/path + dag/state
     'src/workflows/v3/runtime-host-contract.ts',
     'src/workflows/v3/shared-node-runtime.ts',
+    'src/workflows/v3/terminal-session-index.ts', // workflow discovery receipts; no daemon/worker imports
+    'src/workflows/v3/pool-execution-policy.ts', // pure DAG requirement check; injected admission only
+    'src/workflows/v3/upstream-preflight.ts', // node built-ins only; referenced output contract checks
+    'src/workflows/v3/journal-backend.ts', // transport-free injected journal registry
+    'src/platform/workflow/input-path-schema.ts', // legacy path; pure JSON schema leaf, no imports
     'src/workflows/v3/shared-runtime.ts',
     'src/workflows/v3/state.ts',
     'src/workflows/v3/template-bindings.ts',
@@ -210,6 +227,7 @@ async function assertTypeBoundary() {
     'src/workflows/v3/artifact-contract-declarations.d.ts',
     'src/workflows/v3/core-control.d.ts',
     'src/workflows/v3/dag.d.ts',
+    'src/platform/workflow/input-path-schema.d.ts', // public required-path DTO, pure data
     'src/workflows/v3/event-contract.d.ts',
     'src/workflows/v3/gate-policy.d.ts',
     'src/workflows/v3/host-bindings.d.ts',

@@ -52,7 +52,12 @@ export type {
 } from './portable-final-outputs.js';
 
 export type PortableWorkflowRunOutcome =
-  | Extract<import('./shared-node-runtime.js').V3RunOutcome,{reason:'awaitingResources'}>
+  | {
+      reason: 'awaitingResources';
+      /** Public data-only receipt; never import the Botmux runtime type graph. */
+      resourceWaits: Array<{jobId:string;attemptId:string;nodeId:string;waitReason:string;poolId:string;selection:unknown;lastError?:string}>;
+      runDir: string;
+    }
   | {
       reason: 'terminal';
       runStatus: 'succeeded' | 'failed' | 'blocked' | 'cancelled';
@@ -258,6 +263,10 @@ export async function runPortableWorkflow(
       ]),
     ),
   });
+  if (outcome.reason === 'awaitingExternal') {
+    // Never reached: this adapter does not pin nodeExecutor "bot".
+    throw new Error('portable workflow runtime does not drive bot-executed goal nodes');
+  }
   if (outcome.reason !== 'terminal') return outcome;
   return {
     ...outcome,
