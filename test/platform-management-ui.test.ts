@@ -83,6 +83,80 @@ describe('登录工作台关闭受理',()=>{
  });
 });
 
+describe('首次登记工作区池',()=>{
+ const newId='11111111-1111-4111-8111-111111111111';
+ function setupRegistration(){
+  const responses=setupPools();responses['/agent-pools'].pools=[];responses['/models'].models=[];
+  const fallback=fetcher.getMockImplementation()!;
+  fetcher.mockImplementation(async(url:string,init?:any)=>{
+   if(url==='/api/platform/agent-pools'&&init?.method==='POST'){
+    const body=JSON.parse(init.body);const row={poolId:newId,displayName:body.displayName,workspaceKind:body.workspaceKind,workspaceSource:body.workspaceSource};
+    responses['/agent-pools'].pools=[row];responses['/agent-pools/'+newId]={members:[]};return {ok:true,status:200,json:async()=>({poolId:newId,members:[]})};
+   }
+   return fallback(url,init);
+  });return responses;
+ }
+ async function openRegistration(r:TestRenderer.ReactTestRenderer){await act(async()=>button(r,'创建工作区池').props.onClick());}
+ async function choose(r:TestRenderer.ReactTestRenderer,kind:string,source:string,name='Test pool'){
+  await act(async()=>{r.root.findByProps({name:'poolDisplayName'}).props.onChange({target:{value:name}});r.root.findByProps({name:'poolWorkspace'}).props.onChange({target:{value:JSON.stringify([kind,source])}});});
+ }
+ it('空池与空模型仍能从可见入口登记，并自动选中且允许成员操作',async()=>{
+  setupRegistration();const r=await mount(React.createElement(AgentPoolPage));expect(button(r,'创建工作区池').props.disabled).toBe(false);
+  await act(async()=>r.root.findByProps({'aria-label':'工作区池 的操作',type:'button'}).props.onClick());expect(button(r,'新建池成员').props.disabled).toBe(true);
+  await act(async()=>r.root.findByProps({'aria-label':'工作区池 的操作',type:'button'}).props.onClick());
+  await openRegistration(r);await choose(r,'volume','custom-shared-volume');await act(async()=>submitPool(r));
+  expect(r.root.findAllByType('dialog')).toHaveLength(0);expect(r.root.findByProps({'aria-label':'Agent 池'}).props.value).toBe(newId);
+  expect(writes()).toHaveLength(1);expect(writes()[0][0]).toBe('/api/platform/agent-pools');expect(JSON.parse(writes()[0][1].body)).toEqual({displayName:'Test pool',workspaceKind:'volume',workspaceSource:'custom-shared-volume'});
+  await act(async()=>r.root.findByProps({'aria-label':'工作区池 的操作',type:'button'}).props.onClick());expect(button(r,'新建池成员').props.disabled).toBe(false);expect(button(r,'纳入已有 Agent').props.disabled).toBe(false);
+ });
+ it.each(['volume','hostpath'])('登记%s只提交工作区身份，不创建容器或纳入Agent',async kind=>{
+  const responses=setupRegistration(),source=kind==='volume'?'custom-shared-volume':'/tenant/home/project';responses['/workspaces'].workspaces=[{kind,source,readOnly:false}];
+  const r=await mount(React.createElement(AgentPoolPage));await openRegistration(r);await choose(r,kind,source);await act(async()=>submitPool(r));expect(writes()).toHaveLength(1);expect(JSON.parse(writes()[0][1].body)).toEqual({displayName:'Test pool',workspaceKind:kind,workspaceSource:source});
+ });
+ it.each(['empty','readonly','unknown','disabled-host'])('无可用工作区(%s)不给虚构选项且不发送写请求',async kind=>{
+  const responses=setupRegistration();responses['/workspaces'].workspaces=kind==='empty'?[]:kind==='unknown'?[{kind:'unexpected',source:'bad',readOnly:false}]:[{kind:'hostpath',source:'/tenant/home/project',readOnly:kind==='readonly'}];if(kind==='disabled-host')responses['/workspaces'].hostPathEnabled=false;
+  const r=await mount(React.createElement(AgentPoolPage));await openRegistration(r);expect(button(r,'登记工作区池').props.disabled).toBe(true);
+  const options=r.root.findByProps({name:'poolWorkspace'}).findAllByType('option');expect(options.slice(1).every(o=>o.props.disabled)).toBe(true);
+  expect(r.root.findAllByType('a').some(a=>a.props.href==='#/platform-configuration?section=workspaces')).toBe(true);
+  await choose(r,'volume','invented');await act(async()=>submitPool(r));expect(writes()).toHaveLength(0);
+ });
+ it('重复提交只POST一次，失败后保留输入和工作区并可重试',async()=>{
+  setupRegistration();const r=await mount(React.createElement(AgentPoolPage));await openRegistration(r);await choose(r,'volume','custom-shared-volume','Kept name');
+  const fallback=fetcher.getMockImplementation()!;let release!:(value:any)=>void;
+  fetcher.mockImplementation(async(url:string,init?:any)=>init?.method==='POST'?new Promise(resolve=>release=resolve):fallback(url,init));
+  let pending!:Promise<void>;await act(async()=>{pending=submitPool(r);void submitPool(r);});expect(writes()).toHaveLength(1);expect(button(r,'正在登记…').props.disabled).toBe(true);
+  await act(async()=>{release({ok:false,status:409,json:async()=>({message:'Workspace unavailable'})});await pending;});
+  expect(r.root.findByProps({name:'poolDisplayName'}).props.value).toBe('Kept name');expect(r.root.findByProps({name:'poolWorkspace'}).props.value).toBe('["volume","custom-shared-volume"]');expect(button(r,'登记工作区池').props.disabled).toBe(false);expect(r.root.findByType('dialog').findAllByProps({role:'alert'})).toHaveLength(1);
+  fetcher.mockImplementation(fallback);await act(async()=>submitPool(r));expect(writes()).toHaveLength(2);expect(writes()[0][1].body).toBe(writes()[1][1].body);
+ });
+ it.each([undefined,'invalid-pool-id','../unsafe'])('2xx缺失或非法池ID(%s)不假作完成，仍可核对和重试',async poolId=>{
+  setupRegistration();const r=await mount(React.createElement(AgentPoolPage));await openRegistration(r);const fallback=fetcher.getMockImplementation()!;
+  fetcher.mockImplementation(async(url:string,init?:any)=>init?.method==='POST'?{ok:true,json:async()=>({poolId,members:[]})}:fallback(url,init));await act(async()=>submitPool(r));
+  expect(r.root.findAllByType('dialog')).toHaveLength(1);expect(r.root.findByType('dialog').findAllByProps({role:'alert'})).toHaveLength(1);expect(button(r,'登记工作区池').props.disabled).toBe(false);
+ });
+ it('POST成功但刷新失败明确已登记，刷新重试不重复POST',async()=>{
+  setupRegistration();const r=await mount(React.createElement(AgentPoolPage));await openRegistration(r);let inserted=false,failRefresh=true;const fallback=fetcher.getMockImplementation()!;
+  fetcher.mockImplementation(async(url:string,init?:any)=>{if(url==='/api/platform/agent-pools'&&init?.method==='POST'){inserted=true;return fallback(url,init);}if(url==='/api/platform/agent-pools'&&inserted&&failRefresh)return {ok:false,status:503,json:async()=>({message:'List unavailable'})};return fallback(url,init);});
+  await act(async()=>submitPool(r));expect(r.root.findAllByType('dialog')).toHaveLength(0);expect(writes()).toHaveLength(1);expect(r.root.findAllByProps({role:'alert'}).some(a=>a.children.join('').includes('已登记'))).toBe(true);
+  failRefresh=false;await act(async()=>button(r,'刷新').props.onClick());expect(writes()).toHaveLength(1);expect(r.root.findByProps({'aria-label':'Agent 池'}).props.value).toBe(newId);
+ });
+ it('同工作区返回已有池时选中它而不是列表首项，不另造成员',async()=>{
+  const responses=setupRegistration(),existingId='22222222-2222-4222-8222-222222222222';responses['/agent-pools'].pools=[poolA,{...poolB,poolId:existingId}];responses['/agent-pools/'+existingId]={members:[]};const r=await mount(React.createElement(AgentPoolPage));await openRegistration(r);const fallback=fetcher.getMockImplementation()!;
+  fetcher.mockImplementation(async(url:string,init?:any)=>init?.method==='POST'?{ok:true,json:async()=>({poolId:existingId,members:[]})}:fallback(url,init));await act(async()=>submitPool(r));expect(r.root.findByProps({'aria-label':'Agent 池'}).props.value).toBe(existingId);expect(writes()).toHaveLength(1);
+ });
+ it('旧的列表响应迟到不会覆盖已登记池的选中状态',async()=>{
+  const responses=setupRegistration();const r=await mount(React.createElement(AgentPoolPage));let hold=true,release!:(value:any)=>void;const fallback=fetcher.getMockImplementation()!;
+  fetcher.mockImplementation(async(url:string,init?:any)=>{if(url==='/api/platform/agent-pools'&&init?.method==='GET'&&hold){hold=false;return new Promise(resolve=>release=resolve);}return fallback(url,init);});
+  await act(async()=>button(r,'刷新').props.onClick());await openRegistration(r);await act(async()=>submitPool(r));expect(r.root.findByProps({'aria-label':'Agent 池'}).props.value).toBe(newId);
+  responses['/agent-pools/pool-a']={members:[]};await act(async()=>release({ok:true,json:async()=>({pools:[poolA]})}));expect(r.root.findByProps({'aria-label':'Agent 池'}).props.value).toBe(newId);
+ });
+ it('页面卸载后迟到的登记确认不继续刷新或改选中状态',async()=>{
+  setupRegistration();const r=await mount(React.createElement(AgentPoolPage));await openRegistration(r);let release!:(value:any)=>void;const fallback=fetcher.getMockImplementation()!;
+  fetcher.mockImplementation(async(url:string,init?:any)=>init?.method==='POST'?new Promise(resolve=>release=resolve):fallback(url,init));let pending!:Promise<void>;await act(async()=>{pending=submitPool(r);});
+  const before=fetcher.mock.calls.length;await act(async()=>r.unmount());await act(async()=>{release({ok:true,json:async()=>({poolId:newId,members:[]})});await pending;});expect(fetcher.mock.calls).toHaveLength(before);
+ });
+});
+
 describe('Agent pool behavior',()=>{
  it('loads the initial list and default detail once, and ignores a stale selected-pool response',async()=>{
   setupPools();const r=await mount(React.createElement(AgentPoolPage));

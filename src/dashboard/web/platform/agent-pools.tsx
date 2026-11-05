@@ -10,21 +10,35 @@ import {newPlatformRequestId} from './request-id.js';
 const message=(error:unknown)=>error instanceof Error?error.message:String(error);
 const requiresPoolRebuild=(member:any,value:any)=>value.cpu!==member.cpu||value.memoryMiB!==member.memoryMiB||value.mountGlobalReadOnly!==!!member.globalReadOnlyHostPath||value.hostMountIds!==undefined&&JSON.stringify([...value.hostMountIds].sort())!==JSON.stringify((member.hostMounts??[]).map((m:any)=>m.id).sort());
 const availableMember=(member:any)=>member.enabled&&!member.quarantined&&!member.configurationPending&&member.status==='ready'&&member.runtimeHealth!=='unhealthy';
+type PoolWorkspace={kind:'volume'|'hostpath';source:string;readOnly:boolean};
+function poolWorkspaces(value:unknown):PoolWorkspace[]{
+ if(!Array.isArray(value))return [];
+ const seen=new Set<string>();
+ return value.filter((w):w is PoolWorkspace=>{
+  if(!w||!['volume','hostpath'].includes(w.kind)||typeof w.source!=='string'||!w.source||w.source.trim()!==w.source||w.source.length>1024||/[\x00-\x1f]/.test(w.source)||typeof w.readOnly!=='boolean')return false;
+  const key=JSON.stringify([w.kind,w.source]);if(seen.has(key))return false;seen.add(key);return true;
+ });
+}
 
 export function AgentPoolPage(){
  const [data,setData]=useState<any>({pools:[],members:[],jobs:[],agents:[],models:[],containers:[],workspaces:[]});
  const [poolId,setPoolId]=useState(''),[error,setError]=useState(''),[modal,setModal]=useState<any>(null),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
+ const [notice,setNotice]=useState(''),awaitingPool=useRef<string|null>(null);
  const selectedPool=useRef(''),refreshVersion=useRef(0),mounted=useRef(true),submitting=useRef(false);
  const refresh=async(force=false)=>{
   if(force)clearManagementCache();
   const version=++refreshVersion.current,requestedPool=selectedPool.current;
   try{
    const [pools,catalog,models,containers,workspaces,waits]=await Promise.all(['/agent-pools','/catalog','/models','/containers','/workspaces','/workflow-resources'].map(path=>platformApi(path)));
+   if(!Array.isArray(pools.pools)||!Array.isArray(workspaces.workspaces))throw new Error('池或工作区列表响应无效，请刷新');
+   if(awaitingPool.current===requestedPool&&!pools.pools.some((p:any)=>p.poolId===requestedPool))throw new Error('刚登记的池尚未出现在列表中，请刷新重试');
    const id=(pools.pools.some((p:any)=>p.poolId===requestedPool)?requestedPool:'')||pools.pools[0]?.poolId||'',detail=id?await platformApi('/agent-pools/'+id):{members:[]};
-   if(!mounted.current||version!==refreshVersion.current)return;
+   if(!mounted.current||version!==refreshVersion.current)return false;
    selectedPool.current=id;setPoolId(id);
-   setData({pools:pools.pools,members:detail.members,jobs:waits.jobs,agents:catalog.agents,models:models.models,containers:containers.containers,workspaces:workspaces.workspaces,globalReadOnlyMounts:workspaces.globalReadOnlyMounts,globalReadOnlyHostPath:workspaces.globalReadOnlyHostPath});setError('');
-  }catch(error){if(mounted.current&&version===refreshVersion.current)setError(message(error));}
+   setData({pools:pools.pools,members:detail.members,jobs:waits.jobs,agents:catalog.agents,models:models.models,containers:containers.containers,workspaces:workspaces.workspaces,hostPathEnabled:workspaces.hostPathEnabled,globalReadOnlyMounts:workspaces.globalReadOnlyMounts,globalReadOnlyHostPath:workspaces.globalReadOnlyHostPath});setError('');
+   if(awaitingPool.current===id)awaitingPool.current=null;
+   return true;
+  }catch(error){if(mounted.current&&version===refreshVersion.current)setError((awaitingPool.current===requestedPool?'工作区池已登记，但列表刷新失败：':'')+message(error));return false;}
   finally{if(mounted.current&&version===refreshVersion.current)setLoading(false);}
  };
  useEffect(()=>{mounted.current=true;void refresh();return()=>{mounted.current=false;refreshVersion.current++;};},[]);
@@ -41,12 +55,24 @@ export function AgentPoolPage(){
   }finally{submitting.current=false;if(mounted.current)setBusy(false);}
  };
  const listAction=async(path:string,method:string,body:any,confirmed?:(result:any)=>boolean)=>{setError('');try{await action(path,method,body,false,confirmed);}catch(error){if(mounted.current)setError(message(error));}};
+ const registerPool=async(value:{displayName:string;workspaceKind:string;workspaceSource:string})=>{
+  if(submitting.current)throw new Error('操作正在进行，请等待确认');
+  submitting.current=true;setBusy(true);setNotice('');
+  try{
+   const result=await platformApi('/agent-pools','POST',value);
+   if(typeof result.poolId!=='string'||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(result.poolId))throw new Error('后端未返回有效池ID，登记结果尚未确认；请刷新后核对');
+   if(!mounted.current)return;
+   selectedPool.current=result.poolId;awaitingPool.current=result.poolId;setPoolId(result.poolId);setModal(null);setNotice('工作区池已登记；下一步可纳入已有 Agent 或新建成员。');
+   await refresh(true);
+  }finally{submitting.current=false;if(mounted.current)setBusy(false);}
+ };
  const pool=data.pools.find((row:any)=>row.poolId===poolId);
  const open=(kind:string,extra:any={})=>{if(!submitting.current)setModal({kind,pool,...extra});};
  return <><div className="page-heading"><div><h2 className="pm-panel-title">Workflow Agent 池 <ConfigHelp>共享工作区，复用 Agent 容器；每个任务开启独立 session。</ConfigHelp></h2></div><button disabled={busy} onClick={()=>void refresh(true)}>刷新</button></div>
  {error?<p role="alert" className="hint-warn">{error}</p>:null}
- <div className="pm-list-filters"><select aria-label="Agent 池" disabled={busy} value={poolId} onChange={event=>{selectedPool.current=event.target.value;setPoolId(event.target.value);setData((old:any)=>({...old,members:[]}));setLoading(true);void refresh();}}><option value="">选择工作区池</option>{data.pools.map((row:any)=><option key={row.poolId} value={row.poolId}>{row.displayName} · {row.workspaceKind} · {row.workspaceSource}</option>)}</select><AgentActions name="工作区池" disabled={busy||loading} actions={[{label:'删除工作区池',disabled:!pool, danger:true,run:()=>open('delete-pool')},{label:'新建池成员',disabled:!pool,run:()=>open('create')},{label:'纳入已有 Agent',disabled:!pool,run:()=>open('enroll')}]}/></div>
- {loading?<p role="status">正在加载池成员…</p>:null}
+ {notice?<p role="status" className="pm-info-note">{notice}</p>:null}
+ <div className="pm-list-filters"><button disabled={busy||loading} onClick={()=>open('register-pool')}>创建工作区池</button><select aria-label="Agent 池" disabled={busy} value={poolId} onChange={event=>{selectedPool.current=event.target.value;setPoolId(event.target.value);setData((old:any)=>({...old,members:[]}));setLoading(true);void refresh();}}><option value="">选择工作区池</option>{data.pools.map((row:any)=><option key={row.poolId} value={row.poolId}>{row.displayName} · {row.workspaceKind} · {row.workspaceSource}</option>)}</select><AgentActions name="工作区池" disabled={busy||loading} actions={[{label:'新建工作区池',run:()=>open('register-pool')},{label:'删除工作区池',disabled:!pool, danger:true,run:()=>open('delete-pool')},{label:'新建池成员',disabled:!pool,run:()=>open('create')},{label:'纳入已有 Agent',disabled:!pool,run:()=>open('enroll')}]}/></div>
+ {loading?<p role="status">正在加载池成员…</p>:!data.pools.length?<p className="pm-info-note">尚无工作区池。先点击“创建工作区池”登记已有工作区，再纳入 Agent；登记本身不创建目录、容器或成员。</p>:null}
  <div className="pm-table-wrap"><table className="pm-pool-table"><thead><tr><th>成员 / 能力范围</th><th>CLI / 模型</th><th>资源与任务</th><th>状态</th><th>操作</th></tr></thead><tbody>{data.members.map((member:any)=><tr key={member.memberId}><td><strong><CompactText text={member.displayName}/></strong><p><CompactText text={member.description}/></p></td><td>{member.agentType}<p><CompactText text={member.modelProfileId+" · "+(member.modelId||'原生动态模型')}/></p></td><td>{member.cpu} CPU · {member.memoryMiB} MiB<p>{member.occupied} / {member.capacity} 个任务</p>{member.hostMounts?.length?<small><CompactText text={member.hostMounts.map((m:any)=>m.path).join('、')+' · 只读'}/></small>:member.globalReadOnlyHostPath?<small>/host · 旧版只读挂载</small>:null}</td><td>{member.configurationPending?'配置待确认':member.quarantined?'隔离，等待停止确认':!member.enabled?'已停用':member.runtimeHealth==='unhealthy'?'服务恢复未确认':member.status==='ready'?'可用':member.status}{member.configurationError?<p><CompactText text={member.configurationError}/></p>:null}</td><td><AgentActions name={member.displayName+' 池成员'} disabled={busy} actions={[
  ...(member.configurationPending?[{label:'重试配置',run:()=>void listAction(`/agent-pools/${poolId}/members/${member.memberId}/configuration`,'POST',{},r=>r.members?.some((m:any)=>m.memberId===member.memberId&&!m.configurationPending)||r.configurationConfirmed===true)},{label:'撤销待确认配置',disabled:member.occupied>0,run:()=>open('cancel-configuration',{member})}]:member.quarantined?[{label:'核对恢复',run:()=>void listAction(`/agent-pools/${poolId}/members/${member.memberId}/reconcile`,'POST',{})}]:[]),
  {label:'修改配置',disabled:member.occupied>0||member.configurationPending,run:()=>open('edit',{member})},
@@ -54,6 +80,7 @@ export function AgentPoolPage(){
  {label:'移出',disabled:member.occupied>0||member.configurationPending,run:()=>open('remove',{member})}]}/></td></tr>)}</tbody></table></div>
  <h3>等待资源的节点 <ConfigHelp>容量不足自动排队；缺少能力时选择成员或补建，其他独立节点继续执行。</ConfigHelp></h3>
  {data.jobs.length?data.jobs.map((job:any)=><div className="pm-info-note" key={job.jobId}><strong>{job.runId} · {job.attemptId}</strong><p>{job.selection?.requirement}</p><small>{job.waitReason==='capacity'?'等待可用额度':'等待合适的 Agent'}{job.lastError?' · '+job.lastError:''}</small>{job.waitReason==='capability'?<button disabled={busy} onClick={()=>open('resolve',{job})}>选择 / 补建 Agent</button>:null}<button disabled={busy} onClick={()=>void listAction(`/workflow-resources/${job.runId}/${job.jobId}/cancel`,'POST',{})}>取消节点</button></div>):<p>没有等待资源的节点</p>}
+ {modal?.kind==='register-pool'?<PoolRegistrationForm workspaces={data.workspaces} hostPathEnabled={data.hostPathEnabled===true} busy={busy} onClose={()=>setModal(null)} onSave={registerPool}/>:null}
  {modal?.kind==='delete-pool'?<PoolActionDialog title="删除工作区池" submitLabel="确认删除池" busy={busy} onClose={()=>setModal(null)} onSave={()=>action(`/agent-pools/${modal.pool.poolId}`,'DELETE',{confirmDelete:true,workspaceKind:modal.pool.workspaceKind,workspaceSource:modal.pool.workspaceSource},true,result=>result.deleted===true)}><p>删除「{modal.pool.displayName}」的工作区池登记。</p><ConfigHelp>仅空池且没有未结束任务或 Workflow 引用时允许删除。成员容器、workspace 文件和历史执行记录保留。</ConfigHelp></PoolActionDialog>:null}
  {modal?.kind==='remove'?<PoolActionDialog title="移出池成员" submitLabel="确认移出" busy={busy} onClose={()=>setModal(null)} onSave={()=>action(`/agent-pools/${modal.pool.poolId}/members/${modal.member.memberId}`,'DELETE',{revision:modal.member.revision})}><p>移出「{modal.member.displayName}」后保留 Agent 容器；已有 Workflow 的候选可能需要重新选择。</p></PoolActionDialog>:null}
  {modal?.kind==='cancel-configuration'?<PoolActionDialog title="撤销待确认配置" submitLabel="确认撤销" busy={busy} onClose={()=>setModal(null)} onSave={()=>action(`/agent-pools/${modal.pool.poolId}/members/${modal.member.memberId}/configuration/cancel`,'POST',{revision:modal.member.revision},true,result=>result.cancelled===true)}><p>恢复「{modal.member.displayName}」的已提交配置。Worker 确认恢复前仍保持隔离与待确认状态；撤销失败可继续重试。</p></PoolActionDialog>:null}
@@ -63,6 +90,27 @@ export function AgentPoolPage(){
   return action(`/agent-pools/${modal.pool.poolId}/${modal.kind==='enroll'?'enroll':'members'}`,'POST',value);
  }}/> :null}
  </>;
+}
+
+function PoolRegistrationForm({workspaces,hostPathEnabled,busy,onClose,onSave}:{workspaces:unknown;hostPathEnabled:boolean;busy:boolean;onClose:()=>void;onSave:(value:{displayName:string;workspaceKind:string;workspaceSource:string})=>Promise<void>}){
+ const choices=poolWorkspaces(workspaces),usable=(w:PoolWorkspace)=>!w.readOnly&&(w.kind==='volume'||hostPathEnabled),key=(w:PoolWorkspace)=>JSON.stringify([w.kind,w.source]);
+ const [name,setName]=useState('工作区 Agent 池'),[workspace,setWorkspace]=useState(()=>{const w=choices.find(usable);return w?key(w):'';}),[error,setError]=useState('');
+ const selected=choices.find(w=>key(w)===workspace),submitting=useRef(false),mounted=useRef(true);
+ useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
+ const disabled=busy||!name.trim()||name.trim().length>64||!selected||!usable(selected);
+ return <Modal title="创建工作区池" onClose={onClose} busy={busy}><form onSubmit={async event=>{
+  event.preventDefault();if(busy||submitting.current)return;setError('');
+  if(disabled||!selected){setError('请填写名称并选择已登记的可写工作区');return;}
+  submitting.current=true;
+  try{await onSave({displayName:name.trim(),workspaceKind:selected.kind,workspaceSource:selected.source});}catch(error){if(mounted.current)setError(message(error));}finally{submitting.current=false;}
+ }}>
+  <label>池名称<input name="poolDisplayName" required maxLength={64} disabled={busy} value={name} onChange={e=>setName(e.target.value)}/></label>
+  <label>已有工作区<select aria-label="池工作区" name="poolWorkspace" required disabled={busy} value={workspace} onChange={e=>setWorkspace(e.target.value)}><option value="">选择工作区</option>{choices.map(w=><option key={key(w)} value={key(w)} disabled={!usable(w)}>{w.kind} · {w.source}{w.readOnly?' · 只读，不可入池':w.kind==='hostpath'&&!hostPathEnabled?' · hostPath未启用':''}</option>)}</select></label>
+  <ConfigHelp>只登记已有工作区，不创建目录或容器，不自动纳入成员。同一工作区重复登记会使用已有池。</ConfigHelp>
+  {!choices.some(usable)?<p role="status" className="hint-warn">没有可写的已登记工作区。请先检查 <a href="#/platform-configuration?section=workspaces">工作区设置</a> 或现有 Agent 的工作区；不会自动取消只读限制。</p>:null}
+  {error?<p role="alert">{error}</p>:null}
+  <footer><button type="button" disabled={busy} onClick={onClose}>取消</button><button disabled={disabled}>{busy?'正在登记…':'登记工作区池'}</button></footer>
+ </form></Modal>;
 }
 
 function PoolActionDialog({title,children,busy,onClose,onSave,submitLabel='保存'}:{title:string;children:ReactNode;busy:boolean;onClose:()=>void;onSave:(value:Record<string,FormDataEntryValue>)=>Promise<unknown>;submitLabel?:string}){
