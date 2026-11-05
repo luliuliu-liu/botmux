@@ -44,3 +44,9 @@
 ## workflow-core 与平台兼容
 
 workflow-core 保留实际值依赖与公开类型的精确允许列表。新增叶子模块须确认无 daemon、Lark SDK、配置读取或 Worker 启动依赖；纯路径 DTO 和 Node 文件/摘要工具可以在核对依赖图后逐项加入，不能关闭或改成宽泛前缀允许。Agent 池与外部群 Bot 分配在架构提示生成前拒绝混用；资源补建只显示 `PLATFORM_CLI_IDS` 中当前维护的四类 Worker。
+
+## Worker 配置更新边界
+
+单 CLI Worker 在「修改配置」中仅改模型或认证时，保存走 MCP 同步与原地配置应用，不调用容器 `/upgrade`。Codex/ZCode 支持 API Key 与原生 OAuth 选择，OAuth 模型留空表示原生默认；选择认证方式本身不发起 OAuth 登录。修改工作区、只读挂载或镜像才进入显式重建路径，须保留确认与空闲守卫。
+
+模型配置同步可能停止再启动绑定的 Bot daemon；持久 tmux CLI 会话可以保留，因此不能把「已同步」解释成所有已有 CLI 已被重启或即时换模。新启动的 CLI 读取新配置。

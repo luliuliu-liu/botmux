@@ -105,10 +105,19 @@ describe('draft birth and listing', () => {
   });
 
   it('an orchestrator that cannot run workflow nodes cannot orchestrate', async () => {
-    const h = makeService(base, { appId: PI });
+    const unsupported = BOTS.map(bot => bot.larkAppId === PI ? {...bot, cliId: 'grok'} : bot);
+    const h = makeService(base, { appId: PI, loadBots: () => unsupported });
     expect(await code(h.service.create(OWNER, { goal: 'g' }))).toBe('orchestrator_ineligible');
     expect(readdirSync(base)).toEqual([]);
     expect(listWorkflowDrafts(base)).toEqual([]);
+  });
+
+  it('Pi can orchestrate without weakening the unsupported-CLI guard', async () => {
+    const h = makeService(base, { appId: PI });
+    const created = await h.service.create(OWNER, { goal: 'g' });
+    expect(readWorkflowDraft(join(base, created.runId))?.orchestratorAppId).toBe(PI);
+    expect(h.clarify.sessions.size).toBe(1);
+    expect(readGrillState(join(base, created.runId))?.status).toBe('grilling');
   });
 
   it('the CLI host commands refuse a draft; only the Dashboard path advances it', async () => {
@@ -198,12 +207,16 @@ describe('spec and the first confirmation', () => {
   it('an invalid spec returns its problems, changes nothing, and can be relayed to the model as the next turn', async () => {
     const h = makeService(base);
     const { runId } = await h.service.create(OWNER, { goal: 'g' });
+    const before = readFileSync(join(base, runId, 'spec.md'), 'utf-8');
+    const statusBefore = readGrillState(join(base, runId))?.status;
     h.clarify.reply(specBlock([{ sketchId: 'x', goal: '', expected_outputs: [], acceptance: '', risk_gate: 'no' }]));
     const out = await h.service.finalizeSpec(runId, OWNER, { relayProblems: true });
     expect(out.ok).toBe(false);
     expect(out.problems!.length).toBeGreaterThan(0);
     expect(out.draft.grillStatus).toBe('grilling');
-    expect(existsSync(join(base, runId, 'spec.md'))).toBe(false);
+    expect(readFileSync(join(base, runId, 'spec.md'), 'utf-8')).toBe(before);
+    expect(readGrillState(join(base, runId))?.status).toBe(statusBefore);
+    expect(existsSync(join(base, runId, 'spec.json'))).toBe(false);
     const relayed = [...h.clarify.sessions.values()][0]!.prompts.at(-1)!;
     expect(relayed).toContain(out.problems![0]!);
     expect(out.draft.clarify.turns.at(-1)).toMatchObject({ role: 'system' });
@@ -270,8 +283,10 @@ describe('spec and the first confirmation', () => {
 
 describe('Architect background task', () => {
   it('runs from 待编排 with the planned-group roster: steward and offline bots out, static exclusions out', async () => {
-    const h = makeService(base);
-    h.setOnline([MAIN, DOC, STEWARD, PI]);
+    const unsupportedId = 'cli_unsupported';
+    const bots = [...BOTS, {...BOTS.find(bot => bot.larkAppId === PI), larkAppId: unsupportedId, cliId: 'grok'}];
+    const h = makeService(base, { loadBots: () => bots });
+    h.setOnline([MAIN, DOC, STEWARD, PI, unsupportedId]);
     const runId = await specReady(h);
     expect(await code(h.service.startArchitect(runId, OWNER))).toBe('state_conflict');
     await h.service.approveSpec(runId, OWNER);
@@ -279,15 +294,16 @@ describe('Architect background task', () => {
     expect(started.phase).toBe('architect_running');
     await architectSettled(h.service, runId);
     const roster = h.architect.calls[0]!.botAssignment!.roster;
-    expect(roster.bots.map((bot) => bot.larkAppId)).toEqual([MAIN, DOC]);
+    expect(roster.bots.map((bot) => bot.larkAppId)).toEqual([MAIN, DOC, PI]);
+    expect(roster.excluded.some(entry => entry.larkAppId === unsupportedId)).toBe(true);
+    expect(roster.excluded.some(entry => entry.larkAppId === PI)).toBe(false);
     expect(Object.fromEntries(roster.excluded.map((entry) => [entry.larkAppId, entry.why]))).toMatchObject({
       [OFFLINE]: expect.stringContaining('daemon 不在线'),
       [STEWARD]: expect.stringContaining('管家'),
-      [PI]: expect.stringContaining('CLI pi'),
     });
     const view = await h.service.view(runId);
     expect(view).toMatchObject({ phase: 'dag_ready', architect: { state: 'succeeded', attempt: 1 } });
-    expect(view.flow!.roster.bots.map((bot) => bot.larkAppId)).toEqual([MAIN, DOC]);
+    expect(view.flow!.roster.bots.map((bot) => bot.larkAppId)).toEqual([MAIN, DOC, PI]);
     expect(view.flow!.plan.rows.map((row) => [row.nodeId, row.larkAppId, row.reason])).toEqual([
       ['inspect', MAIN, '默认交给主 Bot'], ['write', DOC, '用户点名文档Bot'],
     ]);

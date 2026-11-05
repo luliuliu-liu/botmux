@@ -19066,7 +19066,7 @@ function getVersion(): string {
 }
 
 const command = process.argv[2];
-if(command==='workflow'&&(process.argv.slice(3).includes('--help')||process.argv.slice(3).includes('-h'))){const {WORKFLOW_HELP}=await import('./cli/workflow-operations.js');console.log(WORKFLOW_HELP);process.exit(0);}
+if(command==='workflow'&&(process.argv.slice(3).includes('--help')||process.argv.slice(3).includes('-h'))){const {printWorkflowHelp}=await import('./cli/workflow.js');printWorkflowHelp();process.exit(0);}
 
 let sendPreflight: SendPreflight | undefined;
 if (command === 'send') {
@@ -20692,7 +20692,7 @@ switch (command) {
   case 'workflow': {
     const wfSub = process.argv[3] ?? '';
     if(wfSub==='--help'||wfSub==='-h'||wfSub==='help'||process.argv.slice(4).some(a=>a==='--help'||a==='-h')){
-      const {WORKFLOW_HELP}=await import('./cli/workflow-operations.js');console.log(WORKFLOW_HELP);break;
+      const {printWorkflowHelp}=await import('./cli/workflow.js');printWorkflowHelp();break;
     }
     const {OPERATION_COMMANDS,cmdWorkflowOperations}=await import('./cli/workflow-operations.js');
     if(OPERATION_COMMANDS.has(wfSub)){

@@ -3,9 +3,7 @@ import {defaultBaseDir} from '../workflows/v3/grill-state.js';
 import {workflowStatus,workflowDiff,workflowArtifacts,publicArtifacts,exportWorkflowArtifacts,workflowLogs,workflowPreflight,cloneWorkflow,operationsRunDir,artifactBytes,operationEvents} from '../workflows/v3/operations.js';
 import {join} from 'node:path';
 export const OPERATION_COMMANDS=new Set(['status','wait','watch','logs','artifacts','export','diff','clone','revise','spec-validate','preflight']);
-export const WORKFLOW_HELP=`Workflow authoring: new "goal" → edit spec.md → spec-finalize → approve-spec → architect → diff → approve-dag → start
-Spec confirmation is agent review; new managed DAG approval requires the initiating user card.
-Run operations:
+export const WORKFLOW_RUN_OPERATIONS_HELP=`Run operations:
  status <runId> [--json]              phase, nextAction, attempts, resources, delivery
  wait <runId> [--timeout <seconds>] [--delivery]  0 success, 1 failed, 2 needs input/blocked, 3 cancelled, 4 timeout, 5 query error
  watch <runId> [--timeout <seconds>]  ordered events; stops at terminal/blocked
@@ -19,6 +17,9 @@ Run operations:
  retry <runId> [--node id]            same frozen DAG, new attempt/job/workDir; does not change inputs or mounts automatically
 All commands support --help before accessing files, identities or network. --base-dir selects a local run root.
 `;
+export const WORKFLOW_HELP=`Workflow authoring: new "goal" → edit spec.md → spec-finalize → approve-spec → architect → diff → approve-dag → start
+Spec confirmation is agent review; new managed DAG approval requires the initiating user card.
+${WORKFLOW_RUN_OPERATIONS_HELP}`;
 export async function cmdWorkflowOperations(sub:string,rest:string[]){
  const get=(key:string)=>{const i=rest.indexOf(key);return i<0?undefined:rest[i+1];};
  const runId=rest[0];if(!runId||runId.startsWith('-'))throw Error('runId required');const baseDir=get('--base-dir')??defaultBaseDir();const {assertWorkflowHostCaller,chatBindingFromEnv}=await import('../workflows/v3/host.js');assertWorkflowHostCaller(operationsRunDir(runId,baseDir),chatBindingFromEnv());

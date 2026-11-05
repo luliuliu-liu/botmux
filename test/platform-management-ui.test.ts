@@ -305,6 +305,37 @@ describe('Agent pool behavior',()=>{
  });
 });
 describe('model and Agent management UI',()=>{
+  function setupSingleConfiguration(agentType:'codex'|'zcode',authMethod:'api-key'|'oauth'='api-key'){
+    const row={...current,agentType,image:agentType+':test',imageAgents:[agentType],authMethod,modelProfileId:authMethod==='oauth'?null:'old',modelId:authMethod==='oauth'?'native-old':'model-1'};
+    const fallback=fetcher.getMockImplementation()!;
+    fetcher.mockImplementation(async(url:string,init?:any)=>{
+      const path=url.replace('/api/platform','');
+      if(path==='/containers'&&(!init?.method||init?.method==='GET'))return {ok:true,json:async()=>({containers:[row]})};
+      if(path==='/models')return {ok:true,json:async()=>({models:[{...models[0],protocol:agentType==='codex'?'openai-responses':'zcode-coding-plan',modelIds:['model-1','api-new']} ]})};
+      if(path.startsWith('/mcp-targets/'))return {ok:true,json:async()=>(init?.method==='POST'?{applied:true}:{revision:1,serverIds:[],cliIds:[agentType],servers:[]})};
+      if(path.endsWith('/clis'))return {ok:true,json:async()=>({clis:[{agentType,configured:true,active:true,revision:1,appliedRevision:1}]})};
+      if(path==='/containers/agent-1'&&init?.method==='PUT')return {ok:!failure,status:failure?409:200,json:async()=>failure?{message:'busy fixture'}:{container:{...row,revision:2,appliedRevision:2}}};
+      return fallback(url,init);
+    });return row;
+  }
+  it.each(['codex','zcode'] as const)('单CLI %s可从API Key切换OAuth，仅原地保存模型',async agentType=>{
+    const row=setupSingleConfiguration(agentType),done=vi.fn(),r=await mount(React.createElement(ConfigureAgent,{container:row as any,onClose:()=>{},onDone:done}));
+    const picker=r.root.findByProps({'aria-label':'配置模型'});expect(picker.props.value).toBe('["old","model-1"]');expect(picker.findAllByType('option').some(option=>option.props.value==='[null,null]')).toBe(true);
+    await act(async()=>picker.props.onChange({target:{value:'[null,null]'}}));await act(async()=>r.root.findByProps({'aria-label':'配置 OAuth 模型'}).props.onChange({target:{value:' native-new '}}));
+    expect(r.root.findByProps({'aria-label':'配置模型'}).props.value).toBe('[null,null]');await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){}}));
+    const writes=fetcher.mock.calls.filter(([,init])=>init?.method==='POST'||init?.method==='PUT');expect(writes.map(([url])=>url)).toEqual(['/api/platform/mcp-targets/agent-1','/api/platform/containers/agent-1']);
+    expect(JSON.parse(writes[1][1].body)).toMatchObject({modelProfileId:null,modelId:'native-new',authMethod:'oauth'});expect(JSON.parse(writes[1][1].body)).not.toHaveProperty('botId');expect(done).toHaveBeenCalled();
+    expect(fetcher.mock.calls.some(([url])=>url.includes('/upgrade')||url.includes('/login'))).toBe(false);
+  });
+  it('已有OAuth模型回填，失败保留输入，再切回API Key不重建',async()=>{
+    const row=setupSingleConfiguration('codex','oauth'),done=vi.fn(),r=await mount(React.createElement(ConfigureAgent,{container:row as any,onClose:()=>{},onDone:done}));
+    expect(r.root.findByProps({'aria-label':'配置模型'}).props.value).toBe('[null,null]');expect(r.root.findByProps({'aria-label':'配置 OAuth 模型'}).props.value).toBe('native-old');
+    await act(async()=>r.root.findByProps({'aria-label':'配置 OAuth 模型'}).props.onChange({target:{value:'edited-native'}}));failure=true;await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){}}));
+    expect(done).not.toHaveBeenCalled();expect(r.root.findByProps({'aria-label':'配置 OAuth 模型'}).props.value).toBe('edited-native');
+    failure=false;await act(async()=>r.root.findByProps({'aria-label':'配置模型'}).props.onChange({target:{value:'["old","api-new"]'}}));expect(r.root.findAllByProps({'aria-label':'配置 OAuth 模型'})).toHaveLength(0);
+    await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){}}));const [,request]=fetcher.mock.calls.filter(([,init])=>init?.method==='PUT').at(-1)!;
+    expect(JSON.parse(request.body)).toMatchObject({modelProfileId:'old',modelId:'api-new',authMethod:'api-key'});expect(done).toHaveBeenCalled();expect(fetcher.mock.calls.some(([url])=>url.includes('/upgrade')||url.includes('/login'))).toBe(false);
+  });
   it('shows API-key and OAuth credential status separately in the local Agent table',async()=>{
     const fallback=fetcher.getMockImplementation()!;
     fetcher.mockImplementation(async(url:string,init?:any)=>url.endsWith('/local-agent')?{ok:true,json:async()=>({agents:[

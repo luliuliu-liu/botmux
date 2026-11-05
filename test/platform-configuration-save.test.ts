@@ -51,3 +51,15 @@ it('applies local MCP, proxy and selected Bot CLI, queues workspace rebuild last
  expect(api.mock.calls.map(c=>c[0])).toEqual(['/mcp-targets/control','/control-proxy','/local-agent/bots/bot','/control-workspace']);
  expect(api.mock.calls[2][2]).toMatchObject({cliId:'pi',confirmRestart:true});
 });
+it.each(['codex','zcode'])('单CLI %s只改OAuth模型原地保存，不重建或重绑Bot',async agentType=>{
+ const b:any=base();b.initial={...initial,agentType};b.row={...b.row,agentType};b.clis=[{agentType,configured:true,revision:4}];
+ const api=vi.fn(async(p,m)=>p.startsWith('/mcp-targets')?{applied:true}:{container:{...b.row,status:'ready',revision:5,appliedRevision:5,sandboxId:'existing-sandbox'}});
+ const result=await saveInstanceConfiguration(api,b,{...b.initial,modelChoice:'[null,null]',oauthModelId:'  native-model  '},'request');
+ expect(result).toEqual({applied:true});expect(api.mock.calls.map(c=>[c[0],c[1]])).toEqual([['/mcp-targets/id','POST'],['/containers/id','PUT']]);
+ expect(api.mock.calls[1][2]).toMatchObject({modelProfileId:null,modelId:'native-model',authMethod:'oauth'});expect(api.mock.calls[1][2]).not.toHaveProperty('botId');
+});
+it('OAuth默认模型清空为null，切回API Key不受旧OAuth输入影响',async()=>{
+ const b:any=base();b.clis=[b.clis[0]];const api=vi.fn(async p=>p.startsWith('/mcp-targets')?{applied:true}:{container:{...b.row,status:'ready',revision:5,appliedRevision:5}});
+ await saveInstanceConfiguration(api,b,{...initial,modelChoice:'[null,null]',oauthModelId:'   '},'request');expect(api.mock.calls[1][2]).toMatchObject({modelProfileId:null,modelId:null,authMethod:'oauth'});
+ api.mockClear();await saveInstanceConfiguration(api,b,{...initial,modelChoice:'["profile","api-model"]',oauthModelId:'stale-native-model'},'request');expect(api.mock.calls[1][2]).toMatchObject({modelProfileId:'profile',modelId:'api-model',authMethod:'api-key'});expect(api.mock.calls).toHaveLength(2);
+});

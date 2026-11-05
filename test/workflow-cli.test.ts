@@ -124,6 +124,17 @@ describe('workflow feature kill-switch (BOTMUX_WORKFLOW_ENABLED=false)', () => {
     expect(result.output).toContain('Saved Workflow');
   });
 
+  it.each([false,true])('所有帮助入口遵循同一开关状态且不创建运行目录（enabled=%s）', workflowEnabled => {
+    const baseline=runCliWithWorkflow(['workflow','help'],workflowEnabled);
+    expect(baseline.status).toBe(0);
+    const untouched=join(tempDir,'must-not-create');
+    for(const args of [[],['--help'],['-h'],['save','--help'],['new','--help','--base-dir',untouched]]){
+      const result=runCliWithWorkflow(['workflow',...args],workflowEnabled);
+      expect(result.status).toBe(0);expect(result.output).toBe(baseline.output);
+    }
+    expect(existsSync(untouched)).toBe(false);
+  });
+
   it('does NOT print the disabled notice for the same host verb when enabled', () => {
     // With the feature ON the gate is transparent; `new` proceeds past it (and
     // may fail later for other reasons) but never emits the kill-switch notice.
