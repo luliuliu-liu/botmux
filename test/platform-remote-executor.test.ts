@@ -11,9 +11,12 @@ import {readJournal} from '../src/workflows/v3/journal.js';
 import {runWorkflow} from '../src/workflows/v3/runtime.js';
 import {openV3WorkerAttempts} from '../src/workflows/v3/attempt-ledger.js';
 import {openV3HostEffects} from '../src/workflows/v3/host-effect-ledger.js';
+import * as agentPools from '../src/platform/workflow/agent-pool-client.js';
+import {writeProjectWorkspaceSelection} from '../src/platform/workflow/project-workspace.js';
+import {managedWorkspaceBinding} from './helpers/workflow-managed-workspace.js';
 
 const homes:string[]=[];
-afterEach(()=>{vi.useRealTimers();for(const home of homes.splice(0))rmSync(home,{recursive:true,force:true});});
+afterEach(()=>{vi.useRealTimers();vi.restoreAllMocks();for(const home of homes.splice(0))rmSync(home,{recursive:true,force:true});});
 function deferred<T=void>(){
   let resolve!:(value:T|PromiseLike<T>)=>void;
   const promise=new Promise<T>(res=>{resolve=res;});
@@ -57,9 +60,28 @@ function fixture(opts:{loseSubmit?:boolean;malicious?:boolean;terminal?:boolean;
   return{home,runDir,attemptDir,outputDir,calls,backend,req,controller};
 }
 
+function pooledFixture(f:ReturnType<typeof fixture>){
+  const binding=managedWorkspaceBinding();
+  writeProjectWorkspaceSelection(f.runDir,binding);
+  f.req.node={...f.req.node,agentSelection:{poolId:binding.poolId,requirement:'fixture',candidateIds:[],reason:'fixture'}};
+  const path=join(f.runDir,'journal.api.json');
+  writeFileSync(path,JSON.stringify({...JSON.parse(readFileSync(path,'utf8')),executionMode:'pool'}));
+  // 仅资源目录查询用合成回执；真实冻结绑定读取、匹配和远程执行仍由生产入口校验。
+  // Control身份/宿主工作区查询在对应池绑定测试验证，不把此夹具当真实控制面。
+  vi.spyOn(agentPools,'currentPoolCatalog').mockReturnValue({poolId:binding.poolId,workspace:binding,members:[]});
+}
+
+it.each(['missing-binding','different-pool'] as const)('池执行%s在发送前拒绝，目录夹具不绕过冻结绑定',async change=>{
+  const f=fixture();pooledFixture(f);
+  if(change==='missing-binding')rmSync(join(f.runDir,'workspace.selection.json'));
+  else f.req.node={...f.req.node,agentSelection:{...f.req.node.agentSelection!,poolId:'22222222-2222-4222-8222-222222222222'}};
+  await expect(f.backend.runNode(f.req)).rejects.toThrow('workflow_execution_workspace_mismatch');
+  expect(f.calls.some(call=>call.path.endsWith('/submit'))).toBe(false);
+});
+
 it('keeps products and records a compatible receipt when an older journal rejects the new event',async()=>{
  const f=fixture({runtime:{status:'ok',sessionId:'session',endedAt:'2026-11-03T00:00:00Z'}});
- const descriptor=join(f.runDir,'journal.api.json');writeFileSync(descriptor,JSON.stringify({...JSON.parse(readFileSync(descriptor,'utf8')),executionMode:'pool'}));
+ pooledFixture(f);
  const journal=await import('../src/workflows/v3/journal.js'),append=journal.appendEvent;
  const spy=vi.spyOn(journal,'appendEvent').mockImplementation((path,event)=>{
   if(event.type==='nodeResourceSettled'){
@@ -162,8 +184,8 @@ it.each(['beforeSubmit','afterSubmitAck'] as const)('peer blockage waits for %s 
     return {state:'reserved'};
   }});
   // 本场景只让 runtime 在 durable dispatch 后获取 lease，夹具不预先获取。
-  writeFileSync(join(f.runDir,'journal.api.json'),JSON.stringify({baseUrl:'http://control:8787',token:'run-token',expiresAt:1e12,executionMode:'pool'}));
-  const selection={poolId:'11111111-1111-1111-1111-111111111111',requirement:'test',candidateIds:[],reason:'fixture'};
+  pooledFixture(f);
+  const selection={poolId:managedWorkspaceBinding().poolId,requirement:'test',candidateIds:[],reason:'fixture'};
   const dag=validateDag({runId:f.req.runId,nodes:[{id:'blocker',type:'goal',goal:'block',agentSelection:selection},{id:'goal',type:'goal',goal:'delay submit',agentSelection:selection}]});
   const journalPath=join(f.runDir,'journal.ndjson');
   const running=runWorkflow(dag,{
@@ -231,8 +253,8 @@ it('stores remote task PTY output at the Control attempt path for authenticated 
 
 it('restored pooled descriptors retain resource admission and ignore the Control bot model',async()=>{
  const f=fixture();
- writeFileSync(join(f.runDir,'journal.api.json'),JSON.stringify({baseUrl:'http://control:8787',token:'run-token',expiresAt:1e12,executionMode:'pool'}));
- const selection={poolId:'11111111-1111-1111-1111-111111111111',requirement:'write',candidateIds:[],reason:'missing'};
+ pooledFixture(f);
+ const selection={poolId:managedWorkspaceBinding().poolId,requirement:'write',candidateIds:[],reason:'missing'};
  let ready=false;
  const backend=createRemoteExecutionBackend({home:f.home,runDir:f.runDir,pollMs:1,request:input=>{
   if(input.path.endsWith('/prepare'))return {state:ready?'allocated':'waiting',waitReason:'capability'};
@@ -249,8 +271,8 @@ it('restored pooled descriptors retain resource admission and ignore the Control
 
 it('blocks missing input before dispatch and lets the existing terminal-drain path settle the run',async()=>{
  const f=fixture({skipAcquire:true,request:input=>input.path.endsWith('/prepare')?{preflightFailed:true,state:'closed',closed:true,lastError:'input missing'}:{state:'reserved'}});
- writeFileSync(join(f.runDir,'journal.api.json'),JSON.stringify({baseUrl:'http://control:8787',token:'run-token',expiresAt:1e12,executionMode:'pool'}));
- const selection={poolId:'11111111-1111-1111-1111-111111111111',requirement:'read',candidateIds:[],reason:'fixture'};
+ pooledFixture(f);
+ const selection={poolId:managedWorkspaceBinding().poolId,requirement:'read',candidateIds:[],reason:'fixture'};
  const dag=validateDag({runId:f.req.runId,nodes:[{id:'goal',type:'goal',goal:'read input',agentSelection:selection}]});
  const runNode=vi.fn();const result=await runWorkflow(dag,{...f.backend,runNode,resolveBotSnapshot:()=>f.req.botSnapshot,validateManifest:async()=>({ok:false})},{baseDir:join(f.home,'.botmux','v3-runs')});
  expect(result).toMatchObject({runStatus:'blocked'});expect(runNode).not.toHaveBeenCalled();const events=readJournal(join(f.runDir,'journal.ndjson'));expect(events.some(e=>e.type==='nodeDispatched'||e.type==='nodeSessionReady')).toBe(false);expect(events.filter(e=>e.type==='runBlocked')).toHaveLength(1);
