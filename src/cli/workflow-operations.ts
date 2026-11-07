@@ -10,7 +10,7 @@ export const WORKFLOW_RUN_OPERATIONS_HELP=`Run operations:
  logs <runId> <nodeId> [--stream stdout|stderr] [--tail N] [--attempt <attemptId>]
  artifacts <runId> [--json] [--download <key> --output <file>]
  export <runId> --output <new-directory>   validated files and deliverables manifest
- clone|revise <runId>                 new draft with parent lineage; old run unchanged
+ clone|revise <runId> [--pool <id>]   new draft with parent lineage; managed Control requires a pool
  diff <runId>                        spec goals vs DAG, edges, outputs, gates, mounts
  preflight <runId>                   inspect declared mounted inputs before start
  spec-validate <runId>               validate spec.md without finalizing
@@ -27,7 +27,7 @@ export async function cmdWorkflowOperations(sub:string,rest:string[]){
  if(sub==='preflight'){const v=workflowPreflight(runId,baseDir);console.log(JSON.stringify(v,null,2));if(!v.ok)process.exitCode=2;return;}
  if(sub==='status'){console.log(JSON.stringify(workflowStatus(runId,baseDir),null,2));return;}
  if(sub==='diff'){console.log(JSON.stringify(workflowDiff(runId,baseDir),null,2));return;}
- if(sub==='clone'||sub==='revise'){const {runId:newId,runDir,lineage}=await cloneWorkflow(runId,{baseDir,goal:get('--goal')});console.log(JSON.stringify({runId:newId,runDir,lineage,nextAction:'Edit spec.md, then workflow spec-finalize'}));return;}
+ if(sub==='clone'||sub==='revise'){const {runId:newId,runDir,lineage}=await cloneWorkflow(runId,{baseDir,goal:get('--goal'),poolId:get('--pool')});console.log(JSON.stringify({runId:newId,runDir,lineage,nextAction:'Edit spec.md, then workflow spec-finalize'}));return;}
  if(sub==='logs'){if(!rest[1]||rest[1].startsWith('-'))throw Error('nodeId required');console.log(workflowLogs(runId,rest[1],{baseDir,stream:get('--stream')??'stdout',tail:Number(get('--tail')??80),attempt:get('--attempt')}));return;}
  if(sub==='export'){const out=get('--output');if(!out)throw Error('--output required');console.log(JSON.stringify({files:await exportWorkflowArtifacts(runId,out,baseDir)}));return;}
  if(sub==='artifacts'){const items=await workflowArtifacts(runId,baseDir),key=get('--download');if(key){const found=items.find(f=>f.key===key),out=get('--output');if(!found||!out)throw Error('artifact key and --output required');writeFileSync(out,artifactBytes(found),{flag:'wx',mode:0o600});}else console.log(JSON.stringify({files:publicArtifacts(items)},null,2));return;}

@@ -1,5 +1,6 @@
 import { afterEach,beforeEach,describe,expect,it,vi } from 'vitest';
 import { platformManagementEnabled, createPlatformDashboardApi, localBotDisplayNames } from '../src/platform/management/dashboard-api.js';
+import {WorkerDashboardEntryError} from '../src/platform/management/worker-dashboard-proxy.js';
 // Management fixtures explicitly select Control; a Dev image defaults to Worker.
 beforeEach(()=>vi.stubEnv('BOTMUX_AGENT_ROLE','control'));
 afterEach(()=>vi.unstubAllEnvs());
@@ -44,6 +45,23 @@ describe('pool proxy boundaries',()=>{
  });
 });
 describe('v2 platform boundaries',()=>{
+  it('工作台未配置远程域名时返回明确诊断，保留管理登录与CSRF守卫',async()=>{
+    vi.stubEnv('BOTMUX_PLATFORM_MANAGED','true');
+    const dir=mkdtempSync(join(tmpdir(),'workbench-domain-'));
+    try{
+      const open=vi.fn(async()=>{throw new WorkerDashboardEntryError('worker_dashboard_domain_required','请配置实例泛域名');});
+      const api=createPlatformDashboardApi({botsJsonPath:join(dir,'bots.json'),localOnboarding:{} as any,listLocalBots:()=>[],openWorkerDashboard:open});
+      const path='/api/platform/containers/11111111-1111-4111-8111-111111111111/dashboard';
+      const call=async(authorized:boolean,origin='http://10.37.47.13:17891')=>{let status=0,body='';
+        await api({method:'POST',headers:{host:'10.37.47.13:17891',origin,'content-type':'application/json'},async *[Symbol.asyncIterator](){yield '{}';}} as any,
+          {writeHead:(value:number)=>status=value,end:(value:string)=>body=value} as any,new URL('http://10.37.47.13:17891'+path),authorized);
+        return {status,body:JSON.parse(body)};
+      };
+      expect((await call(false)).status).toBe(401);expect(open).not.toHaveBeenCalled();
+      expect((await call(true,'http://worker.localhost')).status).toBe(403);expect(open).not.toHaveBeenCalled();
+      expect(await call(true)).toMatchObject({status:409,body:{error:'worker_dashboard_domain_required',message:'请配置实例泛域名'}});
+    }finally{rmSync(dir,{recursive:true,force:true});}
+  });
   it('routes authenticated local ZCode login requests to the native-login handler',async()=>{
     const old=process.env.BOTMUX_PLATFORM_MANAGED,dir=mkdtempSync(join(tmpdir(),'local-zcode-route-'));
     process.env.BOTMUX_PLATFORM_MANAGED='true';

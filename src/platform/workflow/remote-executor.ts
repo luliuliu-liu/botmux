@@ -7,6 +7,8 @@ import type {AttemptLeaseBinding} from '../../workflows/v3/runtime-host-contract
 import type {RunNodeRequest} from '../../workflows/v3/contract.js';
 import {PersistenceRequestError,requestPersistenceSync,type PersistenceRequester} from './sync-request.js';
 import {currentPoolCatalog} from './agent-pool-client.js';
+import {readProjectFile} from './project-files.js';
+import {readProjectWorkspaceSelection,controlProjectPath} from './project-workspace.js';
 import {sha256,workerJobId as jobId,WORKER_COMMAND_SCHEMA,type WorkerCommand} from './worker-protocol.js';
 
 const read=(path:string)=>{if(!lstatSync(path).isFile()||lstatSync(path).isSymbolicLink())throw Error('unsafe_execution_identity');return JSON.parse(readFileSync(path,'utf8'));};
@@ -36,8 +38,10 @@ export function createRemoteExecutionBackend({home,runDir,request=requestPersist
       if(input.node.agentSelection&&!pooled())throw Error('agent_pool_backend_required');
       if(!pooled())return {ready:true};
       const id=jobId(run,input.attemptId);
+      const catalog=currentPoolCatalog(home,runDir);if(!catalog)throw Error('pool_catalog_unavailable');
       let selection=input.node.agentSelection;
-      if(!selection){const catalog=currentPoolCatalog(home);if(!catalog)throw Error('pool_catalog_unavailable');selection={poolId:catalog.poolId,requirement:input.node.goal??input.node.id,candidateIds:[],reason:'此节点尚未选择能力匹配的成员，请确认补建或选择已有成员'};}
+      if(selection&&selection.poolId!==catalog.poolId)throw Error('workflow_execution_workspace_mismatch');
+      if(!selection){selection={poolId:catalog.poolId,requirement:input.node.goal??input.node.id,candidateIds:[],reason:'此节点尚未选择能力匹配的成员，请确认补建或选择已有成员'};}
       const state=call(id,'/prepare','POST',{attemptId:input.attemptId,selection});
       if(state.preflightFailed)return {ready:false,blocked:{code:'INPUT_PREFLIGHT_FAILED',message:state.lastError??'Required input is missing'}};
       if(state.closed)return {ready:true,cancelled:true};
@@ -61,12 +65,13 @@ export function createRemoteExecutionBackend({home,runDir,request=requestPersist
       // Only declared, validated upstream products cross the instance boundary;
       // no tar of state, auth, project config, or the Control home.
       let inputBytes=0;
+      const selected=readProjectWorkspaceSelection(runDir);
+      if(pooled() && (!selected||req.node.agentSelection?.poolId!==selected.poolId))throw Error('workflow_execution_workspace_mismatch');
       const inputs=read(req.inputsPath),command:WorkerCommand={schema:WORKER_COMMAND_SCHEMA,jobId:id,runId:run,attemptId:req.attemptId,node:req.node,
-        goal:readFileSync(req.env.BOTMUX_GOAL_PATH!,'utf8'),inputs:inputs.inputs.map((item:any)=>{
+        goal:readFileSync(req.env.BOTMUX_GOAL_PATH!,'utf8'),...(selected?{projectWorkspace:{poolId:selected.poolId,bindingHash:selected.bindingHash,controlRoot:dirname(controlProjectPath(selected,'coordinates')),workerRoot:'/workspace' as const}}:{}),inputs:inputs.inputs.map((item:any)=>{
           const path=realpathSync(item.path),rel=relative(realpathSync(runDir),path);
-          const stat=lstatSync(path);inputBytes+=stat.size;
-          if(!rel||isAbsolute(rel)||rel.startsWith('..')||!stat.isFile()||inputBytes>4*1024*1024)throw Error('remote_input_outside_run');
-          const buffer=readFileSync(path);return{from:item.from,name:item.name,kind:item.kind,...(item.preview?{preview:item.preview}:{}),...(item.output?{output:item.output}:{}),data:buffer.toString('base64'),sha256:sha256(buffer)};
+          if(!rel||isAbsolute(rel)||rel==='..'||rel.startsWith(`..${sep}`))throw Error('remote_input_outside_run');
+          const buffer=readProjectFile(runDir,rel.split(sep).join('/'),4*1024*1024-inputBytes);inputBytes+=buffer.length;return{from:item.from,name:item.name,kind:item.kind,...(item.preview?{preview:item.preview}:{}),...(item.output?{output:item.output}:{}),data:buffer.toString('base64'),sha256:sha256(buffer)};
         }),omitted:inputs.omitted||[],timeoutMs:req.timeoutMs,...(read(join(runDir,'journal.api.json')).conventionsVersion===1?{conventionsVersion:1 as const,...(read(join(runDir,'journal.api.json')).conventionsDigest?{conventionsDigest:read(join(runDir,'journal.api.json')).conventionsDigest}:{})}: {})};
       const payload=pooled()?{command}:{command,agentType:req.botSnapshot.cliId,model:req.botSnapshot.model};
       const intent=join(req.attemptDir,'execution.request.json');

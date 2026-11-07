@@ -142,6 +142,7 @@ import { handleFederationApi } from './dashboard/federation-api.js';
 import { buildFederatedRoster } from './services/federation-roster.js';
 import { resolveLiveBotTransport } from './services/team-roster.js';
 import { normalizeBotsInfoRouteEntries } from './services/bots-info-shape.js';
+import { readBotsInfoJson } from './services/bots-info-cache.js';
 import { handleFederationSpokeApi, syncAllMemberships, autoBindOwnerIfUnambiguous, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
 import type { TeamGroupCreateResult, TeamGroupOwnerTransferResult } from './dashboard/federated-group-core.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
@@ -397,7 +398,8 @@ import { readPlatformBinding } from './platform/binding.js';
 import { startPlatformTunnelClient, type PlatformBotInfo, type PlatformTeamSyncMessage } from './platform/tunnel-client.js';
 import { dashboardScheduleWriteHeaders } from './core/dashboard-schedule-creator.js';
 import { handleWorkflowInitiatorApi, workflowInitiatorPreGateDenial } from './dashboard/workflow-initiator-api.js';
-import { handleWorkflowDraftsApi } from './dashboard/workflow-drafts-api.js';
+import { handleWorkflowDraftsApi, handleWorkflowOrchestratorBotsApi, workflowOrchestratorBotOptions } from './dashboard/workflow-drafts-api.js';
+import { handleWorkflowLibraryApi } from './dashboard/workflow-library-api.js';
 import { applyPlatformTeamSync, getPlatformTeamSyncRev } from './services/platform-team-store.js';
 import { getBotUnionId } from './services/bot-union-ids-store.js';
 import { getBotSpecialties } from './services/bot-profile-store.js';
@@ -4351,11 +4353,10 @@ const server = createServer(async (req, res) => {
       return jsonRes(res, 200, { ok: true });
     }
 
-    // Pinned xterm 5.5.0 browser bundle (the #1940 set) for pages rendered at
-    // the Dashboard root — the v3 terminal replay iframe — instead of a public
-    // CDN. Public library files, so no auth (same as the worker's copy under
-    // `/s/<id>/`, which still reaches the worker through the front proxy).
-    if (handleXtermVendorHttp(req, res, url.pathname, 'root', (err) => {
+    // 固定xterm公开库：回放使用根路径，实时Workflow页按终端前缀拼资源。
+    // 两者由Dashboard本地同一白名单服务；不需要会话令牌，不转发Worker。
+    // dashboard模式只接受根与原生终端前缀，不开放任意API或文件读取。
+    if (handleXtermVendorHttp(req, res, url.pathname, 'dashboard', (err) => {
       logger.warn(`[dashboard] xterm vendor asset failed: ${err instanceof Error ? err.message : String(err)}`);
     })) return;
 
@@ -5070,7 +5071,7 @@ const server = createServer(async (req, res) => {
         return jsonRes(res, 400, { ok: false, error: 'bad_json' });
       }
       const olderThanHours = parseIdleCleanupHours(body?.olderThanHours);
-      if (!olderThanHours) return jsonRes(res, 400, { ok: false, error: 'invalid_threshold' });
+      if (olderThanHours === null) return jsonRes(res, 400, { ok: false, error: 'invalid_threshold' });
 
       // WYSIWYG: the UI scopes cleanup to the rows currently visible under the
       // page filters and sends their sessionIds, so the closed set matches the
@@ -7006,7 +7007,7 @@ const server = createServer(async (req, res) => {
       identity: requestIdentity,
       canManageHost: authed,
       platformBound: !!readPlatformBinding(),
-      featureEnabled: () => isWorkflowFeatureEnabled() && workflowNodeExecutorMode() === 'bot',
+      featureEnabled: () => containerRole() !== 'control' && isWorkflowFeatureEnabled() && workflowNodeExecutorMode() === 'bot',
       proxyToDaemon,
     })) {
       return;
@@ -7019,9 +7020,50 @@ const server = createServer(async (req, res) => {
       identity: requestIdentity,
       canManageHost: authed,
       platformBound: !!readPlatformBinding(),
-      featureEnabled: () => isWorkflowFeatureEnabled() && workflowNodeExecutorMode() === 'bot',
+      featureEnabled: () => containerRole() !== 'control' && isWorkflowFeatureEnabled() && workflowNodeExecutorMode() === 'bot',
+      runsDir: v3RunsDir(),
+      libraryDataDir: dirname(v3RunsDir()),
+      proxyToDaemon,
+    })) {
+      return;
+    }
+
+    // Workflow templates (design 2026-11-03 workflow-dashboard-orchestration
+    // D5): the list and detail read disk; saves and runs go to the daemon of
+    // the run's main bot / the template's bot, which checks the person.
+    if (await handleWorkflowLibraryApi(req, res, url, {
+      identity: requestIdentity,
+      canManageHost: authed,
+      platformBound: !!readPlatformBinding(),
+      featureEnabled: () => isWorkflowFeatureEnabled() && (
+        containerRole() === 'control' ? req.method === 'GET' : workflowNodeExecutorMode() === 'bot'
+      ),
+      libraryDataDir: dirname(v3RunsDir()),
       runsDir: v3RunsDir(),
       proxyToDaemon,
+    })) {
+      return;
+    }
+
+    // The orchestrator picker of 「新建工作流」 (design 2026-11-03 §4.1, D3):
+    // bots.json + the daemon registry, read only.
+    if (handleWorkflowOrchestratorBotsApi(req, res, url, {
+      canManageHost: authed,
+      featureEnabled: () => containerRole() !== 'control' && isWorkflowFeatureEnabled() && workflowNodeExecutorMode() === 'bot',
+      listBots: () => {
+        // Offline bots have no registry row: their name comes from bots-info.json.
+        const fileNames = new Map<string, string>();
+        try {
+          for (const entry of normalizeBotsInfoRouteEntries(readBotsInfoJson(config.session.dataDir))) {
+            if (entry.botName) fileNames.set(entry.larkAppId, entry.botName);
+          }
+        } catch { /* unreadable: ids */ }
+        return workflowOrchestratorBotOptions(
+          loadBotConfigs(),
+          (larkAppId) => !!registry.getByAppId(larkAppId),
+          (larkAppId) => registry.getByAppId(larkAppId)?.botName || fileNames.get(larkAppId) || larkAppId,
+        );
+      },
     })) {
       return;
     }
@@ -8032,7 +8074,7 @@ const server = createServer(async (req, res) => {
     // are app-scoped, so creator daemon and operator open_id come from the
     // SAME bot by construction. See dashboard/operator-selector.ts.
     if (req.method === 'POST' && url.pathname === '/api/groups/create') {
-      let parsed: { name?: unknown; larkAppIds?: unknown; userOpenIds?: unknown; ownerUnionIds?: unknown; bindWorkingDir?: unknown; roleProfileId?: unknown; feedGroupId?: unknown; newFeedGroupName?: unknown; feedGroupAppId?: unknown };
+      let parsed: { name?: unknown; larkAppIds?: unknown; userOpenIds?: unknown; ownerUnionIds?: unknown; bindWorkingDir?: unknown; roleProfileId?: unknown; feedGroupId?: unknown; newFeedGroupName?: unknown; feedGroupAppId?: unknown; chatMode?: unknown; botCollaboration?: unknown };
       try {
         const chunks: Buffer[] = [];
         for await (const c of req) chunks.push(c as Buffer);
@@ -8052,6 +8094,14 @@ const server = createServer(async (req, res) => {
         : null;
       if (roleProfileId && !isValidRoleProfileId(roleProfileId)) {
         return jsonRes(res, 400, { ok: false, error: 'invalid_role_profile_id' });
+      }
+      // Optional (workflow-dashboard-orchestration §8): topic group mode and
+      // the bots' collaboration grants. Not sent → forwarded body unchanged.
+      if (parsed.chatMode !== undefined && parsed.chatMode !== 'topic' && parsed.chatMode !== 'group') {
+        return jsonRes(res, 400, { ok: false, error: 'invalid_chat_mode' });
+      }
+      if (parsed.botCollaboration !== undefined && typeof parsed.botCollaboration !== 'boolean') {
+        return jsonRes(res, 400, { ok: false, error: 'invalid_bot_collaboration' });
       }
 
       const explicit = Array.isArray(parsed.userOpenIds)
@@ -8093,6 +8143,8 @@ const server = createServer(async (req, res) => {
           ? parsed.bindWorkingDir.trim()
           : undefined,
         roleProfileId: roleProfileId ?? undefined,
+        ...(parsed.chatMode !== undefined ? { chatMode: parsed.chatMode } : {}),
+        ...(parsed.botCollaboration !== undefined ? { botCollaboration: parsed.botCollaboration } : {}),
       };
       const upstream = await fetchDaemonIpc(
         creator.ipcPort,

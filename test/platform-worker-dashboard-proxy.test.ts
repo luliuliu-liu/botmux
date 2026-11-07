@@ -1,4 +1,4 @@
-import {afterEach,describe,expect,it} from 'vitest';
+import {afterEach,describe,expect,it,vi} from 'vitest';
 import {createServer,request,type IncomingHttpHeaders,type Server} from 'node:http';
 import {connect,type Socket} from 'node:net';
 import {createWorkerDashboardProxy} from '../src/platform/management/worker-dashboard-proxy.js';
@@ -39,6 +39,21 @@ async function fixture(){
 }
 
 describe('isolated Worker Dashboard proxy',()=>{
+  it('远程Dashboard未配置实例域名时在发票据前拒绝，而本机localhost保持可用',async()=>{
+    const resolve=vi.fn(async()=>({url:'http://private.invalid'}));
+    const proxy=createWorkerDashboardProxy({issuer:()=> 'fixture-only',resolve});
+    await expect(proxy.link(id,'10.37.47.13:17891')).rejects.toMatchObject({status:409,code:'worker_dashboard_domain_required'});
+    expect(resolve).not.toHaveBeenCalled();
+    for(const host of ['127.0.0.1:17891','localhost:17891','[::1]:17891']){
+      const link=await proxy.link(id,host);expect(new URL(link.url).host).toBe(`w-${id}.localhost:17891`);
+    }
+  });
+  it('显式泛域名保留公开端口和独立来源，不把管理Host或恶意路径当成Worker来源',async()=>{
+    const proxy=createWorkerDashboardProxy({domain:'agents.example.test',issuer:()=> 'fixture-only',resolve:async()=>({url:'http://private.invalid'})});
+    const link=await proxy.link(id,'10.37.47.13:17891',true);
+    expect(new URL(link.url).origin).toBe(`https://w-${id}.agents.example.test:17891`);
+    for(const host of ['user:password@127.0.0.1:17891','localhost:17891/other','localhost:17891?host=evil.test'])await expect(proxy.link(id,host)).rejects.toMatchObject({code:'invalid_worker_dashboard_host'});
+  });
   it('forwards card capabilities without granting a Dashboard identity',async()=>{
     const f=await fixture(),sid='11111111-1111-4111-8111-111111111111',token='a'.repeat(43);
     const result=await f.get(`/s/${sid}?viewToken=${token}`,{cookie:'botmux_dashboard_token=forged','x-platform-worker-token':'forged'});

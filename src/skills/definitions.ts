@@ -1704,6 +1704,22 @@ description: 统一处理 v3 Workflow：把有界的复合目标 grill 后编排
 
 安全确认边界：agent 绝不能自行添加 \`--ack-unsafe\`。若保存 lint 报出疑似 secret 或本机绝对路径，先把具体警告展示给用户；只有用户本人在飞书显式发送 \`/workflow save ... --ack-unsafe\` 才能确认。agent-facing CLI 会拒绝该 flag。
 
+## Botmux Workflow 与通用多 Agent 工具的边界
+
+本 skill 的 Workflow 是 **Botmux v3 工作流**，不是 CLI/SDK 的同名 \`Workflow\` 工具或 \`agent(...)\` 编排。用户要求 Botmux Workflow 或 Workflow Agent 池时，必须按下述 \`botmux workflow\` 协议创建真实 runId、完成确认/审批并执行；不能用普通子 Agent 完成任务后自称池 Worker 执行。
+
+- 只有新建命令真实返回 runId，才能说“已创建”；登记或待审批不等于启动。
+- 使用 \`botmux workflow status <runId> --json\` 核对实际状态、节点尝试和资源；只有真实节点任务及终态才支持“已启动/已完成”。没有对应记录时明确说“尚未启动 Botmux Workflow”，不靠自己叙述补足证明。
+- 用户明确选择普通编程/子 Agent 任务时，仍可正常使用通用工具，但不要将它报告为 Botmux/ACP Workflow。
+
+## 托管 Control 的显式池与项目工作区
+
+托管 Control 执行 Workflow Agent 池任务时，先确认用户选择的真实 poolId，再执行 \`botmux workflow new "<目标>" --pool <poolId>\`。未知池只补问池选择，不读取凭据查找、不猜默认池，也不退回普通子 Agent。
+
+Control 的 workspace 是池项目目录的父级访问范围；Worker 只访问所选池目录。新建时宿主冻结池及工作区，后续命令只使用返回的 runId。池/目录/摘要变化必须重新准备并真人审批，不能重写旧授权。原生 \`workflow clone <runId> --pool <poolId>\` 同样重新选择工作区，不复制旧审批。不需要 Dashboard 草稿或编辑页面才能走本原生流程。
+
+当前托管池 Saved Workflow **直接启动未支持**；不要使用已撤除的模板→草稿桥或 \`--resume-draft\`。请用原生 new --pool 重新编排并走真人审批。普通非托管 Saved Workflow 的原有 save/run/list/show/cancel 及本群作用域不变。
+
 ## 即兴 Workflow
 
 ### 1. 建 run

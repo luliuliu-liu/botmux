@@ -3,6 +3,7 @@ import {homedir} from 'node:os';
 import {join} from 'node:path';
 import {requestPersistenceSync} from './sync-request.js';
 import {containerRole} from '../management/container-role.js';
+import {parseProjectWorkspaceBinding,readProjectWorkspaceSelection,type ProjectWorkspaceBinding} from './project-workspace.js';
 
 /** Control identity and workspace as recorded by the container entrypoint.
  * CLI panes strip BOTMUX_* variables, yet `botmux workflow architect` runs
@@ -23,15 +24,28 @@ export function controlRuntime(home=homedir(),env:NodeJS.ProcessEnv=process.env,
 }
 function readImageRole(){try{return readFileSync('/etc/botmux-platform-role','utf8').trim();}catch{return undefined;}}
 
-export function currentPoolCatalog(home=homedir()) {
- const runtime=controlRuntime(home);
- if(!runtime)return undefined;
+function poolIdentity(home:string){
  const path=join(home,'.botmux/platform/workflow-storage.json');
  if(!existsSync(path))throw Error('workflow_storage_bootstrap_not_ready');
- let identity;try{identity=JSON.parse(readFileSync(path,'utf8'));}catch{throw Error('workflow_storage_bootstrap_not_ready');}
- const pool=requestPersistenceSync({...identity,path:'/agent-pools',method:'POST',body:{
-  workspaceKind:runtime.workspaceKind,workspaceSource:runtime.workspaceClaim}});
- return {poolId:pool.poolId,members:pool.members};
+ try{return JSON.parse(readFileSync(path,'utf8'));}catch{throw Error('workflow_storage_bootstrap_not_ready');}
+}
+export function availableWorkflowPools(home=homedir()){
+ if(!controlRuntime(home))return [];
+ return requestPersistenceSync({...poolIdentity(home),path:'/agent-pools',method:'GET'}).pools;
+}
+export function resolveWorkflowProjectWorkspace(poolId:string,home=homedir()):ProjectWorkspaceBinding{
+ if(!controlRuntime(home))throw Error('workflow_control_required');
+ if(!/^[0-9a-f-]{36}$/i.test(poolId))throw Error('workflow_pool_selection_required');
+ return parseProjectWorkspaceBinding(requestPersistenceSync({...poolIdentity(home),path:'/agent-pools/'+poolId+'/workspace',method:'GET'}));
+}
+export function currentPoolCatalog(home=homedir(),runDir?:string) {
+ if(!controlRuntime(home))return undefined;
+ if(!runDir)throw Error('workflow_pool_selection_required');
+ const binding=readProjectWorkspaceSelection(runDir);if(!binding)throw Error('workflow_pool_selection_required');
+ const current=resolveWorkflowProjectWorkspace(binding.poolId,home);
+ if(current.bindingHash!==binding.bindingHash)throw Error('workflow_workspace_binding_changed');
+ const pool=requestPersistenceSync({...poolIdentity(home),path:'/agent-pools/'+binding.poolId,method:'GET'});
+ return {poolId:binding.poolId,workspace:binding,members:pool.members};
 }
 export function workflowResourceRequest(runDir:string,suffix='',method='GET',body?:unknown) {
  const identity=JSON.parse(readFileSync(join(runDir,'journal.api.json'),'utf8'));

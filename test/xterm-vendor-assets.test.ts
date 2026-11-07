@@ -21,7 +21,7 @@ import { acceptsGzip, handleXtermVendorHttp } from '../src/core/xterm-vendor-ser
 
 interface Got { status: number; headers: IncomingHttpHeaders; body: Buffer }
 
-function startServer(mode: 'root' | 'anyPrefix'): Promise<Server> {
+function startServer(mode: 'root' | 'anyPrefix' | 'dashboard'): Promise<Server> {
   const server = createServer((req, res) => {
     const pathname = new URL(req.url ?? '/', 'http://x').pathname;
     if (handleXtermVendorHttp(req, res, pathname, mode)) return;
@@ -54,7 +54,7 @@ let worker: Server;
 let dashboard: Server;
 beforeAll(async () => {
   worker = await startServer('anyPrefix');
-  dashboard = await startServer('root');
+  dashboard = await startServer('dashboard');
 });
 afterAll(async () => {
   await Promise.all([worker, dashboard].map((s) => new Promise((r) => s.close(r))));
@@ -115,7 +115,7 @@ describe('worker 终端页的 xterm 组件由本进程提供', () => {
   });
 });
 
-describe('Dashboard 只在根路径提供', () => {
+describe('Dashboard 根路径与受限 Workflow 终端前缀', () => {
   it('根路径取得到；/s/<会话>/ 下的同名路径不截胡，仍交给终端前门转发到 worker', async () => {
     const root = await get(dashboard, `${XTERM_VENDOR_MARKER}${XTERM_VENDOR_ASSETS.css.path}`);
     expect(root.status).toBe(200);
@@ -134,6 +134,37 @@ describe('Dashboard 只在根路径提供', () => {
       const res = await get(dashboard, ref, { 'accept-encoding': 'gzip' });
       expect(res.status, ref).toBe(200);
     }
+  });
+});
+
+describe('原生Workflow实时页面实际生成的资源地址', () => {
+  const paths = [
+    '/api/v3/runs/workflow-test/nodes/overview/terminal/',
+    '/s/33333333-3333-4333-8333-333333333333/',
+  ];
+  it.each(paths)('页面路径 %s 的脚本/样式均可经Dashboard取得，组件可实际初始化', async pathname => {
+    const assets = [...WEB_TERMINAL_VENDOR_STYLES, ...WEB_TERMINAL_VENDOR_SCRIPTS];
+    const {refs} = runLoader(assets, {protocol: 'http:', host: '127.0.0.1', pathname});
+    const sandbox: Record<string, unknown> = {navigator: {userAgent: '', platform: ''}, console};
+    sandbox.window = sandbox; sandbox.self = sandbox; vm.createContext(sandbox);
+    for (let i = 0; i < refs.length; i++) {
+      const response = await get(dashboard, new URL(refs[i].url).pathname);
+      expect(response.status, refs[i].url).toBe(200);
+      expect(response.headers['content-type']).toBe(assets[i].contentType);
+      expect(sha256(response.body)).toBe(XTERM_VENDOR_ASSET_DATA[assets[i].path].sha256);
+      if (refs[i].tag === 'script') vm.runInContext(response.body.toString('utf8'), sandbox, {filename: assets[i].path});
+    }
+    expect(vm.runInContext('(function(){var t=new Terminal({allowProposedApi:true});t.loadAddon(new FitAddon.FitAddon());return typeof t.open;})()', sandbox)).toBe('function');
+  });
+  it('只服务固定公开资源，不开放任意前缀、未知文件或写方法', async () => {
+    const prefix = paths[0].replace(/\/$/, '');
+    expect((await get(dashboard, prefix+XTERM_VENDOR_MARKER+'xterm-5.5.0/xterm.js.map')).status).toBe(404);
+    expect((await get(dashboard, prefix+XTERM_VENDOR_MARKER+'xterm-5.5.0/%2e%2e%2fprivate')).status).toBe(404);
+    expect((await get(dashboard, prefix+XTERM_VENDOR_MARKER+'nested'+XTERM_VENDOR_MARKER+XTERM_VENDOR_ASSETS.xterm.path)).status).toBe(404);
+    expect((await get(dashboard, prefix+XTERM_VENDOR_MARKER+XTERM_VENDOR_ASSETS.xterm.path, {}, 'POST')).status).toBe(405);
+    const unrelated = await get(dashboard, '/api/settings'+XTERM_VENDOR_MARKER+XTERM_VENDOR_ASSETS.xterm.path);
+    expect(unrelated.headers['content-type']).toBe('text/html');
+    expect(unrelated.body.toString()).toContain('terminal page');
   });
 });
 

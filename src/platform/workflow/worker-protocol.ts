@@ -1,9 +1,12 @@
 /** Data-only execution boundary, shared by HTTP and future NATS transports. */
 import {createHash} from 'node:crypto';
 import type {V3GoalNode} from '../../workflows/v3/dag.js';
+import {posix} from 'node:path';
+/** 仅用于项目坐标转换，不授予新的宿主目录访问权限。 */
+export type WorkerProjectCoordinates={poolId:string;bindingHash:string;controlRoot:string;workerRoot:'/workspace'};
 export const WORKER_COMMAND_SCHEMA='botmux-worker-command-v1';
 export type InputProduct={from:string;name:string;kind:string;preview?:string;output?:string;data:string;sha256:string};
-export type WorkerCommand={schema:typeof WORKER_COMMAND_SCHEMA;jobId:string;runId:string;attemptId:string;node:V3GoalNode;goal:string;inputs:InputProduct[];omitted?:unknown[];timeoutMs:number;conventionsVersion?:1;conventionsDigest?:string};
+export type WorkerCommand={schema:typeof WORKER_COMMAND_SCHEMA;jobId:string;runId:string;attemptId:string;node:V3GoalNode;goal:string;inputs:InputProduct[];omitted?:unknown[];timeoutMs:number;conventionsVersion?:1;conventionsDigest?:string;projectWorkspace?:WorkerProjectCoordinates};
 export const sha256=(value:Buffer|string)=>createHash('sha256').update(value).digest('hex');
 export function workerJobId(runId:string,attemptId:string):string{
   const value=sha256(JSON.stringify(['botmux-worker-v1',runId,attemptId])).slice(0,32);
@@ -14,6 +17,8 @@ export function validateWorkerCommand(value:WorkerCommand){
     typeof value.attemptId!=='string'||!value.attemptId||value.attemptId.length>512||!value.node||value.node.type!=='goal'||typeof value.node.id!=='string'||
     typeof value.goal!=='string'||Buffer.byteLength(value.goal)>128*1024||!Number.isSafeInteger(value.timeoutMs)||value.timeoutMs<1000||value.timeoutMs>24*60*60_000||
     !Array.isArray(value.inputs)||value.inputs.length>128)throw new Error('invalid_worker_command');
+  const project=value.projectWorkspace;
+  if(project && (project.workerRoot!=='/workspace'||typeof project.controlRoot!=='string'||(project.controlRoot!=='/workspace'&&!project.controlRoot.startsWith('/workspace/'))||project.controlRoot.includes('\\')||project.controlRoot.includes('\0')||posix.normalize(project.controlRoot)!==project.controlRoot||!/^([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/.test(project.poolId)||!/^[a-f0-9]{64}$/.test(project.bindingHash)||value.node.agentSelection?.poolId!==project.poolId||Object.keys(project).some(key=>!['poolId','bindingHash','controlRoot','workerRoot'].includes(key))))throw Error('invalid_worker_project_coordinates');
   let bytes=0;
   if(value.conventionsVersion!==undefined&&value.conventionsVersion!==1)throw Error('unsupported_workflow_conventions');
   if(value.conventionsDigest!==undefined&&!/^[a-f0-9]{64}$/.test(value.conventionsDigest))throw Error('invalid_conventions_digest');
@@ -22,7 +27,7 @@ export function validateWorkerCommand(value:WorkerCommand){
     const data=Buffer.from(item.data,'base64');bytes+=data.length;
     if(data.toString('base64')!==item.data||sha256(data)!==item.sha256||bytes>4*1024*1024)throw new Error('invalid_worker_input');
   }
-  if(Object.keys(value).some(key=>!['schema','jobId','runId','attemptId','node','goal','inputs','omitted','timeoutMs','conventionsVersion','conventionsDigest'].includes(key)))throw new Error('unknown_worker_command_field');
+  if(Object.keys(value).some(key=>!['schema','jobId','runId','attemptId','node','goal','inputs','omitted','timeoutMs','conventionsVersion','conventionsDigest','projectWorkspace'].includes(key)))throw new Error('unknown_worker_command_field');
   return value;
 }
 export interface ExecutionTransport {

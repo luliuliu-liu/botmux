@@ -45,6 +45,15 @@
 
 workflow-core 保留实际值依赖与公开类型的精确允许列表。新增叶子模块须确认无 daemon、Lark SDK、配置读取或 Worker 启动依赖；纯路径 DTO 和 Node 文件/摘要工具可以在核对依赖图后逐项加入，不能关闭或改成宽泛前缀允许。Agent 池与外部群 Bot 分配在架构提示生成前拒绝混用；资源补建只显示 `PLATFORM_CLI_IDS` 中当前维护的四类 Worker。
 
+## Workflow 项目工作区边界
+
+- Control 的挂载根是访问范围，不是每次 Workflow 的执行工作区。托管 Workflow 创建、复制和模板启动显式选择 Agent 池，并冻结池对应的工作区；不自动创建或沿用默认池。
+- `workspace.selection.json` 保存池、Control 内项目相对根、真实访问证据与绑定摘要；真人 DAG 卡片及 `run.json` 同时冻结该选择。审批后改变池、挂载或文件摘要不能继续使用旧授权。
+- hostPath 按规范化后的目录边界与真实宿主检查判定父子关系，不使用字符串前缀；命名 volume 仅接受相同卷身份。Control 可以只读访问项目，不因此扩大 Worker 的可写范围。
+- Control 的 `/workspace/project-a/file` 与 Worker 的 `/workspace/file` 是不同坐标。结构化项目路径先转相对路径，再映射到 Worker 项目根；执行任务携带明确的坐标上下文，不盲目改写任意任务文本。跨实例的声明输入仍通过任务本地副本、摘要与大小限制传输。
+- 托管 Workflow 通过原生飞书/CLI 链路准备需求、DAG并等待真实飞书 DAG 卡片审批；未批准或被拒绝时，不写运行授权或协作授权。新增托管 Dashboard 草稿创建、复制和编辑入口已撤除，不能用页面确认替代真人审批。普通非 ACP Workflow 保留原行为。
+- 新增的托管模板→Dashboard 草稿启动桥及 `workflow run --resume-draft` 已撤除。托管池 Saved Workflow 直接启动尚未支持，在创建目录前明确拒绝；使用原生 `workflow new "<目标>" --pool <poolId>` 重新编排并真人审批，不继承旧池/授权。普通非托管 Saved Workflow 保留本群/当前 Bot 全局的原作用域与标准命令，不将所有 Control 请求转入新草稿入口。
+
 ## Worker 配置更新边界
 
 单 CLI Worker 在「修改配置」中仅改模型或认证时，保存走 MCP 同步与原地配置应用，不调用容器 `/upgrade`。Codex/ZCode 支持 API Key 与原生 OAuth 选择，OAuth 模型留空表示原生默认；选择认证方式本身不发起 OAuth 登录。修改工作区、只读挂载或镜像才进入显式重建路径，须保留确认与空闲守卫。

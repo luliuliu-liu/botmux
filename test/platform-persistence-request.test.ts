@@ -17,15 +17,19 @@ it('uses the actual bounded helper, authenticates only the workflow API and neve
     const request=createPersistenceRequester(process.execPath),input={baseUrl:`http://127.0.0.1:${port}`,token:'run-scoped-only',path:'/runs/test'};
     expect(request(input)).toEqual({authorization:'Bearer run-scoped-only',masterHeader:null,path:'/internal/v1/workflow-storage/runs/test'});
     const job='11111111-1111-1111-1111-111111111111';
-    for(const path of ['/agent-pools','/agent-pools/'+job,'/model-catalog',`/runs/test/attempts/${job}/prepare`,`/runs/test/resources`,`/runs/test/resources/${job}/resolve`,`/runs/test/resources/${job}/cancel`]){
+    for(const path of ['/agent-pools','/agent-pools/'+job,`/agent-pools/${job}/workspace`,`/agent-pools/${job}/input-preflight`,'/model-catalog',`/runs/test/attempts/${job}/prepare`,`/runs/test/resources`,`/runs/test/resources/${job}/resolve`,`/runs/test/resources/${job}/cancel`]){
       expect(request({...input,path})).toMatchObject({path:'/internal/v1/workflow-storage'+path,authorization:'Bearer run-scoped-only'});
     }
-    expect(()=>request({...input,path:'/agent-pools/../../admin'})).toThrow('storage_unreachable');
+    for(const path of ['/agent-pools/../../admin',`/agent-pools/${job}/workspace-extra`,`/agent-pools/${job}/workspace/admin`,`/agent-pools/${'0'.repeat(36)}/workspace`,`/agent-pools/${job}/%77orkspace`,`/agent-pools/${job}/workspace/../admin`]){
+      expect(()=>request({...input,path})).toThrow('storage_unreachable');
+      await expect(requestPersistence({...input,path})).rejects.toMatchObject({status:0,code:'storage_unreachable'});
+    }
     expect(()=>request({...input,path:'/runs/redirect'})).toThrow('storage_unreachable');
     try{request({...input,path:'/runs/unauthorized'});throw new Error('expected rejection');}catch(error){expect(error).toBeInstanceOf(PersistenceRequestError);expect((error as PersistenceRequestError).status).toBe(401);}
     expect(()=>request({...input,path:'/runs/test/../../admin'})).toThrow('storage_unreachable');
     // The non-blocking requester keeps the same path allowlist and error contract.
     expect(await requestPersistence(input)).toEqual({authorization:'Bearer run-scoped-only',masterHeader:null,path:'/internal/v1/workflow-storage/runs/test'});
+    expect(await requestPersistence({...input,path:`/agent-pools/${job}/workspace`})).toEqual({authorization:'Bearer run-scoped-only',masterHeader:null,path:`/internal/v1/workflow-storage/agent-pools/${job}/workspace`});
     for(const path of ['/agent-pools/../../admin','/runs/test/../../admin','/internal'])await expect(requestPersistence({...input,path})).rejects.toMatchObject({status:0,code:'storage_unreachable'});
     await expect(requestPersistence({...input,path:'/runs/redirect'})).rejects.toMatchObject({status:0,code:'storage_unreachable'});
     await expect(requestPersistence({...input,path:'/runs/unauthorized'})).rejects.toMatchObject({status:401,code:'workflow_identity_required'});

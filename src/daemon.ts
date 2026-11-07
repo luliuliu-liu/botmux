@@ -493,8 +493,8 @@ import {
   allFinalOutputDeliveryCount,
   snapshotAllFinalOutputDeliveries,
 } from './core/final-output-delivery-drain.js';
-import { createProductionWorkflowDraftService, installWorkflowDraftService } from './core/workflow-draft-daemon.js';
-import { AbortDeadlineError, hasExactSafeJsonKeys, ipcRoute, isTrustedHostIpcRequest, JsonBodyTooLargeError, jsonRes, readJsonBody, runWithAbortDeadline, setBotName, setLarkAppId, setDecisionBoardService, startIpcServer, setBotRenamer, setBotAvatarChanger, setBotDescriptionManager, armCoreOnlyReadinessGate, setCoreOnlyReady, setSupervisorShutdownHandler, setCrossPrincipalInterruptionDisableHandler, setDurableSessionLifecycleHandler, setDurableSessionListHandler, setDurableSessionSendHandler, setCardClickTurnPoster, productionWorkflowDraftClarifier, type DurableSessionSendRequest, type DurableSessionSendResult } from './core/dashboard-ipc-server.js';
+import { createProductionDraftLaunchDeps, createProductionWorkflowDraftService, installWorkflowDraftService } from './core/workflow-draft-daemon.js';
+import { AbortDeadlineError, hasExactSafeJsonKeys, ipcRoute, isTrustedHostIpcRequest, JsonBodyTooLargeError, jsonRes, readJsonBody, runWithAbortDeadline, setBotName, setLarkAppId, setDecisionBoardService, startIpcServer, setBotRenamer, setBotAvatarChanger, setBotDescriptionManager, armCoreOnlyReadinessGate, setCoreOnlyReady, setSupervisorShutdownHandler, setCrossPrincipalInterruptionDisableHandler, setDurableSessionLifecycleHandler, setDurableSessionListHandler, setDurableSessionSendHandler, setCardClickTurnPoster, productionWorkflowDraftClarifier, productionWorkflowDraftSessionBinder, type DurableSessionSendRequest, type DurableSessionSendResult } from './core/dashboard-ipc-server.js';
 import { setDeviceIsolationDaemonIdentity } from './core/device-isolation-daemon.js';
 import { currentDeviceIsolationFreezeLease } from './core/device-isolation-activation.js';
 import { reconcileContainmentHandlesOnBoot } from './core/mojo-containment.js';
@@ -584,7 +584,7 @@ import {
   closeCliMismatchedSessionsForBot,
   resolveScheduledTaskExecutionPosition,
 } from './core/session-manager.js';
-import { publishTurnCliIdentity, type DelegatedCliIdentity } from './core/turn-cli-identity.js';
+import { publishTurnCliIdentity, trackTurnIdentityPublication, type DelegatedCliIdentity } from './core/turn-cli-identity.js';
 import { clearSingleIdentityArtifacts, forgetProvenIdentityContent } from './core/cli-identity.js';
 import { BYTEDCLI_RENEWAL_SWEEP_MS, renewExpiringBytedcliIdentities } from './core/bytedcli-identity-renewal.js';
 import type { IdentityStorageModel } from './core/lark-tool-binding.js';
@@ -4473,7 +4473,11 @@ async function handleIdentityDecisionFlip(
     // from its schedule authority again. refreshTurnCliIdentity reads the
     // turn's human sender, which a scheduled turn never has, so replaying
     // through it turned the creator's identity into an anonymous refusal.
-    await prepareTurnCliIdentity(ds, turnId);
+    // Tracked from the start: the CLI's first identity fetch can arrive while
+    // this replay is still resolving the sender, and must wait for it rather
+    // than be refused for missing material.
+    const replay = prepareTurnCliIdentity(ds, turnId);
+    if (replay) await trackTurnIdentityPublication(config.session.dataDir, ds.session.sessionId, replay);
     ds.lastIdentityDecisionRepublish = { model: context.model, turnId, ok: true };
   } catch (error) {
     // Keep the failure visible and replayable: no success baseline, no
@@ -4526,6 +4530,7 @@ async function prepareScheduledTurnCliIdentity(ds: DaemonSession, turnId: string
     locale: localeForBot(ds.larkAppId),
     turnId,
     storageModel: identityModelForPublication(ds),
+    privateChat: ds.chatType === 'p2p',
   });
 }
 
@@ -4623,6 +4628,7 @@ async function prepareDelegatedScheduledTurnIdentity(
     locale: localeForBot(ds.larkAppId),
     turnId,
     storageModel: identityModelForPublication(ds),
+    privateChat: ds.chatType === 'p2p',
   });
   return true;
 }
@@ -4708,6 +4714,7 @@ async function refreshTurnCliIdentity(ds: DaemonSession, turnId: string): Promis
     locale: localeForBot(ds.larkAppId),
     turnId,
     storageModel: identityModelForPublication(ds),
+    privateChat: ds.chatType === 'p2p',
   });
 
   // NO chat notice here.
@@ -7030,6 +7037,7 @@ async function withdrawWorkflowHandoffIdentity(ds: DaemonSession, turnId: string
     locale: localeForBot(ds.larkAppId),
     turnId,
     storageModel: identityModelForPublication(ds),
+    privateChat: ds.chatType === 'p2p',
   });
 }
 
@@ -7112,7 +7120,7 @@ const v3GateRunner = createV3GateRunner({
   postResourceCard:async(binding,wait,runId)=>{
     const runDir=join(v3DefaultBaseDir(),runId),receipt=join(runDir,'resource-card-'+wait.jobId+'.json');
     if(existsSync(receipt))return;
-    const catalog=currentPoolCatalog();
+    const catalog=currentPoolCatalog(undefined,runDir);
     const identity=JSON.parse(readFileSync(join(homedir(),'.botmux/platform/workflow-storage.json'),'utf8'));
     const modelCatalog=requestPersistenceSync({...identity,path:'/model-catalog',method:'GET'}),models=modelCatalog.models;
     const card=buildV3ResourceCard(runId,wait,{members:catalog?.members??[],models,mounts:modelCatalog.mounts,agents:PLATFORM_CLI_IDS.map(id=>({id,name:id,supported:true}))});
@@ -8087,15 +8095,9 @@ for (const path of [
 workflowDaemonMutationRoute('start', async (reply, params, body, identity) => {
   const runId = params.runId;
   if (!isValidV3RunId(runId)) return reply(400, { ok: false, error: 'bad_run_id' });
-  // Machine-wide workflow kill-switch: refuse launching a NEW daemon-driven run
-  // when the feature is off. This is the common sink for both `botmux workflow
-  // start` and the grill `approve-dag` kick, so gating here closes the edge where
-  // a run was grilled+approved before the flip. Restart recovery of an
-  // already-started run (coldAttach / reconcileV3PendingGates) is a separate path
-  // and is intentionally NOT gated, and `retry`/`grant`/`cancel` stay available.
-  if (!isWorkflowFeatureEnabled()) return reply(409, { ok: false, error: 'workflow_disabled' });
-  const runDir = join(v3DefaultBaseDir(), runId);
   if((body as any).authoringApproval===true){
+    if(!isWorkflowFeatureEnabled())return reply(409,{ok:false,error:'workflow_disabled'});
+    const runDir=join(v3DefaultBaseDir(),runId);
     try{const b=readV3RunChatBinding(runDir);if(!b||b.larkAppId!==identity.larkAppId)return reply(403,{error:'wrong_daemon'});const r=requestDagApproval(runId);
       if(r.status==='approved')return reply(200,{ok:true,approved:true});
       if(!r.cardMessageId){const card=approvalCard(r),uuid='dag-approval-'+r.nonce;
@@ -8105,41 +8107,65 @@ workflowDaemonMutationRoute('start', async (reply, params, body, identity) => {
       return reply(202,{ok:true,runId,awaiting:'dag_approval'});
     }catch(e){return reply(409,{error:'authoring_approval_failed',detail:e instanceof Error?e.message:'unknown'});}
   }
+  const started = startV3RunOnThisDaemon(runId, identity);
+  return reply(started.status, started.body);
+});
+
+/** Shared signed/launch start path; ownership and preflight precede durable intent. */
+function startV3RunOnThisDaemon(
+  runId: string,
+  identity: { larkAppId: string },
+): { status: number; body: Record<string, unknown> } {
+  if (!isValidV3RunId(runId)) return { status: 400, body: { ok: false, error: 'bad_run_id' } };
+  // Machine-wide workflow kill-switch: refuse launching a NEW daemon-driven run
+  // when the feature is off. This is the common sink for both `botmux workflow
+  // start` and the grill `approve-dag` kick, so gating here closes the edge where
+  // a run was grilled+approved before the flip. Restart recovery of an
+  // already-started run (coldAttach / reconcileV3PendingGates) is a separate path
+  // and is intentionally NOT gated, and `retry`/`grant`/`cancel` stay available.
+  if (!isWorkflowFeatureEnabled()) return { status: 409, body: { ok: false, error: 'workflow_disabled' } };
+  const runDir = join(v3DefaultBaseDir(), runId);
   const preflight = preflightV3RunStart(runDir);
   if (!preflight.ok) {
     if (preflight.error === 'no_grill_state') {
-      return reply(404, { ok: false, error: 'unknown_run' });
+      return { status: 404, body: { ok: false, error: 'unknown_run' } };
     }
-    return reply(409, {
-      ok: false,
-      error: preflight.error,
-      ...(preflight.status ? { status: preflight.status } : {}),
-      ...(preflight.detail ? { detail: preflight.detail } : {}),
-    });
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        error: preflight.error,
+        ...(preflight.status ? { status: preflight.status } : {}),
+        ...(preflight.detail ? { detail: preflight.detail } : {}),
+      },
+    };
   }
   // Owner check (codex blocker #1): only the daemon owning this run's bot may
   // start it — otherwise the wrong daemon drives + posts cards with its client.
   const binding = preflight.context.binding;
-  if (!binding) return reply(404, { ok: false, error: 'unknown_run_or_no_binding' });
+  if (!binding) return { status: 404, body: { ok: false, error: 'unknown_run_or_no_binding' } };
   if (binding.larkAppId !== identity.larkAppId) {
-    return reply(409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
+    return { status: 409, body: { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId } };
   }
-  try{const inputs=workflowPreflight(runId);if(!inputs.ok)return reply(409,{ok:false,error:'input_preflight_failed',checks:inputs.checks});}catch(e){return reply(409,{ok:false,error:'input_preflight_unavailable',detail:e instanceof Error?e.message:'unavailable'});}
+  try{const inputs=workflowPreflight(runId);if(!inputs.ok)return {status:409,body:{ok:false,error:'input_preflight_failed',checks:inputs.checks}};}catch(e){return {status:409,body:{ok:false,error:'input_preflight_unavailable',detail:e instanceof Error?e.message:'unavailable'}};}
   // A 202 means the start intent is recoverable after an immediate daemon
   // crash. Persist the journal boundary before scheduling detached work; cold
   // attach will re-drive a run that has runStarted but no active attempt.
   try {
     persistV3StartIntent(runId, runDir);
   } catch (err) {
-    return reply(409, {
-      ok: false,
-      error: 'run_journal_invalid',
-      detail: err instanceof Error ? err.message : String(err),
-    });
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        error: 'run_journal_invalid',
+        detail: err instanceof Error ? err.message : String(err),
+      },
+    };
   }
   v3GateRunner.driveDetached(runId);
-  return reply(202, { ok: true, runId });
-});
+  return { status: 202, body: { ok: true, runId } };
+}
 
 // v3 durable cancel: journal intent first, then low-latency AbortController
 // delivery + replay. HTTP 202 is returned only after runCancelRequested has
@@ -33311,7 +33337,30 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // Dashboard workflow drafts of this bot (design 2026-11-03
   // workflow-dashboard-orchestration D2): drafts left 编排中 by the previous
   // process go back to 待编排 before any route can start a new Architect.
-  installWorkflowDraftService(createProductionWorkflowDraftService(cfg.larkAppId, productionWorkflowDraftClarifier()));
+  installWorkflowDraftService(createProductionWorkflowDraftService(
+    cfg.larkAppId,
+    productionWorkflowDraftClarifier(),
+    createProductionDraftLaunchDeps({
+      appId: cfg.larkAppId,
+      startRun: async (runId) => {
+        const started = startV3RunOnThisDaemon(runId, { larkAppId: cfg.larkAppId });
+        if (started.status === 202) return { ok: true };
+        return {
+          ok: false,
+          status: started.status,
+          error: String(started.body.error ?? 'start_failed'),
+          ...(typeof started.body.detail === 'string' ? { detail: started.body.detail } : {}),
+        };
+      },
+      bindSession: productionWorkflowDraftSessionBinder(),
+      // §5.2 rule 3 at the Dashboard commit point: same read the Feishu
+      // /workflow run entry uses (the bound session is that topic's own).
+      mainTopicAvailability: (binding) => v3MainTopicAvailability(
+        binding,
+        binding.sessionId ? sessionStore.getSession(binding.sessionId) : undefined,
+      ),
+    }),
+  ));
   setDeviceIsolationDaemonIdentity({
     larkAppId: cfg.larkAppId,
     bootInstanceId: desc.bootInstanceId,

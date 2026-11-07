@@ -14,6 +14,11 @@ import {readContainerAgentEnvironment} from '../management/container-agent-files
 import {validateWorkerCommand,sha256,type WorkerCommand} from './worker-protocol.js';
 import {jobWorkspace,conventionPrompt,conventionRootForDigest} from './conventions.js';
 import {prepareJobMetadata} from './job-metadata.js';
+/** Control 的绝对路径只作为坐标来源；Worker 只在自己的项目挂载中执行。 */
+export function workerProjectContext(command:WorkerCommand):string{
+ const project=command.projectWorkspace;
+ return project?'项目坐标（数据）：'+JSON.stringify(project)+'\n项目文件使用相对路径。将 Control 项目根下的路径先转换为项目相对路径，再拼接 Worker 项目根；不能直接打开 Control 的绝对路径，也不能把项目根以外的路径映射到这里。输入清单中的 path 是已校验的任务本地副本，产物仍写入指定输出目录。':'';
+}
 export function claudeHeadlessArgs(config:NativeConfiguration):string[]{
   return ['--print',...(config.model.modelId?['--model',config.model.modelId]:[]),'--dangerously-skip-permissions'];
 }
@@ -63,7 +68,8 @@ async function runClaudeHeadless(config:NativeConfiguration,goalPath:string,goal
     return{exitCode:code,status:cancelled?'cancelled' as const:code===0?'ok' as const:'fail' as const,stdout,stderr};
   }finally{clearTimeout(timeout);clearTimeout(hard);signal.removeEventListener('abort',stop);}
 }
-export async function executeWorkerCommand(command:WorkerCommand,signal:AbortSignal,onSession:(value:unknown)=>void,home=homedir()){
+export type WorkerCommandExecutionPhase={onExecutionMayStart?:()=>void};
+export async function executeWorkerCommand(command:WorkerCommand,signal:AbortSignal,onSession:(value:unknown)=>void,home=homedir(),phase:WorkerCommandExecutionPhase={}){
   validateWorkerCommand(command);
   let conventionsRoot:string;try{conventionsRoot=conventionRootForDigest(command.conventionsDigest);}catch{return {schema:'botmux-worker-result-v1',status:'fail' as const,closed:true,productError:'workflow_conventions_digest_changed'};}
   const config=hydrateWorkerConfiguration(home,JSON.parse(readFileSync(join(home,'agent/native-runtime.json'),'utf8')) as NativeConfiguration);
@@ -75,7 +81,7 @@ export async function executeWorkerCommand(command:WorkerCommand,signal:AbortSig
   if(lstatSync(dir).isSymbolicLink()||lstatSync(work).isSymbolicLink())throw new Error('unsafe_worker_job_directory');
   const inputs=command.inputs.map((item,index)=>{const path=join(dir,`input-${index}`);writeFileSync(path,Buffer.from(item.data,'base64'),{flag:'wx',mode:0o600});const{data,sha256,...metadata}=item;return{...metadata,path};});
   const goal=join(dir,'goal.txt'),inputsPath=join(dir,'inputs.json'),manifest=join(dir,'manifest.json');
-  writeFileSync(goal,[policy,scoped?'Runtime context: '+JSON.stringify({workDir:scoped.work,sharedDir:scoped.shared,toolsDir:scoped.tools,jobMetadataPath,hostMounts:(config as any).hostMounts??[]}):'',command.goal].filter(Boolean).join('\n\n'),{flag:'wx',mode:0o600});writeFileSync(inputsPath,JSON.stringify({inputs,omitted:command.omitted||[]}),{flag:'wx',mode:0o600});
+  writeFileSync(goal,[policy,workerProjectContext(command),scoped?'Runtime context: '+JSON.stringify({workDir:scoped.work,sharedDir:scoped.shared,toolsDir:scoped.tools,jobMetadataPath,hostMounts:(config as any).hostMounts??[]}):'',command.goal].filter(Boolean).join('\n\n'),{flag:'wx',mode:0o600});writeFileSync(inputsPath,JSON.stringify({inputs,omitted:command.omitted||[]}),{flag:'wx',mode:0o600});
   const env={
     [GOAL_ENV.GOAL_PATH]:goal,[GOAL_ENV.INPUTS_PATH]:inputsPath,[GOAL_ENV.OUTPUT_DIR]:work,[GOAL_ENV.MANIFEST_PATH]:manifest,[GOAL_ENV.ATTEMPT_DIR]:dir,[GOAL_ENV.V3_MARKER]:'1',
     BOTMUX_WORKFLOW:'1',BOTMUX_WORKFLOW_RUN_ID:command.runId,BOTMUX_WORKFLOW_NODE_ID:command.node.id,
@@ -85,9 +91,12 @@ export async function executeWorkerCommand(command:WorkerCommand,signal:AbortSig
     ...(scoped?.env??{}),
   };
   const executionStartedAt=new Date().toISOString();
-  const headless=config.agentType==='claude-code'
-    ?await runClaudeHeadless(config,goal,env,home,signal,command.timeoutMs)
-    :undefined;
+  let headless:Awaited<ReturnType<typeof runClaudeHeadless>>|undefined;
+  if(config.agentType==='claude-code'){
+    phase.onExecutionMayStart?.();
+    headless=await runClaudeHeadless(config,goal,env,home,signal,command.timeoutMs);
+  }
+  if(!headless)phase.onExecutionMayStart?.();
   const result=headless??await createEphemeralPool({resolveLarkAppSecret:()=>config.binding?.appSecret||'workflow-only-no-im-identity'}).runNode({
       runId:command.runId,attemptId:command.attemptId,node:command.node,
       botSnapshot:{larkAppId:config.binding?.appId||'platform-workflow',cliId:config.agentType,workingDir:scoped?.work||'/workspace',model:config.agentType==='pi'?`${config.model.provider}/${config.model.modelId}`:config.model.modelId,

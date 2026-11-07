@@ -1,6 +1,9 @@
 import {mkdtempSync,mkdirSync,rmSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {createHash} from 'node:crypto';
+import {canonicalJsonStringify} from '../src/utils/canonical-json.js';
+import {writeProjectWorkspaceSelection,readProjectWorkspaceSelection,type ProjectWorkspaceBinding} from '../src/platform/workflow/project-workspace.js';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 
 const mocks=vi.hoisted(()=>({role:vi.fn<()=>'control'|'worker'|undefined>(),request:vi.fn()}));
@@ -19,6 +22,14 @@ beforeEach(()=>{
 afterEach(()=>{vi.unstubAllEnvs();rmSync(home,{recursive:true,force:true});});
 const writeIdentity=(value:unknown=identity)=>{mkdirSync(join(home,'.botmux/platform'),{recursive:true});writeFileSync(join(home,'.botmux/platform/workflow-storage.json'),JSON.stringify(value));};
 
+const poolId='11111111-1111-4111-8111-111111111111';
+function binding(claim='project-a'):ProjectWorkspaceBinding{
+ const fields={schema:'workflow-project-workspace-v1' as const,poolId,kind:'volume' as const,claim,executionMode:'pool' as const,controlRelativeRoot:'',controlRoot:{kind:'volume' as const,claim},accessEvidence:{sameClaim:true as const}};
+ return {...fields,bindingHash:createHash('sha256').update(canonicalJsonStringify(fields)).digest('hex')};
+}
+function selectedRun(){const run=join(home,'run');mkdirSync(run);writeProjectWorkspaceSelection(run,binding());return run;}
+const servePool=(members:unknown[]=[])=>mocks.request.mockImplementation((request:any)=>request.path.endsWith('/workspace')?binding():{members});
+
 describe('currentPoolCatalog',()=>{
  it('returns undefined outside a Control container without touching storage',()=>{
   writeIdentity();
@@ -27,40 +38,47 @@ describe('currentPoolCatalog',()=>{
  });
  it('fails closed when the Control workflow storage identity has not been bootstrapped',()=>{
   mocks.role.mockReturnValue('control');
-  expect(()=>currentPoolCatalog(home)).toThrow('workflow_storage_bootstrap_not_ready');
+  expect(()=>currentPoolCatalog(home,selectedRun())).toThrow('workflow_storage_bootstrap_not_ready');
   expect(mocks.request).not.toHaveBeenCalled();
  });
  it('reports a corrupt storage identity as not bootstrapped rather than a parse error',()=>{
   mocks.role.mockReturnValue('control');mkdirSync(join(home,'.botmux/platform'),{recursive:true});
   writeFileSync(join(home,'.botmux/platform/workflow-storage.json'),'{"baseUrl":');
-  expect(()=>currentPoolCatalog(home)).toThrow('workflow_storage_bootstrap_not_ready');
+  expect(()=>currentPoolCatalog(home,selectedRun())).toThrow('workflow_storage_bootstrap_not_ready');
   expect(mocks.request).not.toHaveBeenCalled();
  });
- it('posts /agent-pools with the stored identity and default workspace, returning only pool id and members',()=>{
+ it('只读取显式冻结池，重验工作区后读取成员，不自动创建默认池',()=>{
   mocks.role.mockReturnValue('control');writeIdentity();
-  const members=[{memberId:'m1'}];
-  mocks.request.mockReturnValue({poolId:'pool-1',members,extra:'ignored'});
-  expect(currentPoolCatalog(home)).toEqual({poolId:'pool-1',members});
-  expect(mocks.request).toHaveBeenCalledTimes(1);
-  expect(mocks.request).toHaveBeenCalledWith({...identity,path:'/agent-pools',method:'POST',body:{workspaceKind:'volume',workspaceSource:'agent-workspace'}});
+  const members=[{memberId:'m1'}];servePool(members);
+  expect(currentPoolCatalog(home,selectedRun())).toEqual({poolId,workspace:binding(),members});
+  expect(mocks.request.mock.calls.map(([request])=>request)).toEqual([
+   {...identity,path:`/agent-pools/${poolId}/workspace`,method:'GET'},
+   {...identity,path:`/agent-pools/${poolId}`,method:'GET'},
+  ]);
  });
- it('uses the workspace kind and claim from the environment',()=>{
-  mocks.role.mockReturnValue('control');writeIdentity();
-  vi.stubEnv('BOTMUX_WORKSPACE_KIND','hostpath');vi.stubEnv('BOTMUX_WORKSPACE_CLAIM','/tenant/project');
-  mocks.request.mockReturnValue({poolId:'pool-2',members:[]});
-  currentPoolCatalog(home);
-  expect(mocks.request.mock.calls[0][0].body).toEqual({workspaceKind:'hostpath',workspaceSource:'/tenant/project'});
+ it('修改环境不能切换已经冻结的池或工作区',()=>{
+  mocks.role.mockReturnValue('control');writeIdentity();const run=selectedRun();servePool();
+  vi.stubEnv('BOTMUX_WORKSPACE_KIND','hostpath');vi.stubEnv('BOTMUX_WORKSPACE_CLAIM','/tenant/other');
+  expect(currentPoolCatalog(home,run)?.workspace).toEqual(binding());
+  expect(mocks.request.mock.calls.every(([request])=>request.method==='GET'&&request.path.includes(poolId))).toBe(true);
  });
- it('cannot let the stored identity override the request route or method',()=>{
-  mocks.role.mockReturnValue('control');writeIdentity({...identity,path:'/runs/other',method:'DELETE'});
-  mocks.request.mockReturnValue({poolId:'p',members:[]});
-  currentPoolCatalog(home);
-  expect(mocks.request.mock.calls[0][0]).toMatchObject({path:'/agent-pools',method:'POST'});
+ it('存储身份不能覆盖只读请求的路径和方法',()=>{
+  mocks.role.mockReturnValue('control');writeIdentity({...identity,path:'/runs/other',method:'DELETE'});servePool();
+  currentPoolCatalog(home,selectedRun());
+  expect(mocks.request.mock.calls[0][0]).toMatchObject({path:`/agent-pools/${poolId}/workspace`,method:'GET'});
  });
- it('propagates storage request failures',()=>{
+ it('传播实时工作区读取失败，不降级到默认池',()=>{
   mocks.role.mockReturnValue('control');writeIdentity();
   mocks.request.mockImplementation(()=>{throw new Error('storage_unreachable');});
-  expect(()=>currentPoolCatalog(home)).toThrow('storage_unreachable');
+  expect(()=>currentPoolCatalog(home,selectedRun())).toThrow('storage_unreachable');
+ });
+ it('缺少显式选择时拒绝，实时绑定变化时不读取成员或改写原选择',()=>{
+  mocks.role.mockReturnValue('control');writeIdentity();
+  expect(()=>currentPoolCatalog(home)).toThrow('workflow_pool_selection_required');expect(mocks.request).not.toHaveBeenCalled();
+  const run=selectedRun();mocks.request.mockReturnValue(binding('project-b'));
+  expect(()=>currentPoolCatalog(home,run)).toThrow('workflow_workspace_binding_changed');
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(readProjectWorkspaceSelection(run)).toEqual(binding());
  });
 });
 

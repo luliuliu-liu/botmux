@@ -1,5 +1,5 @@
 import {describe,expect,it} from 'vitest';
-import {dynamicModel,idsOf,modelOptionLabel,modelGroupLabel,type ModelOption} from '../src/dashboard/web/platform/model-options.js';
+import {configuredModelSelection,dynamicModel,idsOf,modelOptionLabel,modelGroupLabel,nativeOAuthSupported,normalizeModelSelection,normalizedAckModelId,type ModelOption} from '../src/dashboard/web/platform/model-options.js';
 
 const base:ModelOption={profileId:'p1',displayName:'Main',provider:'openai',modelId:'gpt-default',enabled:true};
 
@@ -41,5 +41,22 @@ describe('model options',()=>{
   const disabled=modelGroupLabel({...base,enabled:false});
   expect(disabled).not.toBe(enabled);
   expect(disabled.startsWith(enabled)).toBe(true);
+ });
+ it('admits native OAuth only for Codex and ZCode even when a catalog advertises it for Claude',()=>{
+  expect(nativeOAuthSupported('codex',['api-key','oauth'])).toBe(true);
+  expect(nativeOAuthSupported('zcode',['api-key','oauth'])).toBe(true);
+  expect(nativeOAuthSupported('claude-code',['api-key','oauth'])).toBe(false);
+  expect(nativeOAuthSupported('traex',['oauth'])).toBe(false);
+ });
+ it('normalizes ZCode OAuth and dynamic API connections to an empty model identity',()=>{
+  expect(normalizeModelSelection('zcode',configuredModelSelection('oauth',null,null),'must-not-persist')).toEqual({authMethod:'oauth',modelProfileId:null,modelId:null});
+  const dynamic={...base,profileId:'vercel',protocol:'vercel-claude'};
+  expect(normalizeModelSelection('claude-code',JSON.stringify(['vercel','stale']),undefined,[dynamic])).toEqual({authMethod:'api-key',modelProfileId:'vercel',modelId:null});
+  expect(normalizedAckModelId('zcode','oauth','stale')).toBeNull();
+  expect(normalizedAckModelId('claude-code','api-key','stale','vercel-claude')).toBeNull();
+ });
+ it('keeps a trimmed optional Codex OAuth model and rejects Claude native OAuth',()=>{
+  expect(normalizeModelSelection('codex','[null,null]','  gpt-native  ')).toEqual({authMethod:'oauth',modelProfileId:null,modelId:'gpt-native'});
+  expect(()=>normalizeModelSelection('claude-code','[null,null]','')).toThrow('不支持');
  });
 });

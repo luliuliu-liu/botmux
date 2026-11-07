@@ -137,7 +137,7 @@ export function handleXtermVendorHttp(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
-  mode: 'root' | 'anyPrefix',
+  mode: Parameters<typeof matchXtermVendorPath>[1],
   onError?: (err: unknown) => void,
 ): boolean {
   const match = matchXtermVendorPath(pathname, mode);

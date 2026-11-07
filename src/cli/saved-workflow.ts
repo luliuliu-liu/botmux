@@ -296,6 +296,12 @@ async function startMaterializedRun(runId: string, larkAppId: string): Promise<v
 }
 
 export async function cmdSavedWorkflow(sub: string, args: string[]): Promise<void> {
+  if (sub === 'run' && args.some(arg => arg === '--resume-draft' || arg.startsWith('--resume-draft='))) {
+    throw new Error('--resume-draft 草稿启动入口已移除；使用原生 Workflow 命令与真人审批');
+  }
+  if (sub === 'run' && args.some(arg => arg === '--pool' || arg.startsWith('--pool='))) {
+    throw new Error('托管池 Saved Workflow 直接启动尚未支持；使用 workflow new "<目标>" --pool <poolId> 重新编排并真人审批');
+  }
   const context = contextFromEnv();
   const dataDir = libraryDataDir(args);
   const baseDir = runsBaseDir(args);

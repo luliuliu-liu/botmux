@@ -1,3 +1,4 @@
+import {normalizeModelSelection,normalizedAckModelId} from './model-options.js';
 type Api=(path:string,method?:string,body?:any)=>Promise<any>;
 const sameIds=(a:string[],b:string[])=>JSON.stringify([...a].sort())===JSON.stringify([...b].sort());
 async function syncMcp(api:Api,target:string,base:any,draft:any,requestId:string){
@@ -11,8 +12,13 @@ export async function saveInstanceConfiguration(api:Api,base:any,draft:any,reque
   if(mountChange&&!draft.confirmRestart)throw Error('请确认重建');
   if(draft.agentType!==base.row.agentType&&!base.clis.some((c:any)=>c.agentType===draft.agentType&&c.configured))throw Error('请先配置目标 Agent 模型');
   await syncMcp(api,id,base,draft,requestId);
-  stage='模型与机器人';const update=await api('/containers/'+id,'PUT',{revision:base.row.revision,proxyProfileId:draft.proxyProfileId||null,...(base.row.botId!==(draft.botId||null)?{botId:draft.botId||null}:{}),...(base.clis.length<=1?(()=>{const [modelProfileId,selectedModelId]=JSON.parse(draft.modelChoice);const modelId=modelProfileId===null&&draft.oauthModelId!==undefined?(draft.oauthModelId.trim()||null):selectedModelId;return {modelProfileId,modelId,authMethod:modelProfileId===null?'oauth':'api-key'};})():{})});
-  let row=update.container;if(!row||row.status!=='ready'||row.appliedRevision!==row.revision)throw Error('实例未确认生效');
+  const expectedBot=draft.botId||null,expectedProxy=draft.proxyProfileId||null;
+  const modelUpdate=base.clis.length<=1?normalizeModelSelection(draft.agentType,draft.modelChoice,draft.oauthModelId,base.models??[]):null;
+  stage='模型与机器人';const update=await api('/containers/'+id,'PUT',{revision:base.row.revision,proxyProfileId:expectedProxy,...(base.row.botId!==expectedBot?{botId:expectedBot}:{}),...(modelUpdate??{})});
+  let row=update.container;const modelAck=!modelUpdate||(row?.modelProfileId??null)===modelUpdate.modelProfileId
+    &&normalizedAckModelId(draft.agentType,row?.authMethod,row?.modelId,row?.modelProtocol)===modelUpdate.modelId&&row?.authMethod===modelUpdate.authMethod;
+  if(!row||row.containerId!==id||row.status!=='ready'||!Number.isInteger(row.revision)||row.revision<=base.row.revision||row.appliedRevision!==row.revision
+    ||(row.botId??null)!==expectedBot||(row.proxyProfileId??null)!==expectedProxy||!modelAck)throw Error('实例未确认生效');
   if(draft.agentType!==row.agentType){stage='Agent 切换';const cli=base.clis.find((c:any)=>c.agentType===draft.agentType);if(!cli?.configured)throw Error('请先配置目标 Agent 模型');const r=await api('/containers/'+id+'/clis/'+draft.agentType+'/activate','POST',{revision:cli.revision});if(!r.clis?.some((c:any)=>c.agentType===draft.agentType&&c.active&&c.appliedRevision===c.revision))throw Error('切换未确认');row=(await api('/containers')).containers.find((c:any)=>c.containerId===id);}
   if(mountChange){stage='挂载重建';if(!draft.confirmRestart)throw Error('请确认重建');const r=await api('/containers/'+id+'/upgrade','POST',{revision:row.revision,image:row.image,confirmRestart:true,hostMountIds:draft.hostMountIds,...(!row.poolId?{workspaceKind:draft.workspaceKind,workspaceSource:draft.workspaceSource,workspaceReadOnly:draft.workspaceReadOnly}:{})});if(r.container?.status!=='ready')throw Error('重建未确认');}
   return {applied:true};

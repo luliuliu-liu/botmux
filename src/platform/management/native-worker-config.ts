@@ -35,6 +35,7 @@ function modelDigest(home:string,config:NativeConfiguration){
     codexCatalog:config.agentType==='codex'&&existsSync(join(home,'.codex',CODEX_CATALOG_FILE))
       ?hash(readFileSync(join(home,'.codex',CODEX_CATALOG_FILE),'utf8')):null,
     dsh:config.agentType==='dsh'&&existsSync(dshModelPatchPath(home))?hash(readFileSync(dshModelPatchPath(home),'utf8')):null,
+    zcode:config.agentType==='zcode'&&config.model.authMethod!=='oauth'?['credentials.json','provider_config.json'].map(name=>{const path=join(home,'.zcode','v2',name);return existsSync(path)?hash(readFileSync(path,'utf8')):null;}):null,
     environment:readContainerAgentEnvironment(home,config.agentType),model:readContainerAgentModel(home,config.agentType)});
 }
 const runtimeModel=(config:NativeConfiguration)=>config.model.modelId
@@ -286,7 +287,7 @@ function nativeModelEnvironmentBase(home:string,agentType:string,model:NativeMod
   throw new Error('unsupported_agent');
 }
 
-export async function writeNativeAgentModel(home:string,config:NativeConfiguration){
+export async function writeNativeAgentModel(home:string,config:NativeConfiguration,deps:{zcodeConfigure?:(input:{authMethod:string;apiKey?:string})=>{configured:boolean;authMethod:string}}={}){
   const {model,agentType}=config;
   const environment=nativeModelEnvironment(home,agentType,model),selected=runtimeModel(config);
   if(agentType==='traex'){
@@ -308,21 +309,27 @@ export async function writeNativeAgentModel(home:string,config:NativeConfigurati
     await synchronizePiNativeConfiguration(home,model);
   }
   if(agentType==='zcode'){
-    // Use the pinned upstream credential API. Never send keys through argv or logs.
-    // Account login owns its credentials; writing an API-key identity would
-    // clobber the native session, so the writer only runs for key auth.
-    if(model.authMethod==='oauth'){/* keep native credentials untouched */}
-    else{
+    // 原生Provider认证来源持久化，OAuth不能只清环境；Key只通过stdin传递。
+    const authMethod=model.authMethod==='oauth'?'oauth':'api-key';
     const marker=join(home,'.botmux','platform','zcode-key-owned.json'),keyDigest=hash(model.apiKey);
     const nativeFiles=['credentials.json','provider_config.json'].map(name=>join(home,'.zcode','v2',name));
-    if(read(marker,null)?.keyDigest!==keyDigest||nativeFiles.some(file=>!existsSync(file))){
-      const result=spawnSync('/usr/local/bin/node',['/opt/agent/zcode/native-config.cjs'],{
-        input:JSON.stringify({apiKey:model.apiKey}),encoding:'utf8',timeout:30000,
-        env:{...process.env,HOME:home,ZCODE_DATA_BASE_DIR:home},maxBuffer:65536,
-      });
-      if(result.status!==0||result.error)throw Error('zcode_native_configuration_failed');
-      save(marker,{keyDigest});
-    }
+    const nativeDigests=()=>nativeFiles.map(file=>existsSync(file)?hash(readFileSync(file,'utf8')):null);
+    const owned=read(marker,null);
+    // 同一Key也必须检测原生登录/人工修改造成的文件漂移，不能按Key摘要直接跳过。
+    if(authMethod==='oauth'||owned?.keyDigest!==keyDigest||nativeFiles.some(file=>!existsSync(file))||JSON.stringify(owned?.nativeDigests)!==JSON.stringify(nativeDigests())){
+      const input={authMethod,...(authMethod==='api-key'?{apiKey:model.apiKey}:{})};
+      let applied:{configured:boolean;authMethod:string};
+      if(deps.zcodeConfigure)applied=deps.zcodeConfigure(input);
+      else{
+        const result=spawnSync('/usr/local/bin/node',['/opt/agent/zcode/native-config.cjs'],{
+          input:JSON.stringify(input),encoding:'utf8',timeout:30000,
+          env:{...process.env,HOME:home,ZCODE_DATA_BASE_DIR:home},maxBuffer:65536,
+        });
+        if(result.status!==0||result.error)throw Error('zcode_native_configuration_failed');
+        try{applied=JSON.parse(result.stdout);}catch{throw Error('zcode_native_configuration_failed');}
+      }
+      if(applied.configured!==true||applied.authMethod!==authMethod)throw Error('zcode_native_authentication_unconfirmed');
+      if(authMethod==='api-key')save(marker,{keyDigest,nativeDigests:nativeDigests()});
     }
   }
   if(agentType==='dsh'){

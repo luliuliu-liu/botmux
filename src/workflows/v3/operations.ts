@@ -13,6 +13,8 @@ import {parseWorkflowDeliveryMode} from './delivery-policy.js';
 import {archivedManifestForClone,archivedArtifactBytes} from '../../platform/workflow/archive-clone.js';
 import {validateSpec} from './spec.js';
 import type {WorkflowArchiveManifest} from '../../platform/workflow/archive-contract.js';
+import {controlRuntime,resolveWorkflowProjectWorkspace} from '../../platform/workflow/agent-pool-client.js';
+import {writeProjectWorkspaceSelection} from '../../platform/workflow/project-workspace.js';
 export function operationsRunDir(runId:string,baseDir=defaultBaseDir()){
  if(!isValidRunId(runId))throw Error('invalid_run_id');const root=resolve(baseDir),path=join(root,runId);
  safeFile(root,path,true);return path;
@@ -94,18 +96,22 @@ export function workflowLogs(runId:string,node:string,{baseDir=defaultBaseDir(),
  if(!event||event.type!=='nodeDispatched')throw Error('node_attempt_not_found');
  const path=resolve(dir,event.attemptId,stream+'.log');safeFile(dir,path);return readFileSync(path,'utf8').split('\n').slice(-tail).join('\n');
 }
-export async function cloneArchivedWorkflow(archive:WorkflowArchiveManifest,{baseDir=defaultBaseDir(),goal}:{baseDir?:string;goal?:string}={}){
+export async function cloneArchivedWorkflow(archive:WorkflowArchiveManifest,{baseDir=defaultBaseDir(),goal,poolId}:{baseDir?:string;goal?:string;poolId?:string}={}){
  const {assertWorkflowPrincipal,chatBindingFromEnv}=await import('./host.js');const current=chatBindingFromEnv();
  if(archive.chatBinding===undefined)throw Error('archive_caller_binding_unknown');
  assertWorkflowPrincipal(archive.runId,archive.chatBinding??undefined,current);
+ const workspace=controlRuntime()?await resolveWorkflowProjectWorkspace(poolId??''):undefined;
  const spec=validateSpec(archive.spec);const born=birthRun({baseDir,goal:goal??spec.title,chatBinding:current??archive.chatBinding??undefined});
+ if(workspace)writeProjectWorkspaceSelection(born.runDir,workspace);
  writeFileSync(join(born.runDir,'spec.md'),'# 归档运行的新草稿\n\n```json\n'+JSON.stringify({...spec,runId:born.runId},null,2)+'\n```\n',{mode:0o600});
  const lineage={schema:'botmux-run-lineage-v1',parentRunId:archive.runId,supersedes:archive.runId,sourceDagSha256:createHash('sha256').update(JSON.stringify(archive.dag)).digest('hex'),sourceArchive:true};
  writeFileSync(join(born.runDir,'lineage.json'),JSON.stringify(lineage,null,2)+'\n',{flag:'wx',mode:0o600});return {...born,lineage};
 }
-export async function cloneWorkflow(runId:string,{baseDir=defaultBaseDir(),goal}:{baseDir?:string;goal?:string}={}){
- const archive=archivedManifestForClone(runId);if(archive)return cloneArchivedWorkflow(archive,{baseDir,goal});
+export async function cloneWorkflow(runId:string,{baseDir=defaultBaseDir(),goal,poolId}:{baseDir?:string;goal?:string;poolId?:string}={}){
+ const archive=archivedManifestForClone(runId);if(archive)return cloneArchivedWorkflow(archive,{baseDir,goal,poolId});
+ const workspace=controlRuntime()?await resolveWorkflowProjectWorkspace(poolId??''):undefined;
  const {assertWorkflowHostCaller,chatBindingFromEnv}=await import('./host.js');const source=operationsRunDir(runId,baseDir);assertWorkflowHostCaller(source,chatBindingFromEnv());const old=readGrillState(source),born=birthRun({baseDir,goal:goal??old?.goal??'Workflow revision',chatBinding:old?.chatBinding});
+ if(workspace)writeProjectWorkspaceSelection(born.runDir,workspace);
  if(existsSync(join(source,'dag.json')))safeFile(source,join(source,'dag.json'));const origin=join(source,'spec.md');if(existsSync(origin)){safeFile(source,origin);writeFileSync(join(born.runDir,'spec.md'),readFileSync(origin),{mode:0o600});}
  const lineage={schema:'botmux-run-lineage-v1',parentRunId:runId,supersedes:runId,sourceDagSha256:existsSync(join(source,'dag.json'))?createHash('sha256').update(readFileSync(join(source,'dag.json'))).digest('hex'):null};
  writeFileSync(join(born.runDir,'lineage.json'),JSON.stringify(lineage,null,2)+'\n',{flag:'wx',mode:0o600});return {...born,lineage};

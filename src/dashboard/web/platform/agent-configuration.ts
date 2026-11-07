@@ -1,14 +1,17 @@
-export type AgentConfiguration={containerId:string;status:string;revision:number;appliedRevision:number;authMethod?:string;modelProfileId:string|null;modelId?:string|null;botId:string|null};
+import {normalizedAckModelId} from './model-options.js';
+export type AgentConfiguration={containerId:string;status:string;revision:number;appliedRevision:number;agentType?:string;authMethod?:string;modelProfileId:string|null;modelProtocol?:string|null;modelId?:string|null;proxyProfileId?:string|null;botId:string|null};
 type Api=(path:string,method:string,body:unknown)=>Promise<any>;
 /** A successful HTTP response alone is not proof that the runtime applied it.
  * Model-only updates must not rotate an unchanged Bot binding generation. */
 export async function syncAgentConfiguration(api:Api,current:AgentConfiguration,modelProfileId:string|null,botId=current.botId,modelId=modelProfileId===current.modelProfileId?current.modelId:undefined,proxyProfileId?:string|null){
-  const result=await api(`/containers/${current.containerId}`,'PUT',{revision:current.revision,modelProfileId,...(proxyProfileId===undefined?{}:{proxyProfileId}),
-    ...(modelProfileId===null?{authMethod:'oauth',modelId:modelId||null}:{}),
-    ...(modelId===undefined?{}:{modelId}),...(botId!==current.botId?{botId}:{})});
+  const authMethod=modelProfileId===null?'oauth':'api-key';
+  const requestedModelId=modelId===undefined?undefined:normalizedAckModelId(current.agentType??'',authMethod,modelId);
+  const result=await api(`/containers/${current.containerId}`,'PUT',{revision:current.revision,modelProfileId,authMethod,...(proxyProfileId===undefined?{}:{proxyProfileId}),
+    ...(requestedModelId===undefined?{}:{modelId:requestedModelId}),...(botId!==current.botId?{botId}:{})});
   const observed=result.container as AgentConfiguration|undefined;
-  if(!observed||observed.containerId!==current.containerId||observed.status!=='ready'||
-    observed.modelProfileId!==modelProfileId||(modelProfileId===null&&observed.authMethod!=='oauth')||(modelId!==undefined&&(observed.modelId||null)!==(modelId||null))||observed.botId!==botId||
+  if(!observed||observed.containerId!==current.containerId||observed.status!=='ready'||observed.authMethod!==authMethod||
+    observed.modelProfileId!==modelProfileId||(requestedModelId!==undefined&&normalizedAckModelId(current.agentType??'',observed.authMethod,observed.modelId,observed.modelProtocol)!==requestedModelId)||observed.botId!==botId||
+    (proxyProfileId!==undefined&&observed.proxyProfileId!==proxyProfileId)||
     !Number.isInteger(observed.revision)||observed.revision<=current.revision||observed.appliedRevision!==observed.revision){
     throw new Error('配置已提交，但 Agent 尚未确认生效，请刷新状态；不要重复创建 Agent。');
   }
@@ -19,12 +22,13 @@ export type CliConfigurationRecord={agentType:string;active?:boolean;configured?
 /** Per-CLI configuration saves must be attested by the runtime, including the
  * active CLI whose save delegates to the container reconcile path. */
 export async function saveCliConfiguration(api:Api,containerId:string,cli:CliConfigurationRecord,modelProfileId:string|null,modelId:string|null){
-  const result=await api(`/containers/${containerId}/clis/${encodeURIComponent(cli.agentType)}`,'PUT',{revision:cli.revision,
-    ...(modelProfileId===null?{authMethod:'oauth',modelId:modelId||null}:{modelProfileId,modelId:modelId||undefined})});
+  const authMethod=modelProfileId===null?'oauth':'api-key';
+  const requestedModelId=normalizedAckModelId(cli.agentType,authMethod,modelId);
+  const result=await api(`/containers/${containerId}/clis/${encodeURIComponent(cli.agentType)}`,'PUT',{revision:cli.revision,authMethod,modelProfileId,modelId:requestedModelId});
   const observed=(result?.clis as CliConfigurationRecord[]|undefined)?.find(item=>item.agentType===cli.agentType);
   if(!observed||!Number.isInteger(observed.revision)||observed.revision<=cli.revision||observed.appliedRevision!==observed.revision
-    ||observed.modelProfileId!==modelProfileId||(observed.modelId||null)!==(modelId||null)
-    ||modelProfileId===null&&observed.authMethod!=='oauth')
+    ||observed.modelProfileId!==modelProfileId||normalizedAckModelId(cli.agentType,observed.authMethod,observed.modelId,observed.modelProtocol)!==requestedModelId
+    ||observed.authMethod!==authMethod)
     throw new Error('配置已提交，但 Agent 尚未确认生效，请刷新状态；不要重复提交。');
   return observed;
 }

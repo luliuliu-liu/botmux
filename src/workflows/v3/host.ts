@@ -1,4 +1,7 @@
 import {requiresAgentPool} from './pool-execution-policy.js';
+import {controlRuntime,currentPoolCatalog,resolveWorkflowProjectWorkspace} from '../../platform/workflow/agent-pool-client.js';
+import {bindDagToSelectedPool} from './library-materialize.js';
+import {writeProjectWorkspaceSelection,readProjectWorkspaceSelection} from '../../platform/workflow/project-workspace.js';
 import {createHash} from 'node:crypto';
 import {verifyDagApproval,authoringAudit} from './authoring-approval.js';
 /**
@@ -467,9 +470,16 @@ export async function hostArchitect(runDir: string, deps: ArchitectDeps, now: Da
 
     // Assertion 2: do NOT trust architect's self-claim — host validates the dag.
     try {
-      const dag = deps.loadDag(res.dagPath);
+      let dag = deps.loadDag(res.dagPath);
       if (typeof dag !== 'object' || dag === null || (dag as { schemaVersion?: unknown }).schemaVersion !== 2) {
         throw new DagValidationError(['architect dag.json must use schemaVersion 2']);
+      }
+      const workspace = readProjectWorkspaceSelection(runDir);
+      if (workspace) {
+        const catalog = currentPoolCatalog(undefined, runDir);
+        if (!catalog) throw new HostGuardError('托管 Workflow 只能在 Control runtime 完成 Architect');
+        dag = bindDagToSelectedPool(dag as V3Dag, workspace, catalog.members);
+        atomicWriteFileSync(res.dagPath, `${JSON.stringify(dag, null, 2)}\n`, { mode: 0o600 });
       }
       if (deps.botAssignment) {
         const mainApp = deps.botAssignment.roster.mainLarkAppId;
@@ -574,6 +584,11 @@ export function authorizeAdHocRun(
     /** Bot runs only: the second-gate record, built inside the lock from the
      *  exact DAG and executing bots being frozen. */
     flowConfirmation?: (frozen: { dag: V3Dag; targets: V3NodeExecutorTarget[] }) => V3FlowConfirmation;
+    /** A Dashboard draft (design 2026-11-03 workflow-dashboard-orchestration
+     *  §4.5 第 7 步) is born without a chat; its binding (main bot, the group,
+     *  the main topic root, the session, the initiator) is produced by
+     *  拉群开始 and given here. Refused when the grill has a binding of its own. */
+    chatBinding?: RunChatBinding;
   } = {},
 ): AdHocRunAuthorizationResult {
   // A bot-executed run freezes the directory exactly as an ephemeral one does
@@ -625,6 +640,10 @@ export function authorizeAdHocRun(
       throw new HostGuardError(`approve-dag 需要 status=dag_ready，当前 ${cur.status}`);
     }
     if (!cur.dagPath) throw new Error('dag_ready 状态缺 dagPath（内部不一致）');
+    if (opts.chatBinding && cur.chatBinding) {
+      throw new HostGuardError('这个 run 出生时已绑定话题，不能再给它另一个绑定');
+    }
+    const chatBinding = cur.chatBinding ?? opts.chatBinding;
     const dag = loadDag(cur.dagPath);
     if (opts.nodeExecutor === 'bot' && requiresAgentPool(dag)) throw new HostGuardError('Agent 池 DAG 必须使用托管执行方式，不能冻结为外部 Bot 执行');
     if (dag.runId !== cur.runId) {
@@ -639,7 +658,7 @@ export function authorizeAdHocRun(
       // A node that omits `bot` inherits the bot where this grill was born,
       // never the first unrelated entry in bots.json. Standalone/dev runs have
       // no binding and retain the legacy first-supported fallback.
-      defaultSelector: cur.chatBinding?.larkAppId,
+      defaultSelector: chatBinding?.larkAppId,
       workingDirOverride: opts.workingDirOverride,
     });
 
@@ -654,23 +673,26 @@ export function authorizeAdHocRun(
       { mode: 0o600 },
     );
 
+    const workspace = readProjectWorkspaceSelection(runDir);
     const envelope = makeAdHocRunEnvelope({
       runId: cur.runId,
       createdAt: cur.createdAt,
       authorizedAt: now.toISOString(),
-      ...(cur.chatBinding ? { chatBinding: cur.chatBinding } : {}),
-      ...(cur.chatBinding?.ownerOpenId ? { authorizedByOpenId: cur.chatBinding.ownerOpenId } : {}),
+      ...(chatBinding ? { chatBinding } : {}),
+      ...(chatBinding?.ownerOpenId ? { authorizedByOpenId: chatBinding.ownerOpenId } : {}),
       ...(opts.nodeExecutor ? { nodeExecutor: opts.nodeExecutor } : {}),
+      ...(workspace ? { projectWorkspace: { poolId: workspace.poolId, bindingHash: workspace.bindingHash } } : {}),
       ...(nodeWorkingDir !== undefined ? { nodeWorkingDir } : {}),
       ...(opts.nodeExecutor && opts.handoffIdentity ? { handoffIdentity: opts.handoffIdentity } : {}),
-      ...(opts.nodeExecutor && opts.initiator ? { initiator: opts.initiator } : {}),
-      ...(opts.nodeExecutor && opts.flowConfirmation
+      ...(opts.initiator ? { initiator: opts.initiator } : {}),
+      ...(opts.flowConfirmation
         ? { flowConfirmation: opts.flowConfirmation({ dag, targets: v3BotExecutorTargets(dag, snapshots) }) }
         : {}),
       artifacts: {
         dag: artifactRef(runDir, 'dag.json'),
         spec: artifactRef(runDir, 'spec.json'),
         botSnapshots: artifactRef(runDir, 'bots.snapshot.json'),
+        ...(workspace ? { workspace: artifactRef(runDir, 'workspace.selection.json') } : {}),
       },
     });
     const publication = publishRunEnvelopeOnce(runDir, envelope);
@@ -1165,11 +1187,13 @@ export async function cmdWorkflowHost(
       // grill 经 daemon worker 出生时，env 带话题上下文 → 落 chatBinding，供后续
       // daemon humanGate 发审批卡用（CLI/dev 出生无 env → undefined，不影响）。
       const chatBinding = (deps.resolveChatBinding ?? chatBindingFromEnv)();
+      const workspace=controlRuntime()?await resolveWorkflowProjectWorkspace(argValue(rest,'--pool')??''):undefined;
       const { runId, runDir, state } = hostNew({ goal, baseDir, chatBinding });
+      if(workspace)writeProjectWorkspaceSelection(runDir,workspace);
       // Tells the grill whether named bots (`assignee`) will matter; approve-dag
       // decides for real.
       const botExecuted = decideV3NodeExecutor({
-        switchMode: (deps.nodeExecutorSwitch ?? workflowNodeExecutorMode)(),
+        switchMode: workspace?'ephemeral':(deps.nodeExecutorSwitch ?? workflowNodeExecutorMode)(),
         binding: chatBinding,
         multiTopicEnabled: (deps.multiTopicEnabled ?? (() => isMultiTopicOrchestrationEnabled()))(),
       }).mode === 'bot';
@@ -1215,7 +1239,7 @@ export async function cmdWorkflowHost(
       const runId = requireRunId(rest);
       const runDir = guardedRunDir(runId);
       const bots = (deps.loadBots ?? loadBotConfigs)();
-      const switchMode = (deps.nodeExecutorSwitch ?? workflowNodeExecutorMode)();
+      const switchMode = readProjectWorkspaceSelection(runDir)?'ephemeral':(deps.nodeExecutorSwitch ?? workflowNodeExecutorMode)();
       const multiTopicEnabled = (): boolean => (deps.multiTopicEnabled ?? (() => isMultiTopicOrchestrationEnabled()))();
       // Bot runs only (design §6.2): the Architect assigns every goal node a
       // bot from the chat's roster. Any other run gets today's prompt without
@@ -1319,7 +1343,7 @@ export async function cmdWorkflowHost(
       /** Bot mode: the absolute, range-checked `--working-dir`. */
       let botWorkingDir: string | undefined;
       if (before.kind === 'missing') {
-        const switchMode = (deps.nodeExecutorSwitch ?? workflowNodeExecutorMode)();
+        const switchMode = readProjectWorkspaceSelection(runDir)?'ephemeral':(deps.nodeExecutorSwitch ?? workflowNodeExecutorMode)();
         if (switchMode === 'bot') {
           const mainTopic = await resolveMainTopic(runDir, deps);
           const plan = await planAdHocNodeExecutor(runDir, bots, {

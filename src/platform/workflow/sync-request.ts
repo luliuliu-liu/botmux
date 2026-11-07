@@ -6,7 +6,7 @@ export class PersistenceRequestError extends Error{
 /** Preserve the upstream synchronous read/check/append boundary. This bounded
  * helper talks only to the resource API, never plans or executes a task. No
  * credential is placed in argv or inherited from the Control environment. */
-const allowedPath=/^\/(?:archives\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\/artifact\/[a-f0-9]{64})?|runs-with-delivery-policy|agent-pools(?:\/[0-9a-f-]{36}(?:\/input-preflight)?)?|model-catalog|runs(?:\/[A-Za-z0-9._-]+(?:\/(?:acquire|append|release|session|operations|resources(?:\/[0-9a-f-]{36}\/(?:resolve|cancel))?|attempts(?:\/[0-9a-f-]{36}(?:\/(?:prepare|submit|cancel))?)?))?)?)$/;
+const allowedPath=/^\/(?:archives\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\/artifact\/[a-f0-9]{64})?|runs-with-delivery-policy|agent-pools(?:\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/(?:input-preflight|workspace))?)?|model-catalog|runs(?:\/[A-Za-z0-9._-]+(?:\/(?:acquire|append|release|session|operations|resources(?:\/[0-9a-f-]{36}\/(?:resolve|cancel))?|attempts(?:\/[0-9a-f-]{36}(?:\/(?:prepare|submit|cancel))?)?))?)?)$/;
 const helper=String.raw`
 import {readFileSync} from 'node:fs';
 try{

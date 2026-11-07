@@ -10,6 +10,7 @@
 import {
   existsSync,
   mkdirSync,
+  readFileSync,
   renameSync,
   rmSync,
 } from 'node:fs';
@@ -26,13 +27,17 @@ import {
   type RawParamInput,
 } from '../shared/params.js';
 import { isGoalNode, isLoopNode, validateDag, type V3Dag, type V3Node } from './dag.js';
+import { readProjectWorkspaceSelection, writeProjectWorkspaceSelection, type ProjectWorkspaceBinding } from '../../platform/workflow/project-workspace.js';
+import { currentPoolCatalog } from '../../platform/workflow/agent-pool-client.js';
 import {
   freezeDagBotSnapshots,
   parseFrozenBotSnapshots,
   serializeFrozenBotSnapshots,
 } from './bot-resolve.js';
 import { readJournal,journalExists } from './journal.js';
-import { loadEffectiveV3Dag, v3ApprovedBotScope } from './dag-revision.js';
+import {assertExternalBotExecutionAvailable} from './pool-execution-policy.js';
+import {resolveExecutionBackend} from './execution-backend.js';
+import { loadEffectiveV3Dag, snapshotForSelector, v3ApprovedBotScope } from './dag-revision.js';
 import { materialize } from './state.js';
 import { validateSpec } from './spec.js';
 import { mintV3RunId, type RunChatBinding } from './grill-state.js';
@@ -40,6 +45,8 @@ import { isValidRunId } from './ops-projection.js';
 import {
   computeSavedWorkflowGateDigest,
   computeSavedWorkflowSideEffects,
+  savedWorkflowGoalNodeBots,
+  type SavedWorkflowBotChange,
   collectSavedWorkflowChatSideEffectProblems,
   formatSavedWorkflowChatSideEffectProblems,
   validateDagTemplate,
@@ -56,8 +63,11 @@ import {
   feishuRunInitiator,
   makeSavedDefinitionRunEnvelope,
   publishRunEnvelopeOnce,
+  readRunEnvelope,
   type LoadedAuthorizedV3Run,
   type V3HandoffIdentityRecord,
+  type V3FlowConfirmation,
+  type V3RunInitiator,
   type V3SavedDefinitionRunEnvelope,
 } from './run-envelope.js';
 import type { BotSnapshot, Spec } from './contract.js';
@@ -189,17 +199,34 @@ export function buildSavedWorkflowRevisionBaseline(
     throw new Error('cannot save workflow: source run has no pinned bots.snapshot.json');
   }
   const snapshots = parseFrozenBotSnapshots(loaded.botSnapshots, loaded.dag);
+  return buildSavedWorkflowRevisionFromFlow({
+    dag: loaded.dag,
+    spec: loaded.spec,
+    snapshots,
+    sourceRunId: loaded.envelope.runId,
+  }, opts);
+}
+
+/**
+ * The exact revision of one flow (a DAG, its spec and the bots it is frozen
+ * with): what a terminal run ran, or what a confirmed Dashboard draft would
+ * run (§5.1). Pure: no path or journal IO.
+ */
+export function buildSavedWorkflowRevisionFromFlow(
+  flow: { dag: V3Dag; spec: Spec; snapshots: ReadonlyMap<string, BotSnapshot>; sourceRunId?: string },
+  opts: BuildSavedWorkflowRevisionBaselineOptions = {},
+): BuiltSavedWorkflowRevisionBaseline {
   const hasLegacySelector = (nodes: V3Dag['nodes']): boolean => nodes.some((node) =>
     node.inputs.some((input) => input.select !== undefined)
     || (node.type === 'loop' && node.body !== undefined && hasLegacySelector(node.body.nodes)));
-  if (loaded.dag.schemaVersion !== 2 && hasLegacySelector(loaded.dag.nodes)) {
+  if (flow.dag.schemaVersion !== 2 && hasLegacySelector(flow.dag.nodes)) {
     throw new Error(
       'cannot save workflow: source run uses legacy artifact selectors; revise it to schemaVersion 2 with stable outputs/output keys first',
     );
   }
-  const normalizedNodes = canonicalizeNodeBots(cloneNodes(loaded.dag.nodes), snapshots);
+  const normalizedNodes = canonicalizeNodeBots(cloneNodes(flow.dag.nodes), flow.snapshots);
   const dagTemplate = validateDagTemplate({ schemaVersion: 2, nodes: normalizedNodes });
-  const { runId: _runId, ...specWithoutRunId } = loaded.spec;
+  const { runId: _runId, ...specWithoutRunId } = flow.spec;
   const specTemplate = validateSpecTemplate(specWithoutRunId);
   const inputs = opts.inputs ?? {};
   const contextRefs = opts.contextRefs ?? collectSavedWorkflowTemplateBindings(dagTemplate).context;
@@ -210,7 +237,7 @@ export function buildSavedWorkflowRevisionBaseline(
   collectSavedWorkflowReusableTextWarnings(dagTemplate, 'dagTemplate', lintWarnings);
   collectSavedWorkflowReusableTextWarnings(specTemplate, 'specTemplate', lintWarnings);
   const revision: SavedWorkflowRevisionDraft = {
-    sourceRunId: loaded.envelope.runId,
+    ...(flow.sourceRunId !== undefined ? { sourceRunId: flow.sourceRunId } : {}),
     inputs,
     contextRefs,
     specTemplate,
@@ -221,7 +248,7 @@ export function buildSavedWorkflowRevisionBaseline(
       sideEffects: computeSavedWorkflowSideEffects(dagTemplate),
     },
   };
-  return { displayName: loaded.spec.title, revision, lintWarnings };
+  return { displayName: flow.spec.title, revision, lintWarnings };
 }
 
 /** Exact run → revision draft. No heuristic literal replacement. */
@@ -271,6 +298,368 @@ export function compileSavedWorkflowFromRun(
   };
 }
 
+// ─── Dashboard save from a terminal run (design 2026-11-03 §5.1, E10) ─────
+
+export interface CompiledDashboardSavedWorkflowFromRun extends CompiledSavedWorkflowFromRun {
+  /** Nodes whose bot in the saved definition is not the one approved. */
+  botChanges: SavedWorkflowBotChange[];
+}
+
+/** Goal node by id: top level, or `<loop>.<body>`. */
+function findTemplateGoalNode(nodes: V3Node[], nodeId: string): V3Node | undefined {
+  const top = nodes.find((node) => node.id === nodeId && isGoalNode(node));
+  if (top) return top;
+  for (const node of nodes) {
+    if (!isLoopNode(node) || !nodeId.startsWith(`${node.id}.`)) continue;
+    const bodyId = nodeId.slice(node.id.length + 1);
+    const hit = node.body.nodes.find((candidate) => candidate.id === bodyId && isGoalNode(candidate));
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/**
+ * A run's final effective flow and the bots that ran it (design 2026-11-03
+ * §5.1 E10, §6): the authorized DAG plus every applied runtime revision
+ * (digest-verified; a pending proposal is not part of it), with each goal
+ * node's bot replaced by the one a recorded reassignment moved it to. Works
+ * on a run that has not finished (or not started: no journal yet). Read
+ * only: nothing in the run dir is written.
+ */
+export function readV3RunFinalFlow(
+  runDir: string,
+  loaded: LoadedAuthorizedV3Run,
+  events: ReturnType<typeof readJournal>,
+  snap: ReturnType<typeof materialize> = materialize(events),
+): {
+  frozen: Map<string, BotSnapshot>;
+  effective: ReturnType<typeof loadEffectiveV3Dag>;
+  nodes: V3Node[];
+  scope: Map<string, BotSnapshot>;
+  reassigned: Set<string>;
+  spec: Spec;
+} {
+  if (loaded.botSnapshots === undefined || !loaded.spec) {
+    throw new Error('cannot save workflow: source run has no pinned bots.snapshot.json / spec.json');
+  }
+  const frozen = parseFrozenBotSnapshots(loaded.botSnapshots, loaded.dag);
+  const effective = loadEffectiveV3Dag(runDir, loaded.dag, events);
+  const scope = v3ApprovedBotScope(frozen, effective.botAdditions);
+
+  // The bots that ran: every recorded reassignment wins over the definition.
+  const nodes = cloneNodes(effective.dag.nodes);
+  const reassigned = new Set<string>();
+  for (const [nodeId, larkAppId] of snap.assignments) {
+    const node = findTemplateGoalNode(nodes, nodeId);
+    if (!node) continue;
+    if (!snapshotForSelector(scope, larkAppId)) {
+      throw new Error(`cannot save workflow: node ${nodeId} was reassigned to ${larkAppId}, which is outside the run's approved bots`);
+    }
+    if (!scope.has(larkAppId)) scope.set(larkAppId, snapshotForSelector(scope, larkAppId)!);
+    node.bot = larkAppId;
+    reassigned.add(nodeId);
+  }
+  return { frozen, effective, nodes, scope, reassigned, spec: loaded.spec };
+}
+
+/**
+ * Like {@link compileSavedWorkflowFromRun}, plus what the Dashboard save
+ * promises (E10): the final effective flow AND the bots that actually ran
+ * it — a node reassigned on its blocked card (`nodeReassigned`) is saved
+ * with the bot it was reassigned to — and which nodes differ from the flow
+ * the run was approved with. Feishu `/workflow save` keeps its own compiler,
+ * unchanged.
+ */
+export function compileDashboardSavedWorkflowFromRun(
+  runDir: string,
+  opts: CompileSavedWorkflowFromRunOptions = {},
+): CompiledDashboardSavedWorkflowFromRun {
+  const loaded = loadAuthorizedV3Run(runDir, {
+    allowedSources: ['ad_hoc', 'saved_definition', 'legacy_v3'],
+  });
+  const journalPath = join(runDir, 'journal.ndjson');
+  if (!journalExists(journalPath)) throw new Error('cannot save workflow: source run has not started');
+  const events = readJournal(journalPath);
+  const snap = materialize(events);
+  const status = snap.runStatus;
+  if (status !== 'succeeded' && status !== 'failed' && status !== 'blocked') {
+    throw new Error(`cannot save workflow: source run is not terminal (status=${status})`);
+  }
+  if (status !== 'succeeded' && opts.allowDraft !== true) {
+    throw new Error(`cannot publish workflow from a ${status} run; pass allowDraft to save it as draft`);
+  }
+  const { frozen, effective, nodes, scope, reassigned, spec } = readV3RunFinalFlow(runDir, loaded, events, snap);
+  const built = buildSavedWorkflowRevisionFromFlow({
+    dag: { ...effective.dag, nodes },
+    spec,
+    snapshots: scope,
+    sourceRunId: loaded.envelope.runId,
+  }, opts);
+  if (built.lintWarnings.length > 0 && opts.acknowledgeUnsafeLiterals !== true) {
+    throw new SavedWorkflowUnsafeLiteralError(built.lintWarnings);
+  }
+
+  // Approved flow → its bots, on the same terms as the saved template.
+  const approved = savedWorkflowGoalNodeBots(canonicalizeNodeBots(cloneNodes(loaded.dag.nodes), frozen));
+  const saved = savedWorkflowGoalNodeBots(built.revision.dagTemplate.nodes);
+  const botChanges: SavedWorkflowBotChange[] = [];
+  for (const [nodeId, savedBot] of saved) {
+    const approvedBot = approved.get(nodeId);
+    if (!approved.has(nodeId)) {
+      botChanges.push({ nodeId, ...(savedBot ? { savedLarkAppId: savedBot } : {}), cause: 'added' });
+    } else if (approvedBot !== savedBot) {
+      botChanges.push({
+        nodeId,
+        ...(approvedBot ? { approvedLarkAppId: approvedBot } : {}),
+        ...(savedBot ? { savedLarkAppId: savedBot } : {}),
+        cause: reassigned.has(nodeId) ? 'reassigned' : 'revised',
+      });
+    }
+  }
+  for (const [nodeId, approvedBot] of approved) {
+    if (!saved.has(nodeId)) botChanges.push({ nodeId, ...(approvedBot ? { approvedLarkAppId: approvedBot } : {}), cause: 'removed' });
+  }
+  botChanges.sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0));
+  return {
+    displayName: built.displayName,
+    revision: built.revision,
+    sourceStatus: status,
+    publish: status === 'succeeded',
+    lintWarnings: built.lintWarnings,
+    runtimeRevisions: effective.history.applied.length,
+    botChanges,
+  };
+}
+
+// ─── Template run started from the Dashboard (§5.3, D5) ───────────────────
+
+/** The DAG and spec a revision runs as under `runId` — exactly what
+ *  {@link materializeSavedWorkflowRun} writes. */
+export function savedWorkflowRunFlow(revision: LoadedSavedWorkflowRevision, runId: string): { dag: V3Dag; spec: Spec } {
+  const dag = validateDag({
+    ...(revision.payload.dagTemplate.schemaVersion !== undefined
+      ? { schemaVersion: revision.payload.dagTemplate.schemaVersion }
+      : {}),
+    runId,
+    nodes: cloneNodes(revision.payload.dagTemplate.nodes),
+  });
+  const spec = validateSpec({ ...revision.payload.specTemplate, runId });
+  return { dag, spec };
+}
+
+/** Parameters → typed values, by the same rules as `/workflow run`. Refuses
+ *  sensitive parameters as the materializer does. */
+export function resolveSavedWorkflowRunParams(
+  revision: LoadedSavedWorkflowRevision,
+  rawParams: Record<string, RawParamInput>,
+): Record<string, unknown> {
+  const sensitiveParams = Object.entries(revision.payload.inputs)
+    .filter(([, definition]) => definition.sensitive === true)
+    .map(([name]) => name);
+  if (sensitiveParams.length > 0) {
+    throw new Error(
+      `Saved Workflow sensitive parameters are not executable yet (${sensitiveParams.join(', ')}): ` +
+      'P0 does not persist secrets in run artifacts; use a bot-managed credential or remove sensitive=true.',
+    );
+  }
+  const paramSchema = { params: revision.payload.inputs };
+  validateWorkflowParamSchema(paramSchema);
+  return coerceWorkflowParams(paramSchema, rawParams);
+}
+
+export interface CommitSavedWorkflowRunInPlaceInput {
+  runDir: string;
+  metadata: SavedWorkflowMetadata;
+  revision: LoadedSavedWorkflowRevision;
+  rawParams: Record<string, RawParamInput>;
+  chatBinding: RunChatBinding;
+  initiator: V3RunInitiator;
+  /** The dag.json / spec.json digests pinned when the run was prepared. */
+  expected: { dagSha256: string; specSha256: string };
+  bots: BotConfig[];
+  now?: Date;
+}
+
+/**
+ * What run.json records for a version saved from a Dashboard draft (I13,
+ * 11-05): that version's own second confirmation, as saved — who, when, the
+ * summary. Undefined for every other version (Feishu saves, a finished run).
+ */
+export function savedWorkflowRunFlowConfirmation(revision: LoadedSavedWorkflowRevision): V3FlowConfirmation | undefined {
+  const provenance = revision.payload.provenance;
+  if (provenance?.kind !== 'dashboard_draft') return undefined;
+  const { confirmedByOpenId, confirmedAt, flowSummary, flowSummarySha256 } = provenance.confirmation;
+  return { confirmedByOpenId, confirmedAt, flowSummary, flowSummarySha256: flowSummarySha256 as `sha256:${string}` };
+}
+
+export interface SavedWorkflowRunCommitIdentity {
+  workflowId: string;
+  revisionId: string;
+  /** The revision's content hash pinned when the run was prepared. */
+  contentHash: string;
+  chatBinding: Pick<RunChatBinding, 'larkAppId' | 'chatId' | 'rootMessageId'>;
+  initiatorOpenId: string;
+}
+
+/**
+ * A template run's run.json is already there (written before its record could
+ * be): accept it only as exactly this commit — same revision and pinned
+ * content, chat, topic, initiator, confirmation — verified against the run
+ * directory's own artifacts (definition.snapshot.json is the definition it
+ * ran with), then re-published idempotently (fsync heal). The library is not
+ * read: whatever happened to the template since (archived, deleted, a newer
+ * version) does not change a committed run.
+ */
+/** A committed template run.json that is not this commit's: shown on the
+ *  page (commit / template_unavailable), never overwritten. */
+export class SavedWorkflowRunReplayError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SavedWorkflowRunReplayError';
+  }
+}
+
+export function replaySavedWorkflowRunCommit(runDir: string, expected: SavedWorkflowRunCommitIdentity): V3SavedDefinitionRunEnvelope {
+  const runId = basename(runDir);
+  const existing = readRunEnvelope(runDir, runId);
+  if (existing.kind !== 'ok') {
+    throw new SavedWorkflowRunReplayError(existing.kind === 'invalid' ? `run.json 已存在但无效，拒绝覆盖：${existing.problems.join('; ')}` : 'run.json 不存在');
+  }
+  const envelope = existing.envelope;
+  const authorization = envelope.authorization as { initiator?: V3RunInitiator };
+  if (envelope.source.kind !== 'saved_definition'
+    || envelope.source.workflowId !== expected.workflowId
+    || envelope.source.revisionId !== expected.revisionId
+    || envelope.chatBinding?.chatId !== expected.chatBinding.chatId
+    || envelope.chatBinding.rootMessageId !== expected.chatBinding.rootMessageId
+    || envelope.chatBinding.larkAppId !== expected.chatBinding.larkAppId
+    || authorization.initiator?.openId !== expected.initiatorOpenId) {
+    throw new SavedWorkflowRunReplayError('run.json 已存在，但不是这次模板运行写的；不会覆盖它');
+  }
+  let loaded: LoadedAuthorizedV3Run;
+  try {
+    loaded = loadAuthorizedV3Run(runDir, { expectedRunId: runId, allowedSources: ['saved_definition'] });
+  } catch (error) {
+    // A pinned artifact's bytes no longer match run.json (digest), or the
+    // recorded confirmation is not the snapshot's.
+    throw new SavedWorkflowRunReplayError(`run.json 已写，但运行目录里的模板定义或产物和它记录的摘要对不上，不能接着启动：${error instanceof Error ? error.message : String(error)}`);
+  }
+  // Redundant with the check above (run.json pins definition.snapshot.json
+  // by sha256, and the snapshot's revisionId is content-derived): kept as a
+  // cheap direct statement of what the replay promises — the prepared version.
+  const snapshot = loaded.definitionSnapshot as { contentHash?: unknown } | undefined;
+  if (snapshot?.contentHash !== expected.contentHash) {
+    throw new SavedWorkflowRunReplayError('run.json 已存在，但它的模板定义不是准备运行时那一版；不会覆盖它');
+  }
+  return publishRunEnvelopeOnce(runDir, envelope).envelope as V3SavedDefinitionRunEnvelope;
+}
+
+/**
+ * Commit a template run whose directory already exists (a Dashboard
+ * template-run draft, §5.3): dag.json / spec.json were written when it was
+ * prepared — they must still be exactly the revision's flow under this runId
+ * with the pinned digests — and the rest of what
+ * {@link materializeSavedWorkflowRun} writes is added now that the group and
+ * main topic exist: bot snapshots, resolved parameters and context, the
+ * definition snapshot, then run.json (`source: saved_definition`, bot
+ * executed, with the initiator). run.json is the commit; a run.json already
+ * there must be this exact commit's (same revision, chat, topic, initiator)
+ * and is returned as is (crash replay), never rewritten.
+ */
+export function commitSavedWorkflowRunInPlace(input: CommitSavedWorkflowRunInPlaceInput): V3SavedDefinitionRunEnvelope {
+  const runDir = input.runDir;
+  const runId = basename(runDir);
+  if (input.metadata.workflowId !== input.revision.payload.workflowId) {
+    throw new Error('Saved Workflow metadata/revision workflowId mismatch');
+  }
+  if (input.metadata.owner.larkAppId !== input.chatBinding.larkAppId) {
+    throw new Error(`Saved Workflow '${input.metadata.workflowId}' cannot be materialized outside its owning app`);
+  }
+  if (input.metadata.scope.kind !== 'global') {
+    throw new Error(`Saved Workflow '${input.metadata.workflowId}' is chat-scoped: run it in its chat with /workflow run`);
+  }
+  if (input.initiator.openId !== input.chatBinding.ownerOpenId) {
+    throw new Error('the run initiator must be the chat binding owner');
+  }
+  const existing = readRunEnvelope(runDir, runId);
+  if (existing.kind === 'invalid') throw new Error(`run.json 已存在但无效，拒绝覆盖：${existing.problems.join('; ')}`);
+  if (existing.kind === 'ok') {
+    return replaySavedWorkflowRunCommit(runDir, {
+      workflowId: input.metadata.workflowId,
+      revisionId: input.revision.revisionId,
+      contentHash: input.revision.contentHash,
+      chatBinding: input.chatBinding,
+      initiatorOpenId: input.initiator.openId,
+    });
+  }
+  const flowConfirmation = savedWorkflowRunFlowConfirmation(input.revision);
+  assertSavedWorkflowTemplateBindings(
+    input.revision.payload.dagTemplate,
+    input.revision.payload.inputs,
+    input.revision.payload.contextRefs,
+  );
+  const resolvedParams = resolveSavedWorkflowRunParams(input.revision, input.rawParams);
+  const resolvedContext = resolveContext(input.revision.payload.contextRefs, {
+    chatBinding: input.chatBinding,
+    initiatorOpenId: input.initiator.openId,
+  });
+  const generated = savedWorkflowRunFlow(input.revision, runId);
+  const workspace = readProjectWorkspaceSelection(runDir);
+  const catalog = workspace ? currentPoolCatalog(undefined, runDir) : undefined;
+  if (workspace && !catalog) throw new Error('托管 Workflow 只能在 Control runtime 冻结执行授权');
+  const dag = workspace ? bindDagToSelectedPool(generated.dag, workspace, catalog!.members) : generated.dag;
+  const spec = generated.spec;
+  if (!workspace) assertExternalBotExecutionAvailable(dag, resolveExecutionBackend(runDir));
+  // The prepared files are what was shown (and, for a draft-born revision,
+  // confirmed): exactly the revision's flow, byte-pinned.
+  for (const [file, value, sha] of [
+    ['dag.json', dag, input.expected.dagSha256],
+    ['spec.json', spec, input.expected.specSha256],
+  ] as const) {
+    const ref = artifactRef(runDir, file);
+    if (ref.sha256 !== sha) throw new Error(`${file} changed since the template run was prepared`);
+    const onDisk = JSON.parse(readFileSync(join(runDir, file), 'utf-8')) as unknown;
+    if (JSON.stringify(onDisk) !== JSON.stringify(value)) throw new Error(`${file} is not this revision's flow`);
+  }
+  const botSnapshots = freezeDagBotSnapshots(dag, input.bots, { defaultSelector: input.chatBinding.larkAppId });
+  const now = input.now ?? new Date();
+  writeJson0600(join(runDir, 'bots.snapshot.json'), serializeFrozenBotSnapshots(botSnapshots));
+  writeJson0600(join(runDir, 'params.resolved.json'), { params: resolvedParams, context: resolvedContext });
+  writeJson0600(join(runDir, 'definition.snapshot.json'), {
+    schemaVersion: 1,
+    workflowId: input.metadata.workflowId,
+    revisionId: input.revision.revisionId,
+    contentHash: input.revision.contentHash,
+    humanVersion: input.revision.payload.humanVersion,
+    storedSchemaVersion: input.revision.storedSchemaVersion,
+    materializedSchemaVersion: input.revision.schemaVersion,
+    definition: input.revision.payload,
+    instantiatedAt: now.toISOString(),
+  });
+  const envelope = makeSavedDefinitionRunEnvelope({
+    runId,
+    workflowId: input.metadata.workflowId,
+    revisionId: input.revision.revisionId,
+    humanVersion: input.revision.payload.humanVersion,
+    createdAt: now.toISOString(),
+    authorizedAt: now.toISOString(),
+    chatBinding: input.chatBinding,
+    ...(!workspace ? { nodeExecutor: 'bot' as const } : {}),
+    ...(workspace ? { projectWorkspace: { poolId: workspace.poolId, bindingHash: workspace.bindingHash } } : {}),
+    initiator: input.initiator,
+    ...(flowConfirmation ? { flowConfirmation } : {}),
+    artifacts: {
+      dag: artifactRef(runDir, 'dag.json'),
+      spec: artifactRef(runDir, 'spec.json'),
+      botSnapshots: artifactRef(runDir, 'bots.snapshot.json'),
+      ...(workspace ? { workspace: artifactRef(runDir, 'workspace.selection.json') } : {}),
+      resolvedParams: artifactRef(runDir, 'params.resolved.json'),
+      definitionSnapshot: artifactRef(runDir, 'definition.snapshot.json'),
+    },
+  });
+  return publishRunEnvelopeOnce(runDir, envelope).envelope as V3SavedDefinitionRunEnvelope;
+}
+
 export interface SavedWorkflowMaterializeContext {
   chatBinding?: RunChatBinding;
   initiatorOpenId?: string;
@@ -285,6 +674,8 @@ export interface MaterializeSavedWorkflowRunInput {
   baseDir: string;
   runId?: string;
   now?: Date;
+  /** Explicit Control-resolved pool/workspace selection. */
+  workspace?: ProjectWorkspaceBinding;
   /** Frozen into run.json (design §6.3). With `bot`, a node without its own
    *  `bot` is executed by the run's own bot rather than the first configured
    *  supported bot. Absent = today's ephemeral execution, unchanged. */
@@ -328,6 +719,38 @@ function resolveContext(
 
 function writeJson0600(path: string, value: unknown): void {
   atomicWriteFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+}
+
+/** Rebind every executable goal (including loop bodies) to the workspace's
+ * selected pool. Candidate ids are retained only when they still name a member
+ * of that pool; foreign/stale ids are never carried into a new run. */
+export function bindDagToSelectedPool(
+  dag: V3Dag,
+  workspace: ProjectWorkspaceBinding,
+  members: unknown,
+): V3Dag {
+  const ids = new Set(
+    (Array.isArray(members) ? members : [])
+      .map((member) => (member as { memberId?: unknown })?.memberId)
+      .filter((id): id is string => typeof id === 'string'),
+  );
+  const bind = (nodes: V3Node[]): V3Node[] => nodes.map((node) => {
+    if (isLoopNode(node)) return { ...node, body: { nodes: bind(node.body.nodes) } };
+    if (!isGoalNode(node)) return { ...node };
+    const previous = node.agentSelection;
+    return {
+      ...node,
+      agentSelection: {
+        poolId: workspace.poolId,
+        requirement: previous?.requirement?.trim() || node.goal,
+        candidateIds: (previous?.candidateIds ?? []).filter((id) => ids.has(id)),
+        reason: previous?.reason?.trim() || '由创建时冻结的 Agent 池执行',
+        ...(previous?.requiredMountNames ? { requiredMountNames: previous.requiredMountNames } : {}),
+        ...(previous?.requiredPaths ? { requiredPaths: previous.requiredPaths } : {}),
+      },
+    };
+  });
+  return validateDag({ ...dag, nodes: bind(dag.nodes) });
 }
 
 /** Published revision → fresh immutable v3 run directory. */
@@ -385,7 +808,7 @@ export function materializeSavedWorkflowRun(
     input.rawParams ?? {},
   );
   const resolvedContext = resolveContext(input.revision.payload.contextRefs, input.context);
-  const dag = validateDag({
+  let dag = validateDag({
     ...(input.revision.payload.dagTemplate.schemaVersion !== undefined
       ? { schemaVersion: input.revision.payload.dagTemplate.schemaVersion }
       : {}),
@@ -393,14 +816,13 @@ export function materializeSavedWorkflowRun(
     nodes: cloneNodes(input.revision.payload.dagTemplate.nodes),
   });
   const spec = validateSpec({ ...input.revision.payload.specTemplate, runId });
-  const botSnapshots = freezeDagBotSnapshots(dag, input.bots, input.nodeExecutor === 'bot'
-    ? { defaultSelector: input.context?.chatBinding?.larkAppId }
-    : {});
+  let botSnapshots!: Map<string, BotSnapshot>;
 
   // Reserve the final run id across cooperating CLI/daemon processes. A plain
   // exists+rename sequence can replace an empty directory on POSIX when two
   // callers race with the same explicit runId.
   const initiator = feishuRunInitiator(input.context?.chatBinding?.ownerOpenId, input.handoffIdentity);
+  const savedConfirmation = savedWorkflowRunFlowConfirmation(input.revision);
   return withFileLockSync(runDir, () => {
     if (existsSync(runDir)) throw new Error(`v3 run already exists: ${runId}`);
 
@@ -410,6 +832,15 @@ export function materializeSavedWorkflowRun(
     const stagedRunDir = join(stagingRoot, runId);
     mkdirSync(stagedRunDir, { recursive: true, mode: 0o700 });
     try {
+      if (input.workspace) {
+        writeProjectWorkspaceSelection(stagedRunDir, input.workspace);
+        const catalog = currentPoolCatalog(undefined, stagedRunDir);
+        if (!catalog) throw new Error('托管 Workflow 只能在 Control runtime 冻结执行授权');
+        dag = bindDagToSelectedPool(dag, input.workspace, catalog.members);
+      }
+      botSnapshots = freezeDagBotSnapshots(dag, input.bots, !input.workspace && input.nodeExecutor === 'bot'
+        ? { defaultSelector: input.context?.chatBinding?.larkAppId }
+        : {});
       writeJson0600(join(stagedRunDir, 'dag.json'), dag);
       writeJson0600(join(stagedRunDir, 'spec.json'), spec);
       writeJson0600(
@@ -435,6 +866,7 @@ export function materializeSavedWorkflowRun(
         dag: artifactRef(stagedRunDir, 'dag.json'),
         spec: artifactRef(stagedRunDir, 'spec.json'),
         botSnapshots: artifactRef(stagedRunDir, 'bots.snapshot.json'),
+        ...(input.workspace ? { workspace: artifactRef(stagedRunDir, 'workspace.selection.json') } : {}),
         resolvedParams: artifactRef(stagedRunDir, 'params.resolved.json'),
         definitionSnapshot: artifactRef(stagedRunDir, 'definition.snapshot.json'),
       };
@@ -446,11 +878,14 @@ export function materializeSavedWorkflowRun(
         createdAt: now.toISOString(),
         authorizedAt: now.toISOString(),
         ...(input.context?.chatBinding ? { chatBinding: input.context.chatBinding } : {}),
-        ...(input.nodeExecutor ? { nodeExecutor: input.nodeExecutor } : {}),
-        ...(input.nodeExecutor && input.handoffIdentity ? { handoffIdentity: input.handoffIdentity } : {}),
+        ...(!input.workspace && input.nodeExecutor ? { nodeExecutor: input.nodeExecutor } : {}),
+        ...(input.workspace ? { projectWorkspace: { poolId: input.workspace.poolId, bindingHash: input.workspace.bindingHash } } : {}),
+        ...(!input.workspace && input.nodeExecutor && input.handoffIdentity ? { handoffIdentity: input.handoffIdentity } : {}),
         // The run's initiator (design 2026-11-03 workflow-dashboard-orchestration
         // §7.3): the `/workflow run` sender, bot runs only.
-        ...(input.nodeExecutor === 'bot' && initiator ? { initiator } : {}),
+        ...((input.workspace || input.nodeExecutor === 'bot') && initiator ? { initiator } : {}),
+        // A version saved from a Dashboard draft carries its confirmation (I13).
+        ...(savedConfirmation ? { flowConfirmation: savedConfirmation } : {}),
         artifacts,
       });
       publishRunEnvelopeOnce(stagedRunDir, envelope);

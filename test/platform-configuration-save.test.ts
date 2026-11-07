@@ -1,9 +1,9 @@
 import {it,expect,vi} from 'vitest';
 import {saveInstanceConfiguration,saveLocalConfiguration} from '../src/dashboard/web/platform/configuration-save.js';
 const initial={agentType:'codex',botId:'bot',proxyProfileId:'',workspaceKind:'volume',workspaceSource:'old',workspaceReadOnly:false,hostMountIds:[],mcpServerIds:['mcp'],modelChoice:'["profile","model"]'};
-const base=()=>({initial,row:{containerId:'id',agentType:'codex',revision:4,botId:'bot',image:'same-image'},mcp:{revision:1,serverIds:['mcp']},clis:[{agentType:'codex',configured:true,revision:4},{agentType:'pi',configured:true,revision:2}]});
+const base=()=>({initial,row:{containerId:'id',agentType:'codex',revision:4,botId:'bot',proxyProfileId:null,image:'same-image',authMethod:'api-key',modelProfileId:'profile',modelId:'model'},models:[],mcp:{revision:1,serverIds:['mcp']},clis:[{agentType:'codex',configured:true,revision:4},{agentType:'pi',configured:true,revision:2}]});
 it('saves MCP, binding and the selected CLI then rebuilds mounts under the resulting revision',async()=>{
- const calls:any[]=[];const api=vi.fn(async(p,m,b)=>{calls.push([p,m,b]);if(p.startsWith('/mcp-targets'))return {applied:true};if(m==='PUT')return {container:{containerId:'id',status:'ready',appliedRevision:5,revision:5,agentType:'codex'}};if(p.endsWith('/activate'))return {clis:[{agentType:'pi',active:true,revision:2,appliedRevision:2}]};if(p==='/containers')return {containers:[{containerId:'id',revision:6,agentType:'pi',image:'same-image'}]};return {container:{status:'ready'}};});
+ const calls:any[]=[];const api=vi.fn(async(p,m,b)=>{calls.push([p,m,b]);if(p.startsWith('/mcp-targets'))return {applied:true};if(m==='PUT')return {container:{containerId:'id',status:'ready',appliedRevision:5,revision:5,agentType:'codex',botId:'bot',proxyProfileId:null}};if(p.endsWith('/activate'))return {clis:[{agentType:'pi',active:true,revision:2,appliedRevision:2}]};if(p==='/containers')return {containers:[{containerId:'id',revision:6,agentType:'pi',image:'same-image'}]};return {container:{status:'ready'}};});
  await saveInstanceConfiguration(api,base(),{...initial,agentType:'pi',workspaceSource:'new',confirmRestart:true},'request');
  expect(calls.map(x=>x[0])).toEqual(['/mcp-targets/id','/containers/id','/containers/id/clis/pi/activate','/containers','/containers/id/upgrade']);
  expect(calls[1][2]).not.toHaveProperty('modelProfileId');expect(calls.at(-1)[2]).toMatchObject({revision:6,image:'same-image',workspaceSource:'new',confirmRestart:true});
@@ -51,15 +51,22 @@ it('applies local MCP, proxy and selected Bot CLI, queues workspace rebuild last
  expect(api.mock.calls.map(c=>c[0])).toEqual(['/mcp-targets/control','/control-proxy','/local-agent/bots/bot','/control-workspace']);
  expect(api.mock.calls[2][2]).toMatchObject({cliId:'pi',confirmRestart:true});
 });
-it.each(['codex','zcode'])('单CLI %s只改OAuth模型原地保存，不重建或重绑Bot',async agentType=>{
+it.each([['codex','native-model'],['zcode',null]] as const)('单CLI %s只改OAuth模型原地保存，不重建或重绑Bot',async(agentType,expectedModel)=>{
  const b:any=base();b.initial={...initial,agentType};b.row={...b.row,agentType};b.clis=[{agentType,configured:true,revision:4}];
- const api=vi.fn(async(p,m)=>p.startsWith('/mcp-targets')?{applied:true}:{container:{...b.row,status:'ready',revision:5,appliedRevision:5,sandboxId:'existing-sandbox'}});
+ const api=vi.fn(async(p,m,body)=>p.startsWith('/mcp-targets')?{applied:true}:{container:{...b.row,...body,status:'ready',revision:5,appliedRevision:5,sandboxId:'existing-sandbox'}});
  const result=await saveInstanceConfiguration(api,b,{...b.initial,modelChoice:'[null,null]',oauthModelId:'  native-model  '},'request');
  expect(result).toEqual({applied:true});expect(api.mock.calls.map(c=>[c[0],c[1]])).toEqual([['/mcp-targets/id','POST'],['/containers/id','PUT']]);
- expect(api.mock.calls[1][2]).toMatchObject({modelProfileId:null,modelId:'native-model',authMethod:'oauth'});expect(api.mock.calls[1][2]).not.toHaveProperty('botId');
+ expect(api.mock.calls[1][2]).toMatchObject({modelProfileId:null,modelId:expectedModel,authMethod:'oauth'});expect(api.mock.calls[1][2]).not.toHaveProperty('botId');
+});
+it('普通保存只有在认证、模型、Bot、Proxy和递增修订全部回读一致时才成功',async()=>{
+ const b:any=base();b.clis=[b.clis[0]];
+ for(const patch of [{authMethod:'oauth'},{modelProfileId:'other'},{modelId:'other'},{botId:null},{proxyProfileId:'other'},{revision:4,appliedRevision:4},{containerId:'other'}]){
+  const api=vi.fn(async(p,_m,body)=>p.startsWith('/mcp-targets')?{applied:true}:{container:{...b.row,...body,status:'ready',revision:5,appliedRevision:5,...patch}});
+  await expect(saveInstanceConfiguration(api,b,initial,'request')).rejects.toThrow('实例未确认生效');
+ }
 });
 it('OAuth默认模型清空为null，切回API Key不受旧OAuth输入影响',async()=>{
- const b:any=base();b.clis=[b.clis[0]];const api=vi.fn(async p=>p.startsWith('/mcp-targets')?{applied:true}:{container:{...b.row,status:'ready',revision:5,appliedRevision:5}});
+ const b:any=base();b.clis=[b.clis[0]];const api=vi.fn(async(p,_m,body)=>p.startsWith('/mcp-targets')?{applied:true}:{container:{...b.row,...body,status:'ready',revision:5,appliedRevision:5}});
  await saveInstanceConfiguration(api,b,{...initial,modelChoice:'[null,null]',oauthModelId:'   '},'request');expect(api.mock.calls[1][2]).toMatchObject({modelProfileId:null,modelId:null,authMethod:'oauth'});
  api.mockClear();await saveInstanceConfiguration(api,b,{...initial,modelChoice:'["profile","api-model"]',oauthModelId:'stale-native-model'},'request');expect(api.mock.calls[1][2]).toMatchObject({modelProfileId:'profile',modelId:'api-model',authMethod:'api-key'});expect(api.mock.calls).toHaveLength(2);
 });

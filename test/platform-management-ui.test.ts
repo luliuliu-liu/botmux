@@ -22,7 +22,7 @@ import {ConfigureAgent} from '../src/dashboard/web/platform/configure-agent.js';
 import {syncAgentConfiguration} from '../src/dashboard/web/platform/agent-configuration.js';
 import {AgentPoolPage} from '../src/dashboard/web/platform/agent-pools.js';
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT=true;
-const current={containerId:'agent-1',displayName:'Agent One',agentType:'pi',image:'pi:test',sandboxId:'sandbox',status:'ready',revision:1,appliedRevision:1,modelProfileId:'old',modelName:'Old',modelId:'model-1',egressHosts:['example.com'],botId:'bot-1',botName:'Bot',workspaceClaim:'workspace',stateClaim:'state',lastError:null};
+const current={containerId:'agent-1',displayName:'Agent One',agentType:'pi',image:'pi:test',sandboxId:'sandbox',status:'ready',revision:1,appliedRevision:1,authMethod:'api-key',modelProfileId:'old',modelName:'Old',modelId:'model-1',proxyProfileId:null,egressHosts:['example.com'],botId:'bot-1',botName:'Bot',workspaceClaim:'workspace',stateClaim:'state',lastError:null};
 const models=['old','new'].map(profileId=>({profileId,displayName:profileId,provider:'test',baseUrl:'https://example.com/v1',modelId:profileId,apiKeyConfigured:true,enabled:true}));
 const workspaceOptions={hostPathEnabled:true,tenantHome:'/tenant/home',defaultHostPath:'/tenant/home/project',hostRoots:['/tenant/home'],workspaces:[{kind:'volume',source:'custom-shared-volume',readOnly:false,useCount:0,shared:true},{kind:'volume',source:'old-workspace',readOnly:false,useCount:1},{kind:'hostpath',source:'/tenant/home/project',readOnly:true,useCount:1}]};
 const data={bots:[{botId:'bot-1',displayName:'Bot',appId:'cli_test',usage:'sandbox',containerId:'agent-1',containerRevision:1,containerStatus:'ready',secretConfigured:true}],models,containers:[current],agents:[]};
@@ -314,17 +314,19 @@ describe('model and Agent management UI',()=>{
       if(path==='/models')return {ok:true,json:async()=>({models:[{...models[0],protocol:agentType==='codex'?'openai-responses':'zcode-coding-plan',modelIds:['model-1','api-new']} ]})};
       if(path.startsWith('/mcp-targets/'))return {ok:true,json:async()=>(init?.method==='POST'?{applied:true}:{revision:1,serverIds:[],cliIds:[agentType],servers:[]})};
       if(path.endsWith('/clis'))return {ok:true,json:async()=>({clis:[{agentType,configured:true,active:true,revision:1,appliedRevision:1}]})};
-      if(path==='/containers/agent-1'&&init?.method==='PUT')return {ok:!failure,status:failure?409:200,json:async()=>failure?{message:'busy fixture'}:{container:{...row,revision:2,appliedRevision:2}}};
+      if(path==='/containers/agent-1'&&init?.method==='PUT')return {ok:!failure,status:failure?409:200,json:async()=>failure?{message:'busy fixture'}:{container:{...row,...JSON.parse(init.body),revision:2,appliedRevision:2}}};
       return fallback(url,init);
     });return row;
   }
   it.each(['codex','zcode'] as const)('单CLI %s可从API Key切换OAuth，仅原地保存模型',async agentType=>{
     const row=setupSingleConfiguration(agentType),done=vi.fn(),r=await mount(React.createElement(ConfigureAgent,{container:row as any,onClose:()=>{},onDone:done}));
     const picker=r.root.findByProps({'aria-label':'配置模型'});expect(picker.props.value).toBe('["old","model-1"]');expect(picker.findAllByType('option').some(option=>option.props.value==='[null,null]')).toBe(true);
-    await act(async()=>picker.props.onChange({target:{value:'[null,null]'}}));await act(async()=>r.root.findByProps({'aria-label':'配置 OAuth 模型'}).props.onChange({target:{value:' native-new '}}));
+    await act(async()=>picker.props.onChange({target:{value:'[null,null]'}}));
+    if(agentType==='codex')await act(async()=>r.root.findByProps({'aria-label':'配置 OAuth 模型'}).props.onChange({target:{value:' native-new '}}));
+    else expect(r.root.findAllByProps({'aria-label':'配置 OAuth 模型'})).toHaveLength(0);
     expect(r.root.findByProps({'aria-label':'配置模型'}).props.value).toBe('[null,null]');await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){}}));
     const writes=fetcher.mock.calls.filter(([,init])=>init?.method==='POST'||init?.method==='PUT');expect(writes.map(([url])=>url)).toEqual(['/api/platform/mcp-targets/agent-1','/api/platform/containers/agent-1']);
-    expect(JSON.parse(writes[1][1].body)).toMatchObject({modelProfileId:null,modelId:'native-new',authMethod:'oauth'});expect(JSON.parse(writes[1][1].body)).not.toHaveProperty('botId');expect(done).toHaveBeenCalled();
+    expect(JSON.parse(writes[1][1].body)).toMatchObject({modelProfileId:null,modelId:agentType==='codex'?'native-new':null,authMethod:'oauth'});expect(JSON.parse(writes[1][1].body)).not.toHaveProperty('botId');expect(done).toHaveBeenCalled();
     expect(fetcher.mock.calls.some(([url])=>url.includes('/upgrade')||url.includes('/login'))).toBe(false);
   });
   it('已有OAuth模型回填，失败保留输入，再切回API Key不重建',async()=>{
@@ -433,7 +435,15 @@ describe('model and Agent management UI',()=>{
     await act(async()=>local.root.findByProps({role:'menu','aria-label':`${name} 的操作`}).findAllByProps({role:'menuitem'})[0].props.onClick());
     const instance=await mount(React.createElement(CliConfigForm,{data:{...data,models:options,agents:[{id:agentType,name,protocols:agentType==='zcode'?['zcode-coding-plan']:['anthropic-messages','vercel-claude'],authMethods:['api-key','oauth']}]},container:current,cli:{agentType,revision:0,appliedRevision:0},onClose:()=>{},onDone:()=>{}} as any));
     const values=(select:TestRenderer.ReactTestInstance)=>select.findAllByType('option').slice(1).map(o=>[o.props.value,o.children.join('')]);
-    expect(values(local.root.findByProps({'aria-label':'本地认证 / 模型'}))).toEqual(values(instance.root.findByProps({'aria-label':'登录方式 / 模型'})));
+    const localSelect=local.root.findByProps({'aria-label':'本地认证 / 模型'}),instanceSelect=instance.root.findByProps({'aria-label':'登录方式 / 模型'});
+    expect(values(localSelect)).toEqual(values(instanceSelect));
+    if(agentType==='claude-code'){
+      expect(values(localSelect).some(([value])=>value==='[null,null]')).toBe(false);
+      expect(values(localSelect).find(([value])=>value===JSON.stringify(['vercel','']))?.[1]).toContain('Vercel Key');
+    }else{
+      await act(async()=>localSelect.props.onChange({target:{value:'[null,null]'}}));
+      expect(local.root.findAllByProps({name:'oauthModelId'})).toHaveLength(0);
+    }
   });
   it('retries a pending Codex OAuth sync with the original request and no old model reference',async()=>{
     const fallback=fetcher.getMockImplementation()!,requestId='00000000-0000-4000-8000-000000000001';
@@ -608,7 +618,7 @@ describe('model and Agent management UI',()=>{
     fetcher.mockImplementation(async(url:string,init?:any)=>url.endsWith('/containers')?{ok:true,json:async()=>({containers:[claude]})}:url.endsWith('/browser-profiles')?{ok:true,json:async()=>({profiles:[]})}:url.endsWith('/logins')?{ok:true,json:async()=>({logins:[]})}:fallback(url,init));
     const r=await mount(React.createElement(ManagementPage,{page:'agents'}));
     await act(async()=>r.root.findByProps({'aria-label':'Claude 的操作',type:'button'}).props.onClick());
-    await act(async()=>button(r,'原生 OAuth 登录').props.onClick());
+    await act(async()=>button(r,'Claude 订阅登录').props.onClick());
     expect(r.root.findByType(LoginWorkbench).props.containers).toContainEqual(claude);
     expect(r.root.findByProps({'aria-label':'登录目标 Agent 或 CLI'}).findAllByType('option').map(o=>o.props.value)).toContain(`${claude.containerId}:claude-code`);
   });
@@ -680,7 +690,7 @@ describe('model and Agent management UI',()=>{
   it('groups Agent choices by connection and expands every configured model',async()=>{
     const r=await mount(React.createElement(ContainerForm,{data:{...data,models:[{...models[0],modelIds:['model-1','model-2']}]} as any,container:current,onClose:()=>{},onDone:()=>{}}));
     const select=r.root.findByProps({name:'modelSelection'});
-    expect(select.props.defaultValue).toBe(JSON.stringify(['old','model-1']));
+    expect(select.props.value).toBe(JSON.stringify(['old','model-1']));
     expect(select.findByType('optgroup').findAllByType('option').map(o=>JSON.parse(o.props.value))).toEqual([['old','model-1'],['old','model-2']]);
   });
   it('saves multiple IDs without sending an empty replacement key and keeps a clone disabled',async()=>{
@@ -829,10 +839,11 @@ describe('model and Agent management UI',()=>{
  it('does not report success on a configuration failure',async()=>{const api=vi.fn(async()=>{throw Error('Agent 正在执行任务');});await expect(syncAgentConfiguration(api,current,'old')).rejects.toThrow('正在执行任务');});
   it('saves a newly selected model through the runtime sync path',async()=>{
     const done=vi.fn();const r=await mount(React.createElement(ContainerForm,{data:data as any,container:current,onClose:()=>{},onDone:done}));
+    await act(async()=>r.root.findByProps({name:'modelSelection'}).props.onChange({target:{value:JSON.stringify(['new','new'])}}));
     vi.stubGlobal('FormData',class{*[Symbol.iterator](){yield ['modelSelection',JSON.stringify(['new','new'])];yield ['botId','bot-1'];}});
     await act(async()=>r.root.findByType('form').props.onSubmit({preventDefault(){},currentTarget:{}}));
     expect(done).toHaveBeenCalledWith(expect.stringContaining('已同步'));
-    expect(JSON.parse(fetcher.mock.calls.find(([,init])=>init?.method==='PUT')![1].body)).toEqual({revision:1,modelProfileId:'new',modelId:'new',proxyProfileId:null});
+    expect(JSON.parse(fetcher.mock.calls.find(([,init])=>init?.method==='PUT')![1].body)).toEqual({revision:1,modelProfileId:'new',authMethod:'api-key',modelId:'new',proxyProfileId:null});
   });
   it('does not hide compatible model endpoints for an unrestricted Agent',async()=>{
     const r=await mount(React.createElement(ContainerForm,{data:{...data,models:[{...models[1],baseUrl:'https://new-endpoint.example/v1'}]} as any,container:{...current,networkMode:'unrestricted',egressHosts:[]},onClose:()=>{},onDone:()=>{}}));
@@ -852,6 +863,7 @@ describe('model and Agent management UI',()=>{
   });
   it('maps new and existing volume choices to compatible creation requests, with no separate shared mode',async()=>{
     const r=await mount(React.createElement(ContainerForm,{data:{...data,workspaceOptions} as any,container:null,onClose:()=>{},onDone:()=>{}}));
+    await act(async()=>r.root.findByProps({name:'modelSelection'}).props.onChange({target:{value:JSON.stringify(['old','old'])}}));
     vi.stubGlobal('FormData',class{*[Symbol.iterator](){yield ['displayName','test'];yield ['modelSelection',JSON.stringify(['old','old'])];yield ['workspaceSource','stale-source'];yield ['hostPathConfirmed','on'];}});
     const submit=()=>r.root.findByType('form').props.onSubmit({preventDefault(){},currentTarget:{}});
     await act(async()=>submit());let payload=JSON.parse(fetcher.mock.calls.at(-1)![1].body);expect(payload.workspace).toBe('new');expect(payload.workspaceSource).toBeUndefined();expect(payload.hostPathConfirmed).toBe(false);
@@ -862,6 +874,7 @@ describe('model and Agent management UI',()=>{
   });
   it('preserves selected volume when switching storage types, without leaking it into hostPath submission',async()=>{
     const r=await mount(React.createElement(ContainerForm,{data:{...data,workspaceOptions} as any,container:null,onClose:()=>{},onDone:()=>{}}));
+    await act(async()=>r.root.findByProps({name:'modelSelection'}).props.onChange({target:{value:JSON.stringify(['old','old'])}}));
     await act(async()=>r.root.findByProps({'aria-label':'数据卷'}).props.onChange({target:{value:'old-workspace'}}));
     await act(async()=>r.root.findByProps({'aria-label':'工作区类型'}).props.onChange({target:{value:'hostpath'}}));
     vi.stubGlobal('FormData',class{*[Symbol.iterator](){yield ['modelSelection',JSON.stringify(['old','old'])];yield ['workspaceSource','/chosen/path'];yield ['hostPathConfirmed','on'];}});

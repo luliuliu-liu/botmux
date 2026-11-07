@@ -118,6 +118,33 @@ function adHocEnvelope(runDir: string, runId: string) {
 }
 
 describe('v3 run envelope — strict schema + builders', () => {
+  it('冻结项目选择与池身份，拒绝文件或DAG跨池变化', () => {
+    const {base,runDir,runId}=freshRun();
+    const poolId='11111111-1111-4111-8111-111111111111',bindingHash='a'.repeat(64);
+    try{
+      const artifacts=seedAdHocArtifacts(runDir,runId);
+      writeJson(join(runDir,'dag.json'),{...dag(runId),nodes:[{...dag(runId).nodes[0],agentSelection:{poolId,requirement:'project-a',candidateIds:[],reason:'selected'}}]});
+      writeJson(join(runDir,'workspace.selection.json'),{poolId,bindingHash});
+      artifacts.dag=artifactRef(runDir,'dag.json');
+      artifacts.workspace=artifactRef(runDir,'workspace.selection.json');
+      const input={runId,createdAt:CREATED_AT,authorizedAt:AUTHORIZED_AT,artifacts,projectWorkspace:{poolId,bindingHash}};
+      expect(()=>makeAdHocRunEnvelope({...input,projectWorkspace:undefined})).toThrow(RunEnvelopeValidationError);
+      expect(()=>makeAdHocRunEnvelope({...input,artifacts:{...artifacts,workspace:undefined}})).toThrow(RunEnvelopeValidationError);
+      expect(()=>makeAdHocRunEnvelope({...input,nodeExecutor:'bot'})).toThrow(RunEnvelopeValidationError);
+      const envelope=makeAdHocRunEnvelope(input);
+      publishRunEnvelopeOnce(runDir,envelope);
+      expect(loadAuthorizedV3Run(runDir).envelope.authorization).toMatchObject({poolId,workspaceBindingHash:bindingHash,workspaceSha256:artifacts.workspace.sha256});
+      writeJson(join(runDir,'workspace.selection.json'),{poolId:'22222222-2222-4222-8222-222222222222',bindingHash});
+      expect(()=>loadAuthorizedV3Run(runDir)).toThrow(RunEnvelopeIntegrityError);
+      // 即使调用者重新冻结了被修改DAG的字节摘要，跨池goal仍然无权执行。
+      writeJson(join(runDir,'workspace.selection.json'),{poolId,bindingHash});
+      writeJson(join(runDir,'dag.json'),{...dag(runId),nodes:[{...dag(runId).nodes[0],agentSelection:{poolId:'22222222-2222-4222-8222-222222222222',requirement:'project-b',candidateIds:[],reason:'foreign'}}]});
+      const foreign=makeAdHocRunEnvelope({...input,artifacts:{...artifacts,dag:artifactRef(runDir,'dag.json')}});
+      writeFileSync(join(runDir,V3_RUN_ENVELOPE_FILE),serializeRunEnvelope(foreign));
+      expect(()=>loadAuthorizedV3Run(runDir)).toThrow(RunEnvelopeIntegrityError);
+    }finally{rmSync(base,{recursive:true,force:true});}
+  });
+
   it('builds an ad-hoc Gate-2 envelope and pins the approved artifact digests', () => {
     const { base, runDir, runId } = freshRun();
     try {

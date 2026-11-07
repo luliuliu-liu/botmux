@@ -7,6 +7,23 @@ import {terminalCapabilityPath} from './terminal-entry.js';
 type Grant={containerId:string;issuer:string;expires:number;secure:boolean};
 const uuid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const digest=(value:string)=>createHash('sha256').update(value).digest('hex');
+
+export class WorkerDashboardEntryError extends Error {
+  readonly status=409;
+  constructor(readonly code:'worker_dashboard_domain_required'|'invalid_worker_dashboard_host',message:string){super(message);}
+}
+/** localhost只能用于客户端本机入口；远程实例保持独立来源，不回退Control同源。 */
+export function workerDashboardOrigin(domain:string,requestHost:string,secure=false):string {
+  let entry:URL;
+  try{entry=new URL(`http://${requestHost}`);}catch{throw new WorkerDashboardEntryError('invalid_worker_dashboard_host','工作台入口地址无效');}
+  if(entry.username||entry.password||entry.pathname!=='/'||entry.search||entry.hash)throw new WorkerDashboardEntryError('invalid_worker_dashboard_host','工作台入口地址无效');
+  const host=entry.hostname.toLowerCase();
+  const loopback=host==='localhost'||host.endsWith('.localhost')||host==='[::1]'||/^127\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}$/.test(host);
+  if((domain==='localhost'||domain.endsWith('.localhost'))&&!loopback){
+    throw new WorkerDashboardEntryError('worker_dashboard_domain_required','远程工作台尚未配置可达泛域名：BOTMUX_WORKER_DASHBOARD_DOMAIN 仍为 localhost，会连接到你的电脑。请配置指向 devbox 的独立实例域名后重试。');
+  }
+  return `${secure?'https':'http'}://${domain}${entry.port?`:${entry.port}`:''}`;
+}
 export function createWorkerDashboardProxy(deps:{resolve:(id:string)=>Promise<ProxyTarget>;resolveTerminal?:(id:string)=>Promise<ProxyTarget>;issuer:()=>string;domain?:string;now?:()=>number}){
   const domain=deps.domain||'localhost',now=deps.now||Date.now,tickets=new Map<string,Grant>(),sessions=new Map<string,Grant>();
   const active=new Map<ServerResponse|Duplex,Grant>();
@@ -36,11 +53,12 @@ export function createWorkerDashboardProxy(deps:{resolve:(id:string)=>Promise<Pr
     async link(containerId:string,requestHost:string,secure=false){
       if(!new RegExp(`^${uuid}$`).test(containerId))throw new Error('invalid_container_id');
       if(!deps.issuer())throw new Error('dashboard_auth_unavailable');
+      const endpoint=new URL(workerDashboardOrigin(domain,requestHost,secure));
+      endpoint.hostname=`w-${containerId}.${domain}`;
       // Validate existence/readiness before issuing a one-use, instance-bound ticket.
       await deps.resolve(containerId);prune();const ticket=randomBytes(32).toString('base64url');
       tickets.set(digest(ticket),{containerId,issuer:digest(deps.issuer()),expires:now()+60000,secure});
-      const port=new URL(`http://${requestHost}`).port;
-      return {url:`${secure?'https':'http'}://w-${containerId}.${domain}${port?`:${port}`:''}/?ticket=${ticket}`};
+      return {url:`${endpoint.origin}/?ticket=${ticket}`};
     },
     async http(req:IncomingMessage,res:ServerResponse){
       prune();const containerId=id(req);if(!containerId)return false;

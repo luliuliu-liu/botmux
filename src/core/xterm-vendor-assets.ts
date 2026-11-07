@@ -103,7 +103,7 @@ export const WEB_TERMINAL_VENDOR_SCRIPTS: readonly XtermVendorAsset[] = [
 
 /**
  * 路由标记。worker 侧它可以出现在任意前缀之后（`/`、`/s/<会话>/`、自建反代加的前缀），
- * 控制台侧只认根路径 `/__botmux/vendor/…`。
+ * 控制台侧认根路径及受限的原生 Workflow 终端前缀；只服务固定公开库文件，不访问会话数据。
  */
 export const XTERM_VENDOR_MARKER = '/__botmux/vendor/';
 
@@ -126,11 +126,15 @@ export function xtermVendorRootUrl(a: XtermVendorAsset): string {
  */
 export function matchXtermVendorPath(
   pathname: string,
-  mode: 'root' | 'anyPrefix',
+  mode: 'root' | 'anyPrefix' | 'dashboard',
 ): { asset: XtermVendorAsset | null } | null {
-  const at = mode === 'root'
-    ? (pathname.startsWith(XTERM_VENDOR_MARKER) ? 0 : -1)
-    : pathname.lastIndexOf(XTERM_VENDOR_MARKER);
+  // 实时页按浏览器所在终端路径拼资源；Dashboard在本地服务同一份公开库，
+  // 不把无会话令牌的<script>请求转给Worker，也不开放任意前缀或文件读取。
+  const workflowPrefix = mode === 'dashboard' && /^\/(?:api\/v3\/runs\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/nodes\/[^/]+\/terminal|s\/[0-9a-f-]{36})\/__botmux\/vendor\//.test(pathname);
+  const at = mode === 'anyPrefix'
+    ? pathname.lastIndexOf(XTERM_VENDOR_MARKER)
+    : workflowPrefix ? pathname.indexOf(XTERM_VENDOR_MARKER)
+      : (pathname.startsWith(XTERM_VENDOR_MARKER) ? 0 : -1);
   if (at < 0) return null;
   return { asset: ASSET_BY_PATH.get(pathname.slice(at + XTERM_VENDOR_MARKER.length)) ?? null };
 }

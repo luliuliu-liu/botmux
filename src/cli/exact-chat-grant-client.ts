@@ -1,5 +1,6 @@
 import { cliAuthBind, signCliAuth } from '../dashboard/auth.js';
 import { loopbackFetchImpl } from '../core/loopback-fetch.js';
+import {WORKFLOW_CHAT_GRANT_PATH,type WorkflowLaunchGrantLease} from '../core/workflow-grant-protocol.js';
 
 export interface ExactChatGrantDaemon {
   ipcPort: number;
@@ -11,9 +12,10 @@ export interface ExactChatGrantClientInput {
   secret: string;
   receiverLarkAppId: string;
   chatId: string;
-  operation?: 'grant' | 'revoke' | 'readback';
+  operation?: 'grant' | 'revoke' | 'readback' | 'resolve';
   subjectOpenIds?: string[];
   subjectLarkAppIds?: string[];
+  workflowLease?: WorkflowLaunchGrantLease;
 }
 
 export class ExactChatGrantClientError extends Error {
@@ -41,7 +43,8 @@ export async function requestExactChatGrant(
   if (input.daemon.larkAppId !== input.receiverLarkAppId) {
     throw new ExactChatGrantClientError('receiver daemon mismatch');
   }
-  const path = '/api/grants/chat';
+  if(input.workflowLease&&(!['grant','revoke'].includes(input.operation??'grant')||input.subjectOpenIds||input.subjectLarkAppIds))throw new ExactChatGrantClientError('invalid workflow lease request');
+  const path = input.workflowLease?WORKFLOW_CHAT_GRANT_PATH:'/api/grants/chat';
   const { ts, nonce, sig } = signCliAuth(
     input.secret,
     cliAuthBind('POST', path, input.daemon.ipcPort),
@@ -60,8 +63,10 @@ export async function requestExactChatGrant(
         operation: input.operation ?? 'grant',
         receiverLarkAppId: input.receiverLarkAppId,
         chatId: input.chatId,
-        ...(input.subjectOpenIds ? { subjectOpenIds: input.subjectOpenIds } : {}),
-        ...(input.subjectLarkAppIds ? { subjectLarkAppIds: input.subjectLarkAppIds } : {}),
+        ...(input.workflowLease?{leaseId:input.workflowLease.leaseId,subjectOpenId:input.workflowLease.subjectOpenId}:{
+          ...(input.subjectOpenIds ? { subjectOpenIds: input.subjectOpenIds } : {}),
+          ...(input.subjectLarkAppIds ? { subjectLarkAppIds: input.subjectLarkAppIds } : {}),
+        }),
       }),
     });
   } catch (err: any) {
@@ -82,6 +87,7 @@ export async function requestExactChatGrant(
       body,
     );
   }
+  if(input.workflowLease&&(body.workflowLeaseFenced!==true||body.leaseId!==input.workflowLease.leaseId||body.subjectOpenId!==input.workflowLease.subjectOpenId||body.receiverLarkAppId!==input.receiverLarkAppId||body.chatId!==input.chatId||body.leaseActive!==(input.operation!=='revoke')||input.operation!=='revoke'&&body.grantsTalk!==true))throw new ExactChatGrantClientError('workflow receiver did not confirm lease fencing',response.status);
   return body;
 }
 

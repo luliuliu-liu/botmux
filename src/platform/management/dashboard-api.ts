@@ -14,6 +14,7 @@ import { createLocalBotDetacher,LocalDetachError } from './local-bot-detach.js';
 import { withLocalInventoryLock } from './local-inventory-lock.js';
 import {originMatchesHost} from '../../dashboard/control-csrf.js';
 import {createLocalControlAgent,LocalControlError} from './local-control-agent.js';
+import {WorkerDashboardEntryError} from './worker-dashboard-proxy.js';
 import {createExistingBotsManager,ExistingBotError} from './existing-bots.js';
 import {containerRole} from './container-role.js';
 import {createAgentSkillManagement,imageSkillAgents} from './agent-skill-management.js';
@@ -393,6 +394,7 @@ export function createPlatformDashboardApi(deps:{
       jsonRes(res,result.status,result.data);return true;
     }catch(error){
       if(error instanceof McpManagementError){jsonRes(res,error.status,{error:error.code,message:error.message});return true;}
+      if(error instanceof WorkerDashboardEntryError){jsonRes(res,error.status,{error:error.code,message:error.message});return true;}
       const cliMessages=new Set(['已有环境变量覆盖 CLI 配置，请先处理冲突','已有 GitHub 登录，请先在终端处理冲突','GitHub 登录已被手动修改，请先处理冲突','已有 GitHub SSH 配置，请先在终端处理冲突','GitHub SSH 配置已被手动修改，请先处理冲突','已有 Git 作者配置，请先在终端处理冲突','Docker 使用外部凭据助手，请先处理冲突','Docker 登录已被手动修改，请先处理冲突','该仓库已有用户登录，请先在终端处理冲突','GitHub Token 登录失败','GitHub 账号验证失败','GitHub SSH 登录验证失败','Docker 仓库登录失败']);
       if(error instanceof Error&&cliMessages.has(error.message)){jsonRes(res,409,{error:error.message.includes('冲突')?'cli_login_conflict':'cli_login_failed',message:error.message});return true;}
       if(error instanceof AgentSkillError){jsonRes(res,error.status,{error:'agent_skill_failed',message:error.message});return true;}

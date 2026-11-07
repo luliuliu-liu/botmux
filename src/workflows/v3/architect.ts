@@ -17,6 +17,7 @@ import { createEphemeralPool, type EphemeralPoolDeps } from './ephemeral-pool.js
 import { readAndValidateManifest, ManifestValidationError } from './manifest.js';
 import {
   GOAL_ENV,
+  MANIFEST_SCHEMA_VERSION,
   SPEC_SCHEMA_VERSION,
   type BotSnapshot,
   type Manifest,
@@ -30,6 +31,36 @@ import type { V3ArchitectBotAssignment, V3RosterBot, V3SketchAssignee } from './
 const ARCHITECT_NODE_ID = 'architect';
 const MAX_UNAVAILABLE_CHARS = 200;
 const ARCHITECT_ATTEMPT_ID = 'architect/attempts/001';
+
+/** 原生工具链示例：由生产者显式声明状态，从真实文件计算元数据。
+ * 只作为 Architect 指令下发，宿主不会执行它或替失败结果补成功。 */
+export const ARCHITECT_MANIFEST_RECIPE = `import fs from "node:fs";
+import path from "node:path";
+import {createHash, randomUUID} from "node:crypto";
+const status = process.argv[1], summary = process.argv[2];
+if (!["ok", "fail"].includes(status) || !summary?.trim()) throw Error("explicit status and summary required");
+const output = fs.realpathSync(process.env.BOTMUX_GOAL_OUTPUT_DIR);
+const manifest = process.env.BOTMUX_GOAL_MANIFEST_PATH;
+if (!manifest) throw Error("manifest path required");
+const files = [];
+if (status === "ok") {
+  for (const [name, kind, mime] of [["dag.json", "json", "application/json"], ["architect-notes.md", "markdown", "text/markdown"]]) {
+    const fd = fs.openSync(path.join(output, name), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      const before = fs.fstatSync(fd);
+      if (!before.isFile()) throw Error("artifact must be a regular file");
+      const data = fs.readFileSync(fd), after = fs.fstatSync(fd);
+      if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw Error("artifact changed while reading");
+      files.push({name, path: name, kind, mime, bytes: data.length, sha256: createHash("sha256").update(data).digest("hex")});
+    } finally { fs.closeSync(fd); }
+  }
+}
+const error = status === "fail" ? {code: process.argv[3], message: process.argv[4]} : undefined;
+if (status === "fail" && (!error.code?.trim() || !error.message?.trim())) throw Error("explicit failure code and message required");
+const value = {schemaVersion: ${MANIFEST_SCHEMA_VERSION}, status, summary, files, ...(error ? {error} : {})};
+const temporary = manifest + "." + randomUUID() + ".tmp";
+try { fs.writeFileSync(temporary, JSON.stringify(value), {flag: "wx", mode: 0o600}); fs.renameSync(temporary, manifest); }
+finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }`;
 
 export interface RunArchitectInput {
   runId: string;
@@ -97,6 +128,14 @@ export function buildArchitectGoal(specPath: string, specJsonPath: string, poolO
     '  1. `$BOTMUX_GOAL_OUTPUT_DIR/dag.json`',
     '  2. `$BOTMUX_GOAL_OUTPUT_DIR/architect-notes.md`',
     '- Write the manifest only to `$BOTMUX_GOAL_MANIFEST_PATH`. Every `files[].path` in the manifest is relative to `$BOTMUX_GOAL_OUTPUT_DIR`, not relative to the manifest directory.',
+    `- Manifest is a complete JSON object with schemaVersion=${MANIFEST_SCHEMA_VERSION}, status="ok" or "fail", summary:string, and files:array. A bare {files:[...]} is invalid.`,
+    '- Each files[] entry MUST include name, path, kind, bytes (actual non-negative file byte count), sha256 (actual lowercase SHA-256 of file bytes), and mime. Use kind=json/mime=application/json for dag.json, kind=markdown/mime=text/markdown for architect-notes.md.',
+    '- Calculate bytes and sha256 from the finished files, not from character counts or guessed values. One Node or python3 -I command can read both file buffers, compute their sizes and SHA-256, then JSON-serialize the complete manifest; do not manually estimate or copy old metadata.',
+    '- Set status="ok" only after you have completed both files. If the task fails, write status="fail", a summary, error:{code,message,retryable?}, and files:[] or only completed valid files. Never claim success merely because a file exists; the host still validates every file and the DAG.',
+    '- Existing-tool recipe after completing the task: explicitly choose ok plus your summary below. For failure use fail plus summary, error code, error message; it records failure, not success. This is one tool call within your budget:',
+    '```bash',
+    `node --input-type=module -e '${ARCHITECT_MANIFEST_RECIPE}' -- ok "DAG and notes prepared"`,
+    '```',
     '- Do not start or run the workflow. Do not call botmux v3 run.',
     '- The host will validate dag.json with botmux v3 DAG validation and ask the human to review it.',
     '',
@@ -235,7 +274,7 @@ function architectPlacementLines(assignment: V3ArchitectBotAssignment): string[]
 }
 
 export async function runArchitect(input: RunArchitectInput): Promise<RunArchitectResult> {
-  const goal = buildArchitectGoal(input.specPath, input.specJsonPath,currentPoolCatalog(),input.botAssignment);
+  const goal = buildArchitectGoal(input.specPath, input.specJsonPath,currentPoolCatalog(undefined,input.runDir),input.botAssignment);
   const attemptDir = join(input.runDir, 'architect', 'attempts', '001');
   const outputDir = join(attemptDir, 'work');
   const inputsPath = join(attemptDir, 'inputs.json');

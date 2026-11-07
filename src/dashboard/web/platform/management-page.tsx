@@ -20,7 +20,8 @@ import {ImageCatalog,type CachedImage} from './image-catalog.js';
 import {BrowserInstanceForm,DeleteBrowserInstance} from './browser-instances.js';
 import {cachedManagementGet,clearManagementCache} from './management-cache.js';
 import {CliLoginDialog} from './cli-logins.js';
-import {dynamicModel,idsOf,modelOptionLabel,modelGroupLabel} from './model-options.js';
+import {configuredModelSelection,dynamicModel,idsOf,normalizeModelSelection,modelSelectionForCreate} from './model-options.js';
+import {ModelAuthSelector} from './model-auth-selector.js';
 import {newPlatformRequestId} from './request-id.js';
 
 type Bot={botId:string;displayName:string;appId:string;usage:'local'|'free'|'sandbox';localRevision?:string;localDetachPending?:boolean;localConfigured?:boolean;localOwned?:boolean;localState?:string;bindingRevision?:number;localCliId?:string;ownerConfigured?:boolean;containerId?:string;containerName?:string;containerRevision?:number;containerStatus?:string;detachPending?:boolean;secretConfigured:boolean};
@@ -169,7 +170,7 @@ export function ManagementPage({page,embedded=false,agentSection='all'}:{page:'b
       {label:'删除',danger:true,run:()=>{setSelected(c);setModal('delete');}},
     ]:[
       ...(c.runtimeKind==='native-botmux'?[{label:'打开 Agent 工作台',disabled:c.status!=='ready',run:()=>void openDashboard(c)},
-        ...((c.requiresLogin||c.authMethod==='oauth')?[{label:'原生 OAuth 登录',disabled:c.status!=='ready',run:()=>{setSelected(c);setModal('logins');}}]:[])]:[]),
+        ...((c.requiresLogin||c.authMethod==='oauth')?[{label:c.agentType==='claude-code'?'Claude 订阅登录':'原生 OAuth 登录',disabled:c.status!=='ready',run:()=>{setSelected(c);setModal('logins');}}]:[])]:[]),
       {label:'修改配置',run:()=>setConfigureTarget(c)},
       {label:'登录 CLI',disabled:c.status!=='ready',run:()=>{setSelected(c);setModal('cli-login');}},
       {label:'镜像升级 / 回滚',disabled:!['ready','error'].includes(c.status),run:()=>{setSelected(c);setModal('upgrade');}},
@@ -178,9 +179,9 @@ export function ManagementPage({page,embedded=false,agentSection='all'}:{page:'b
     ];
 
     return <Fragment key={c.containerId}><tr><td colSpan={multi?2:undefined}><CompactText text={c.displayName}/><small><CompactText text={`${c.agentType==='browser'?'浏览器':c.agentType} · ${c.imageLabel||c.image}`}/></small>{c.createdAt?<small>{new Date(c.createdAt).toLocaleDateString()}</small>:null}{multi?<button type="button" className="pm-cli-toggle" aria-expanded={expanded} onClick={()=>void toggleClis(c)}>{expanded?'收起 CLI':`展开 CLI（${clis?.length??c.imageAgents!.length}）`}</button>:null}</td>{!multi?<td><CompactText text={c.modelName||'—'}/><small><CompactText text={c.agentType==='browser'?'手动管理 · 无到期时间':c.modelId||"CLI 原生默认模型"}/></small></td>:null}<td><CompactText text={c.agentType==='browser'?'不适用':c.botName||'未绑定'}/></td><td><span className={`pm-status pm-status-${c.status}`}>{syncingId===c.containerId?'同步中…':c.runtimeHealth==='unhealthy'?'服务恢复未确认':labels[c.status]||c.status}</span><small data-tip={`已应用 ${c.appliedRevision} / 目标 ${c.revision}`}>版本 {c.appliedRevision} / {c.revision}</small>{c.lastError?<small className="hint-warn"><CompactText text={c.lastError}/></small>:null}</td><td><AgentActions name={c.displayName} disabled={!!syncingId} actions={instanceActions}/></td></tr>
-    {multi&&expanded?(clis??[]).map(cli=>{const oauthEligible=cli.configured===true&&['codex','claude-code','traex','zcode'].includes(cli.agentType)&&(cli.authMethod==='oauth'||cli.modelProtocol==='vercel-claude');return <tr key={`${c.containerId}:${cli.agentType}`} className="pm-cli-row"><td><span className="pm-cli-name">{agentNameOf(cli.agentType)}</span>{cli.active?<span className="pm-state">当前使用</span>:null}{!cli.configured?<span className="pm-state">未配置</span>:null}</td><td><CompactText text={cli.configured?(cli.authMethod==='oauth'?'原生 OAuth 登录':cli.modelName||'—'):'—'}/><small><CompactText text={cli.configured?(cli.authMethod==='oauth'?(cli.modelId||'CLI 原生默认模型'):(cli.modelId||'—')):'保存配置后可切换使用'}/></small></td><td>{cli.oauthState?loginStates[cli.oauthState]||cli.oauthState:'—'}</td><td>{cli.configured?<><small data-tip={`已应用 ${cli.appliedRevision} / 目标 ${cli.revision}`}>版本 {cli.appliedRevision} / {cli.revision}</small>{cli.lastError?<small className="hint-warn"><CompactText text={cli.lastError}/></small>:cli.appliedRevision!==cli.revision?<small className="hint-warn">待同步</small>:null}</>:'—'}</td><td><AgentActions name={`${c.displayName} · ${agentNameOf(cli.agentType)}`} disabled={!!syncingId} actions={[
+    {multi&&expanded?(clis??[]).map(cli=>{const oauthEligible=cli.configured===true&&((['codex','zcode'].includes(cli.agentType)&&cli.authMethod==='oauth')||(cli.agentType==='claude-code'&&cli.modelProtocol==='vercel-claude'));return <tr key={`${c.containerId}:${cli.agentType}`} className="pm-cli-row"><td><span className="pm-cli-name">{agentNameOf(cli.agentType)}</span>{cli.active?<span className="pm-state">当前使用</span>:null}{!cli.configured?<span className="pm-state">未配置</span>:null}</td><td><CompactText text={cli.configured?(cli.authMethod==='oauth'?'原生 OAuth 登录':cli.modelName||'—'):'—'}/><small><CompactText text={cli.configured?(cli.authMethod==='oauth'?(cli.modelId||'CLI 原生默认模型'):(cli.modelId||'—')):'保存配置后可切换使用'}/></small></td><td>{cli.oauthState?loginStates[cli.oauthState]||cli.oauthState:'—'}</td><td>{cli.configured?<><small data-tip={`已应用 ${cli.appliedRevision} / 目标 ${cli.revision}`}>版本 {cli.appliedRevision} / {cli.revision}</small>{cli.lastError?<small className="hint-warn"><CompactText text={cli.lastError}/></small>:cli.appliedRevision!==cli.revision?<small className="hint-warn">待同步</small>:null}</>:'—'}</td><td><AgentActions name={`${c.displayName} · ${agentNameOf(cli.agentType)}`} disabled={!!syncingId} actions={[
       {label:'修改模型',run:()=>setCliTarget({container:c,cli})},
-      ...(oauthEligible?[{label:'原生 OAuth 登录',disabled:c.status!=='ready',run:()=>{setSelected(c);setLoginCli(cli.agentType);setModal('logins');}}]:[]),
+      ...(oauthEligible?[{label:cli.agentType==='claude-code'?'Claude 订阅登录':'原生 OAuth 登录',disabled:c.status!=='ready',run:()=>{setSelected(c);setLoginCli(cli.agentType);setModal('logins');}}]:[]),
     ]}/></td></tr>;}):null}
     {multi&&expanded&&!clis?<tr className="pm-cli-row"><td colSpan={5}>正在读取 CLI 列表…</td></tr>:null}
     </Fragment>;})}</tbody></table>{!data.containers.length?<p className="empty">暂无 Agent</p>:null}</div>
@@ -289,18 +290,17 @@ export function ContainerForm({data,container,onClose,onDone,hideModel=false}:{d
   const [imageProfile,setImageProfile]=useState('native');
   const [cachedImages,setCachedImages]=useState<CachedImage[]>([]),[cachedHostArch,setCachedHostArch]=useState<string|undefined>(),[selectedImage,setSelectedImage]=useState('');
   useEffect(()=>{if(container)return;void platformApi('/image-cache').then(v=>{if(!Array.isArray(v.images))throw Error('镜像缓存响应无效，请刷新');setCachedImages(v.images);setCachedHostArch(v.hostArch);}).catch(e=>setError(String(e)));},[]);
-  const [oauth,setOauth]=useState(container?.authMethod==='oauth');
+  const initialModelSelection=container?configuredModelSelection(container.authMethod,container.modelProfileId,container.modelId):'';
+  const [modelSelection,setModelSelection]=useState(initialModelSelection),[oauthModelId,setOauthModelId]=useState(container?.authMethod==='oauth'&&container.agentType==='codex'?container.modelId||'':'');
   const agent=data.agents.find(a=>a.id===agentType);
-  const compatible=(m:Model)=>container?.runtimeKind==='pi-rpc'?(m.protocol||'openai-completions')==='openai-completions'&&(m.authMethod||'api-key')==='api-key':
-    (agent?.protocols||['openai-completions']).includes(m.protocol||'openai-completions')&&(agent?.authMethods||['api-key']).includes(m.authMethod||'api-key');
   const admitted=()=>true;
   const workspaceOptions=data.workspaceOptions;
   const submit=async(event:FormEvent<HTMLFormElement>)=>{event.preventDefault();setBusy(true);setError('');const values=Object.fromEntries(new FormData(event.currentTarget));
-    try{let modelProfileId:string|null=null,modelId:string|null=null;
-    if(!hideModel){const selection=JSON.parse(String(values.modelSelection));modelProfileId=selection[0];modelId=modelProfileId===null?String(values.oauthModelId||'').trim()||null:selection[1];}
+    try{let modelProfileId:string|null=null,modelId:string|null=null,authMethod:'api-key'|'oauth'='api-key';
+    if(!hideModel){const normalized=normalizeModelSelection(agentType,modelSelection,oauthModelId,data.models);modelProfileId=normalized.modelProfileId;modelId=normalized.modelId;authMethod=normalized.authMethod;}
       if(container){if(hideModel){const observed=await syncInstanceBinding(platformApi,container,String(values.botId||'')||null,String(values.proxyProfileId||'')||null);onDone(`机器人与代理已同步（版本 ${observed.appliedRevision}），模型配置请在各 CLI 行单独修改。`);}
         else{const observed=await syncAgentConfiguration(platformApi,container,modelProfileId,String(values.botId||'')||null,modelId,String(values.proxyProfileId||'')||null);onDone(`Agent 模型与配置已同步（版本 ${observed.appliedRevision}），后续任务使用新配置。`);}}
-      else {const {modelSelection,oauthModelId,...fields}=values;const created=await platformApi('/containers','POST',{...fields,modelProfileId,modelId,authMethod:modelProfileId===null?'oauth':'api-key',
+      else {const fields={...values};delete fields.modelSelection;delete fields.oauthModelId;const created=await platformApi('/containers','POST',{...fields,...modelSelectionForCreate({modelProfileId,modelId,authMethod}),
         workspace:workspaceType==='hostpath'?'hostpath':volumeSource?'volume':'new',
         workspaceSource:workspaceType==='hostpath'?values.workspaceSource:volumeSource||undefined,
         cpu:Number(values.cpu||1),memoryMiB:Number(values.memoryMiB||2048),mountGlobalReadOnly:values.mountGlobalReadOnly==='on',...(workspaceOptions?.globalReadOnlyMounts?{hostMountIds}:{}),workspaceReadOnly:readOnly,dockerAccess:imageProfile==='dev'&&values.dockerAccess==='on',hostPathConfirmed:workspaceType==='hostpath'&&values.hostPathConfirmed==='on',requestId:requestId.current,agentType,...(mcpIds.length?{mcpServerIds:mcpIds}:{})});
@@ -310,15 +310,16 @@ export function ContainerForm({data,container,onClose,onDone,hideModel=false}:{d
   };
   return <Modal title={container?'Agent 配置':'创建 Agent'} onClose={onClose} busy={busy}><form onSubmit={submit}>
     <label><Parameter help="用于列表识别，创建后不可修改。最多 64 字符。">名称</Parameter><input name="displayName" defaultValue={container?.displayName||''} required maxLength={64} disabled={!!container}/></label>
-    <label><Parameter help="Agent 类型创建后固定。Worker 保留飞书通信和 Dashboard。">Agent</Parameter><select aria-label="Agent 类型" disabled={!!container} value={agentType} onChange={event=>{setAgentType(event.target.value);setImageProfile('native');setSelectedImage('');setOauth(false);}}>{data.agents.filter(a=>a.supported&&a.id!=='browser').map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
+    <label><Parameter help="Agent 类型创建后固定。Worker 保留飞书通信和 Dashboard。">Agent</Parameter><select aria-label="Agent 类型" disabled={!!container} value={agentType} onChange={event=>{setAgentType(event.target.value);setImageProfile('native');setSelectedImage('');setModelSelection('');setOauthModelId('');}}>{data.agents.filter(a=>a.supported&&a.id!=='browser').map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
     <label><Parameter help="从本地缓存选择兼容镜像。远端镜像请先到支持的 Agent 页面拉取。Dev 镜像包含四种 CLI、编译调试和 Docker 客户端；非本机架构镜像不可选择。">镜像</Parameter>{container?<input value={container.image} title={container.image} disabled/>:<select name="image" required value={selectedImage} onChange={e=>{setSelectedImage(e.target.value);setImageProfile(cachedImages.find(i=>i.id===e.target.value)?.roles.includes('control')?'dev':'native');}}><option value="">选择已缓存的兼容镜像</option>{hostFirst(cachedImages.filter(i=>i.agents.includes(agentType)&&i.roles.includes('worker')),cachedHostArch).map(i=>{const foreign=!!i.architecture&&!!cachedHostArch&&i.architecture!==cachedHostArch;return <option key={i.id} value={i.id} disabled={foreign}>{i.roles.includes('control')?'Dev · ':'Worker · '}{imageOptionLabel(i.tags,i.id,i.architecture,cachedHostArch)}</option>;})}</select>}</label>
     {!container?<input type="hidden" name="imageProfile" value={imageProfile}/>:null}
     {!container?<McpSelection clis={cachedImages.find(i=>i.id===selectedImage)?.agents??[agentType]} value={mcpIds} onChange={setMcpIds} disabled={busy}/>:null}
     {!container?<><label>CPU 配额<input name="cpu" type="number" min="0.25" step="0.25" defaultValue="1"/></label><label>内存 MiB<input name="memoryMiB" type="number" min="128" defaultValue="2048"/></label><>{workspaceOptions?.globalReadOnlyMounts?<HostMountSelection mounts={workspaceOptions.globalReadOnlyMounts} value={hostMountIds} onChange={setHostMountIds} disabled={busy}/>:<label className="pm-check"><input name="mountGlobalReadOnly" type="checkbox" disabled={!workspaceOptions?.globalReadOnlyHostPath}/><span>挂载 /host 全局只读目录</span></label>}</></>:null}
     {!container&&imageProfile==='dev'?<label className="pm-check"><input name="dockerAccess" type="checkbox"/><Parameter help="挂载宿主 Docker socket，权限等同宿主机管理员；仅可信开发任务开启。普通 Worker 默认不挂载。">允许 Dev Agent 使用宿主 Docker</Parameter></label>:null}
     <ProxySelect defaultValue={container?.proxyProfileId}/>
-    {!hideModel?<><label><Parameter help="选择 Agent 支持的认证方式：原生 OAuth 不需要模型管理记录；API Key 模型按连接分组。">登录方式 / 模型</Parameter><select key={agentType} aria-label="登录方式 / 模型" name="modelSelection" defaultValue={container?JSON.stringify(container.authMethod==='oauth'?[null,null]:[container.modelProfileId,container.modelId??'']):''} onChange={e=>setOauth(JSON.parse(e.target.value)[0]===null)} required><option value="" disabled>选择原生登录或具体模型</option>{['codex','traex','zcode'].includes(agentType)&&agent?.authMethods?.includes('oauth')?<option value={JSON.stringify([null,null])}>{agentType==='zcode'?'BigModel 账号 OAuth 登录（浏览器授权）':'原生 OAuth 登录 · 无需模型连接'}</option>:null}{data.models.filter(m=>m.authMethod!=='oauth'&&(m.enabled||m.profileId===container?.modelProfileId)&&compatible(m)&&admitted()).map(m=><optgroup key={m.profileId} label={modelGroupLabel(m)} disabled={!m.enabled}>{idsOf(m).map(id=><option key={id} value={JSON.stringify([m.profileId,id])}>{modelOptionLabel(m,id)}</option>)}</optgroup>)}</select></label>
-    {oauth?<><label><Parameter help="留空不固定模型，由原生 CLI 选择默认值；如需指定，可填写该账号实际支持的模型 ID。此项仅保存到此 Agent，不创建共享连接。">OAuth 模型（可选）</Parameter><input name="oauthModelId" maxLength={300} defaultValue={container?.authMethod==='oauth'?container.modelId||'':''} placeholder="使用 CLI 原生默认模型"/></label><ConfigHelp>创建完成后，在 Agent 操作菜单选择“原生 OAuth 登录”。凭据只保存在该 Worker；不会写入模型管理或复制到其他实例。</ConfigHelp></>:null}</>:hideModel?<ConfigHelp>此实例包含多个 Agent CLI：模型与认证在展开后的每个 CLI 行单独配置；此处只修改机器人绑定和代理。</ConfigHelp>:null}
+    {!hideModel?<><ModelAuthSelector agentType={agentType} models={data.models.filter(m=>admitted())} protocols={container?.runtimeKind==='pi-rpc'?['openai-completions']:agent?.protocols||['openai-completions']} authMethods={container?.runtimeKind==='pi-rpc'?['api-key']:agent?.authMethods||['api-key']} currentProfileId={container?.modelProfileId}
+      value={modelSelection} onChange={setModelSelection} oauthModelId={oauthModelId} onOauthModelIdChange={setOauthModelId} disabled={busy} selectAriaLabel="登录方式 / 模型"/>
+    {modelSelection===configuredModelSelection('oauth',null,null)?<ConfigHelp>创建完成后，在 Agent 操作菜单完成原生 OAuth 登录。凭据只保存在该 Worker；不会写入模型管理或复制到其他实例。</ConfigHelp>:null}</>:hideModel?<ConfigHelp>此实例包含多个 Agent CLI：模型与认证在展开后的每个 CLI 行单独配置；此处只修改机器人绑定和代理。</ConfigHelp>:null}
     <label><Parameter help="可选择空闲机器人。选择“不绑定机器人”会同步解绑但保留容器，确认生效后机器人回到空闲池。">飞书机器人</Parameter><select name="botId" defaultValue={container?.botId||''}><option value="">不绑定机器人</option>{data.bots.filter(b=>b.usage==='free'||b.botId===container?.botId).map(b=><option key={b.botId} value={b.botId}>{b.displayName} · {b.appId}</option>)}</select></label>
     {container?<label><Parameter help="挂载创建后固定。更换挂载需新建 Agent，可复用历史目录或卷。">工作区</Parameter><input disabled title={container.workspaceClaim} value={`${container.workspaceKind||'volume'} · ${container.workspaceClaim}${container.workspaceReadOnly?'（只读）':''}`}/></label>:<>
       <label><Parameter help="先选择 /workspace 的存储类型，再选择具体数据卷或宿主机目录；与凭据 state 卷独立。">工作区类型</Parameter><select aria-label="工作区类型" value={workspaceType} onChange={e=>{setWorkspaceType(e.target.value);setReadOnly(e.target.value==='hostpath');}}><option value="volume">volume · Docker 数据卷</option><option value="hostpath" disabled={!workspaceOptions?.hostPathEnabled}>hostPath · 宿主机目录</option></select></label>
@@ -335,24 +336,23 @@ export function ContainerForm({data,container,onClose,onDone,hideModel=false}:{d
  * through the container reconcile path; inactive ones only rewrite files. */
 export function CliConfigForm({data,container,cli,onClose,onDone,onRefresh}:{data:Data;container:Container;cli:CliConfigurationRecord;onClose:()=>void;onDone:(m:string)=>void;onRefresh?:()=>Promise<void>}){
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
-  const [oauth,setOauth]=useState(cli.authMethod==='oauth');
+  const [modelSelection,setModelSelection]=useState(configuredModelSelection(cli.authMethod,cli.modelProfileId,cli.modelId));
+  const [oauthModelId,setOauthModelId]=useState(cli.authMethod==='oauth'&&cli.agentType==='codex'?cli.modelId||'':'');
   const submitting=useRef(false);
   const agent=data.agents.find(a=>a.id===cli.agentType);
   const name=agent?.name||cli.agentType;
-  const compatible=(m:Model)=>(agent?.protocols||['openai-completions']).includes(m.protocol||'openai-completions')&&(agent?.authMethods||['api-key']).includes(m.authMethod||'api-key');
   return <Modal title={`${name} · 模型与认证`} onClose={onClose} busy={busy}><form onSubmit={async e=>{
     e.preventDefault();if(submitting.current)return;submitting.current=true;setBusy(true);setError('');
-    try{const values=Object.fromEntries(new FormData(e.currentTarget));
-      const selection=JSON.parse(String(values.modelSelection));
-      const modelProfileId=selection[0] as string|null;
-      const modelId=modelProfileId===null?String(values.oauthModelId||'').trim()||null:(selection[1] as string);
-      const observed=await saveCliConfiguration(platformApi,container.containerId,cli,modelProfileId,modelId);
+    try{const normalized=normalizeModelSelection(cli.agentType,modelSelection,oauthModelId,data.models);
+      const observed=await saveCliConfiguration(platformApi,container.containerId,cli,normalized.modelProfileId,normalized.modelId);
       onDone(`${name} 配置已保存并同步（版本 ${observed.revision}）。`);}
     catch(error){await onRefresh?.();setError(error instanceof Error?error.message:String(error));}finally{submitting.current=false;setBusy(false);}
   }}>
     <ConfigHelp>{cli.active?'此 CLI 正被机器人使用：保存会同步到实例，运行时确认后才生效。':'此 CLI 未投入使用：实例空闲时可保存配置；需要使用时在实例操作中选择“切换 CLI”。'}</ConfigHelp>
-    <label><Parameter help="选择该 CLI 支持的认证方式和模型连接；与实例级配置相互独立。">登录方式 / 模型</Parameter><select key={cli.agentType} aria-label="登录方式 / 模型" name="modelSelection" defaultValue={JSON.stringify(cli.authMethod==='oauth'?[null,null]:[cli.modelProfileId,cli.modelId??''])} onChange={e=>setOauth(JSON.parse(e.target.value)[0]===null)} required><option value="" disabled>选择原生登录或具体模型</option>{['codex','traex','zcode'].includes(cli.agentType)&&agent?.authMethods?.includes('oauth')?<option value={JSON.stringify([null,null])}>{cli.agentType==='zcode'?'BigModel 账号 OAuth 登录（浏览器授权）':'原生 OAuth 登录 · 无需模型连接'}</option>:null}{data.models.filter(m=>m.authMethod!=='oauth'&&(m.enabled||m.profileId===cli.modelProfileId)&&compatible(m)).map(m=><optgroup key={m.profileId} label={modelGroupLabel(m)} disabled={!m.enabled}>{idsOf(m).map(id=><option key={id} value={JSON.stringify([m.profileId,id])}>{modelOptionLabel(m,id)}</option>)}</optgroup>)}</select></label>
-    {oauth?<><label><Parameter help="留空不固定模型，由原生 CLI 选择默认值；如需指定，可填写该账号实际支持的模型 ID。">OAuth 模型（可选）</Parameter><input name="oauthModelId" maxLength={300} defaultValue={cli.authMethod==='oauth'?cli.modelId||'':''} placeholder="使用 CLI 原生默认模型"/></label><ConfigHelp>保存后在此 CLI 行选择“原生 OAuth 登录”完成授权；凭据只保留在此 Agent。</ConfigHelp></>:null}
+    <ModelAuthSelector agentType={cli.agentType} models={data.models} protocols={agent?.protocols||['openai-completions']} authMethods={agent?.authMethods||['api-key']} currentProfileId={cli.modelProfileId}
+      value={modelSelection} onChange={setModelSelection} oauthModelId={oauthModelId} onOauthModelIdChange={setOauthModelId} disabled={busy}
+      selectAriaLabel="登录方式 / 模型" help="选择该 CLI 支持的认证方式和模型连接；与实例级配置相互独立。"/>
+    {modelSelection===configuredModelSelection('oauth',null,null)?<ConfigHelp>保存后在此 CLI 行选择“原生 OAuth 登录”完成授权；凭据只保留在此 Agent。</ConfigHelp>:null}
     {cli.agentType==='claude-code'&&!data.models.some(m=>m.enabled&&m.authMethod!=='oauth'&&m.protocol==='anthropic-messages')?<ConfigHelp>未找到可用的普通 API Key 连接：请在模型管理创建 Anthropic Messages 协议连接；方舟 Coding Plan 可克隆现有连接并改用 Anthropic 地址。</ConfigHelp>:null}
     {busy?<p className="hint" role="status">正在同步到 Agent，等待运行时确认…</p>:null}
     {error?<p role="alert" className="hint-warn">{error}</p>:null}

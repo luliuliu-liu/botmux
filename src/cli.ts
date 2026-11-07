@@ -7804,7 +7804,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   execution background-revoke <任务ID> --json
               撤销本会话原执行人启动的后台任务凭据登记
   auth request [--scope "<scope1 scope2,...>"] [--json]
-              为本轮发起人生成飞书授权链接，返回 JSON；由 Agent 将链接发给用户
+              为本轮发起人生成飞书授权链接，返回 JSON；单聊由 Agent 发给用户，群聊由 botmux 私聊发起人
   auth wait --request-id <id> [--json]
               等待当前授权请求就绪，最多 5 分钟；成功后可重试原操作
   mojo-containment list|revoke
@@ -20319,13 +20319,12 @@ switch (command) {
   case 'stop-bot': await runFleetMutationCommand('stop-bot', () => cmdStopBot(process.argv.slice(3))); break;
   case '__platform-goal': {
     if((await import('./platform/management/container-role.js')).containerRole()!=='worker')throw new Error('native_worker_image_required');
-    const {executeWorkerCommand}=await import('./platform/workflow/worker-command.js');
+    const {runWorkerCommandStdio}=await import('./platform/workflow/worker-command-entry.js');
     const controller=new AbortController();
     process.on('SIGTERM',()=>controller.abort('worker_command_cancelled'));
     process.on('SIGINT',()=>controller.abort('worker_command_cancelled'));
-    const result=await executeWorkerCommand(JSON.parse(readFileSync(0,'utf8')),controller.signal,
-      session=>{if(process.send)process.send({type:'session',session});});
-    console.log(JSON.stringify(result));
+    await runWorkerCommandStdio({signal:controller.signal,
+      onSession:session=>{if(process.send)process.send({type:'session',session});}});
     break;
   }
   case '__platform-worker': {
@@ -20342,7 +20341,7 @@ switch (command) {
       const result=await response.json() as {sessions:Array<{status:string}>};
       return result.sessions.some(session=>!['idle','closed','dormant','waiting'].includes(session.status));
     };
-    if(input.action==='inspect')console.log(JSON.stringify({...readFleetStatus(),busy:await busy()}));
+    if(input.action==='inspect')console.log(JSON.stringify({...readFleetStatus(),busy:await busy(),workerCommandFeatures:['project-workspace-v1']}));
     else if(input.action==='login-pause'||input.action==='login-resume'){
       const {nativeWorkerLogin}=await import('./platform/management/native-worker-login.js');
       console.log(JSON.stringify(await nativeWorkerLogin(input,{home:homedir(),busy,fleet:()=>readFleetStatus(),

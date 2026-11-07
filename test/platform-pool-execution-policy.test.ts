@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { validateDag } from '../src/workflows/v3/dag.js';
 import { runWorkflow } from '../src/workflows/v3/runtime.js';
-import { assertPoolExecutionAvailable } from '../src/workflows/v3/pool-execution-policy.js';
+import { assertPoolExecutionAvailable, assertExternalBotExecutionAvailable } from '../src/workflows/v3/pool-execution-policy.js';
 import { configureExecutionBackend } from '../src/workflows/v3/execution-backend.js';
 
 const selection = { poolId: '11111111-1111-1111-1111-111111111111', requirement: 'code', candidateIds: [], reason: 'missing' };
@@ -24,6 +24,13 @@ it('requires resource admission for pool nodes nested in a loop', () => {
   const dag = { runId: 'loop-pool', nodes: [{ id: 'loop', type: 'loop', body: { nodes: [{ id: 'code', type: 'goal', agentSelection: selection }] } }] } as any;
   expect(() => assertPoolExecutionAvailable(dag)).toThrow('agent_pool_backend_required');
   expect(() => assertPoolExecutionAvailable(dag, { prepareResource: () => ({ ready: true }) })).not.toThrow();
+});
+it('Dashboard外部执行在提交前拒绝池选择及已注册池后端，普通流程不受影响',()=>{
+  const ordinary=validateDag({runId:'ordinary',nodes:[{id:'code',type:'goal',goal:'code'}]});
+  const pooled=validateDag({runId:'pooled',nodes:[{id:'code',type:'goal',goal:'code',agentSelection:selection}]});
+  expect(()=>assertExternalBotExecutionAvailable(pooled)).toThrow('agent_pool_external_executor_conflict');
+  expect(()=>assertExternalBotExecutionAvailable(ordinary,{resourceManaged:()=>true})).toThrow('agent_pool_external_executor_conflict');
+  expect(()=>assertExternalBotExecutionAvailable(ordinary,{resourceManaged:()=>false})).not.toThrow();
 });
 it('preserves ordinary local Workflow execution', () => {
   expect(() => assertPoolExecutionAvailable(validateDag({ runId: 'local', nodes: [{ id: 'code', type: 'goal', goal: 'code' }] }))).not.toThrow();

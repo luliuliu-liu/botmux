@@ -4,7 +4,7 @@ const save=(path:string,value:unknown)=>writeFileSync(path,JSON.stringify(value)
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createNativeWorkerConfigurator,applyNativeCliConfiguration,writeNativeAgentModel,nativeModelEnvironment,type NativeConfiguration} from '../src/platform/management/native-worker-config.js';
-import {readContainerAgentEnvironment} from '../src/platform/management/container-agent-files.mjs';
+import {readContainerAgentEnvironment,readContainerAgentModel,containerAgentEnvironmentFile} from '../src/platform/management/container-agent-files.mjs';
 import {dshModelPatchPath,readDshPlatformModel} from '../src/platform/management/dsh-model-patch.js';
 const dirs:string[]=[];
 afterEach(()=>{for(const dir of dirs.splice(0))rmSync(dir,{recursive:true,force:true});});
@@ -21,13 +21,22 @@ function fixture(){
   return {home,state,apply,configuration,bots};
 }
 describe('native worker multi-CLI',()=>{
-  it('ZCode account login never invokes the API-key credential writer',async()=>{
-    const f=fixture();
-    // With an empty key the writer would fail loudly, so reaching a clean
-    // return proves the OAuth path left native credentials untouched.
+  it('ZCode OAuth显式切换原生认证来源，不发送API Key或删除原生登录数据',async()=>{
+    const f=fixture(),calls:unknown[]=[];
+    const credentials=join(f.home,'.zcode','v2','credentials.json');mkdirSync(join(f.home,'.zcode','v2'),{recursive:true});writeFileSync(credentials,'fixture-native-oauth');
     await writeNativeAgentModel(f.home,{generation:'g',revision:1,agentType:'zcode',binding:null,
-      model:{provider:'zai',baseUrl:'https://api.z.ai',protocol:'zcode-coding-plan',authMethod:'oauth',modelId:'',modelIds:[],apiKey:''}});
+      model:{provider:'zai',baseUrl:'https://api.z.ai',protocol:'zcode-coding-plan',authMethod:'oauth',modelId:'',modelIds:[],apiKey:''}},
+      {zcodeConfigure:input=>{calls.push(input);return {configured:true,authMethod:input.authMethod};}});
+    expect(calls).toEqual([{authMethod:'oauth'}]);expect(readFileSync(credentials,'utf8')).toBe('fixture-native-oauth');
     expect(existsSync(join(f.home,'.botmux','platform','zcode-key-owned.json'))).toBe(false);
+  });
+  it('ZCode同Key回切仍检测原生文件漂移，配置ACK身份不匹配时拒绝',async()=>{
+    const f=fixture(),dir=join(f.home,'.zcode','v2');mkdirSync(dir,{recursive:true});
+    const config={generation:'g',revision:1,agentType:'zcode' as const,binding:null,model:{provider:'zai',baseUrl:'https://api.z.ai',protocol:'zcode-coding-plan',authMethod:'api-key',modelId:'',modelIds:[],apiKey:'fixture-key'}};
+    let count=0;const deps={zcodeConfigure:(input:{authMethod:string})=>{count++;writeFileSync(join(dir,'credentials.json'),'manual-source');writeFileSync(join(dir,'provider_config.json'),'manual-provider');return {configured:true,authMethod:input.authMethod};}};
+    await writeNativeAgentModel(f.home,config,deps);await writeNativeAgentModel(f.home,config,deps);expect(count).toBe(1);
+    writeFileSync(join(dir,'credentials.json'),'oauth-source');await writeNativeAgentModel(f.home,config,deps);expect(count).toBe(2);expect(readFileSync(join(dir,'credentials.json'),'utf8')).toBe('manual-source');
+    await expect(writeNativeAgentModel(f.home,{...config,model:{...config.model,authMethod:'oauth'}},{zcodeConfigure:()=>({configured:true,authMethod:'api-key'})})).rejects.toThrow('zcode_native_authentication_unconfirmed');
   });
 
   it('refreshes a peer API key at the same CLI revision through both apply paths',async()=>{
@@ -131,6 +140,49 @@ describe('native worker multi-CLI',()=>{
     expect(summary.clis['claude-code']).toMatchObject({revision:2});
   });
 });
+describe('Control共享原生环境落盘与启动消费',()=>{
+  const apiModel={provider:'fixture',baseUrl:'https://model.example/anthropic',protocol:'anthropic-messages',authMethod:'api-key',apiKey:'fixture-claude-key',modelId:'main',modelIds:['main','fast','large','agent'],claudeModelRouting:{haiku:'fast',sonnet:'large',subagent:'agent'}};
+  const expectedApi={ANTHROPIC_BASE_URL:apiModel.baseUrl,ANTHROPIC_AUTH_TOKEN:apiModel.apiKey,ANTHROPIC_MODEL:'main',ANTHROPIC_DEFAULT_HAIKU_MODEL:'fast',ANTHROPIC_DEFAULT_SONNET_MODEL:'large',ANTHROPIC_DEFAULT_OPUS_MODEL:'main',CLAUDE_CODE_SUBAGENT_MODEL:'agent',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',DISABLE_UPDATES:'1',DISABLE_AUTOUPDATER:'1'};
+  const staleInherited={ANTHROPIC_API_KEY:'stale-key',ANTHROPIC_AUTH_TOKEN:'stale-token',CLAUDE_CODE_OAUTH_TOKEN:'stale-oauth',ANTHROPIC_CUSTOM_HEADERS:'stale-header',ANTHROPIC_BASE_URL:'https://stale.invalid',ANTHROPIC_MODEL:'stale-model',ANTHROPIC_DEFAULT_HAIKU_MODEL:'stale-fast',CLAUDE_CODE_SUBAGENT_MODEL:'stale-agent',OPENAI_API_KEY:'other-cli-key',CODEX_HOME:'/other/codex',CLAUDE_CONFIG_DIR:'/split/claude',PI_CODING_AGENT_DIR:'/other/pi',BOTMUX_NATIVE_AGENT:'claude-code',TERM:'xterm-256color',USER_TEST_FLAG:'keep'};
+  it('原生配置应用把完整字段写入实际环境文件，启动器消费相同字段并剔除污染',async()=>{
+    const f=fixture();await f.apply({...f.configuration,agentType:'claude-code',model:apiModel});
+    // 路径来自真实配置接口；读取真实生成文件，不猜另一个不存在的配置路径。
+    const file=containerAgentEnvironmentFile(f.home),stored=JSON.parse(readFileSync(file,'utf8'));
+    expect(stored.agents['claude-code']).toEqual(expectedApi);
+    expect(stored.models['claude-code']).toBe('main');
+    expect(readContainerAgentEnvironment(f.home,'claude-code')).toEqual(expectedApi);
+    const {nativeAgentEnvironment}=await import(new URL('../../agent-control-plane/images/agents/agent-cli.mjs',import.meta.url).href);
+    const env=nativeAgentEnvironment(f.home,'claude-code',staleInherited);
+    expect(env).toEqual({...expectedApi,HOME:f.home,TERM:'xterm-256color',USER_TEST_FLAG:'keep'});
+    expect(f.bots()[0]).toMatchObject({cliId:'claude-code',workingDir:'/workspace',env:{}});
+    expect(f.bots()[0].larkAppId).toBe(f.configuration.binding!.appId);
+  });
+  it('API与Vercel来源来回切换清除旧认证和模型钉选，保留其他CLI及原生登录文件',async()=>{
+    const f=fixture(),peer={agentType:'codex' as const,revision:1,model:{provider:'fixture',baseUrl:'https://model.example/v1',protocol:'openai-responses',authMethod:'api-key',modelId:'peer-model',apiKey:'fixture-peer-key'}};
+    const first={...f.configuration,agentType:'claude-code' as const,model:apiModel,clis:[peer]};
+    await f.apply(first);
+    const peerBefore=readContainerAgentEnvironment(f.home,'codex');
+    mkdirSync(join(f.home,'.claude'),{recursive:true});
+    const credentials=join(f.home,'.claude','.credentials.json');writeFileSync(credentials,'fixture-native-login-preserved',{mode:0o600});
+    const subscription={provider:'vercel',baseUrl:'https://ai-gateway.vercel.sh',protocol:'anthropic-messages',authMethod:'oauth',apiKey:'fixture-vercel-key',modelId:'',modelIds:[]};
+    await f.apply({...first,revision:2,model:subscription});
+    const expected={ANTHROPIC_BASE_URL:'https://ai-gateway.vercel.sh/claude-code',ANTHROPIC_CUSTOM_HEADERS:'x-ai-gateway-api-key: Bearer fixture-vercel-key',DISABLE_UPDATES:'1',DISABLE_AUTOUPDATER:'1',CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS:'1'};
+    const stored=JSON.parse(readFileSync(containerAgentEnvironmentFile(f.home),'utf8'));
+    expect(stored.agents['claude-code']).toEqual(expected);
+    expect(readContainerAgentModel(f.home,'claude-code')).toBeNull();
+    const {nativeAgentEnvironment}=await import(new URL('../../agent-control-plane/images/agents/agent-cli.mjs',import.meta.url).href);
+    expect(nativeAgentEnvironment(f.home,'claude-code',staleInherited)).toEqual({...expected,HOME:f.home,TERM:'xterm-256color',USER_TEST_FLAG:'keep'});
+    expect(readContainerAgentEnvironment(f.home,'codex')).toEqual(peerBefore);
+    expect(readFileSync(credentials,'utf8')).toBe('fixture-native-login-preserved');
+    await f.apply({...first,revision:3,model:{...apiModel,modelId:'large'}});
+    const next={...expectedApi,ANTHROPIC_MODEL:'large',ANTHROPIC_DEFAULT_OPUS_MODEL:'large'};
+    expect(readContainerAgentEnvironment(f.home,'claude-code')).toEqual(next);
+    expect(nativeAgentEnvironment(f.home,'claude-code',staleInherited)).toEqual({...next,HOME:f.home,TERM:'xterm-256color',USER_TEST_FLAG:'keep'});
+    expect(readContainerAgentEnvironment(f.home,'codex')).toEqual(peerBefore);
+    expect(readFileSync(credentials,'utf8')).toBe('fixture-native-login-preserved');
+  });
+});
+
 describe('native worker authority',()=>{
   it('Traex API Key and OAuth share one native global home without leaking the key to TOML',async()=>{
     const f=fixture();f.configuration.agentType='traex';

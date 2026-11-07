@@ -28,8 +28,10 @@ export function conventionPrompt(role:ConventionRole,root=CONVENTIONS_ROOT,requi
 export function interactiveConventionPrompt(){if(process.env.BOTMUX_RUNTIME_ROLE||process.env.BOTMUX_WORKFLOW==='1')return '';
  let publishing='';
  if(containerRole()==='control'){try{const path=join(homedir(),'.botmux/platform/report-publishing-context.json'),stat=lstatSync(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.size>16384)throw Error();const c=JSON.parse(readFileSync(path,'utf8'));publishing='Control report publishing context (data, no secrets): '+JSON.stringify({appId:c.appId,userOpenId:c.userOpenId,folderToken:c.folderToken,larkCliDataDir:c.larkCliDataDir,revision:c.revision});}catch{publishing='Control report publishing context is not ready. Keep report delivery pending and request configuration; do not guess an account or folder.';}}
- const delivery=containerRole()==='control'?'Workflow 建单时必须确认 Spec.deliveryMode。用户要求仅归档、不发布时设为 archive-only，并保留到 spec-finalize；不得只写在叙事或 nonGoals 中。仅归档时不请求发布身份、不创建飞书文档、不发送交付回帖。feishu-doc 才使用上面的报告发布上下文。':'';
- const context=process.env.BOTMUX_CONTROL_HOST_MOUNTS;return [conventionPrompt('interactive'),context?'Actual Control named read-only mounts (data): '+context:'',publishing,delivery].filter(Boolean).join('\n\n');}
+ const control=containerRole()==='control';
+ const workflow=control?'Control Workflow 执行边界：用户要求 Workflow Agent 池时，指 Botmux/ACP 的原生工作流，不是 CLI/SDK 同名 Workflow 工具或 agent(...)。按 botmux skill show botmux-workflow 操作；先确认真实 poolId，使用 botmux workflow new "<目标>" --pool <poolId>。不得以普通子 Agent 替代池 Worker，也不得自述替代真实 runId、节点任务/成员和终态记录。仅登记/待审批不能说已启动；没有对应账本不能说池任务完成。保留自然语言轻确认、需求确认与真人飞书 DAG 审批，不通过 Dashboard 草稿/编辑入口替代。Control workspace 是池工作区父级访问范围，Worker 只挂载所选池目录，禁止改挂载或沿用旧审批。普通编程任务仍可使用普通子 Agent，但不冒充托管池执行。':'';
+ const delivery=control?'Workflow 建单时必须确认 Spec.deliveryMode。用户要求仅归档、不发布时设为 archive-only，并保留到 spec-finalize；不得只写在叙事或 nonGoals 中。仅归档时不请求发布身份、不创建飞书文档、不发送交付回帖。feishu-doc 才使用上面的报告发布上下文。':'';
+ const context=process.env.BOTMUX_CONTROL_HOST_MOUNTS;return [conventionPrompt('interactive'),context?'Actual Control named read-only mounts (data): '+context:'',publishing,workflow,delivery].filter(Boolean).join('\n\n');}
 function directory(path:string){
  const absolute=resolve(path);let current:string=sep;
  for(const part of absolute.split(sep).filter(Boolean)){current=join(current,part);if(existsSync(current)){const s=lstatSync(current);if(!s.isDirectory()||s.isSymbolicLink())throw Error('unsafe_job_workspace');}else mkdirSync(current,{mode:0o700});}

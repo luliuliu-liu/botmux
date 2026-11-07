@@ -1,5 +1,6 @@
 import {createHash,randomUUID} from 'node:crypto';
 import {conventionDigest} from './conventions.js';
+import {readProjectWorkspaceSelection,WORKFLOW_WORKSPACE_SELECTION_FILE} from './project-workspace.js';
 import {deliveryModeFromArtifacts,WORKFLOW_POLICY_REGISTRATION_PATH} from '../../workflows/v3/delivery-policy.js';
 import {existsSync,readFileSync,lstatSync,mkdirSync} from 'node:fs';
 import {basename,dirname,join,resolve} from 'node:path';
@@ -16,7 +17,7 @@ type Descriptor=Identity&{conventionsDigest?:string;conventionsVersion?:1;execut
 const read=(path:string)=>{const stat=lstatSync(path);if(!stat.isFile()||stat.isSymbolicLink())throw new Error('unsafe_workflow_storage_file');return JSON.parse(readFileSync(path,'utf8'));};
 const save=(path:string,value:unknown)=>atomicWriteFileSync(path,JSON.stringify(value),{mode:0o600});
 const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const artifacts=['dag.json','bots.snapshot.json','run.json','spec.json','goal.request.json','params.resolved.json','definition.snapshot.json','grill.state.json','dag.approval.json','authoring.audit.ndjson','lineage.json'];
+const artifacts=['dag.json','bots.snapshot.json','run.json','spec.json','goal.request.json','params.resolved.json','definition.snapshot.json','grill.state.json','dag.approval.json','authoring.audit.ndjson','lineage.json',WORKFLOW_WORKSPACE_SELECTION_FILE];
 
 /** Bounded maintenance, never a terminal request fallback. Only existing,
  * unexpired run-scoped descriptors may issue GET; no bootstrap/renew/acquire. */
@@ -86,8 +87,9 @@ export function createPlatformJournalResolver(deps:{home:string;active:boolean;r
           }
           if(!files['dag.json'])throw new Error('workflow_definition_not_frozen');
           const definition=JSON.parse(files['dag.json']);if(definition.runId!==id)throw new Error('workflow_definition_identity_mismatch');
+          const selected=readProjectWorkspaceSelection(directory);if(!selected)throw new Error('workflow_pool_selection_required');
           const fresh={runId:id,definition,executionProfiles:files['bots.snapshot.json']?JSON.parse(files['bots.snapshot.json']):{},
-            workspaceBinding:{claim:process.env.BOTMUX_WORKSPACE_CLAIM||'agent-workspace',kind:process.env.BOTMUX_WORKSPACE_KIND||'volume',executionMode:process.env.BOTMUX_WORKFLOW_EXECUTION_MODE==='ephemeral'?'ephemeral':'pool',conventionsVersion:1 as const,...(conventionDigest()?{conventionsDigest:conventionDigest()}:{})},authorizationSnapshot:{artifacts:files}};
+            workspaceBinding:{...selected,conventionsVersion:1 as const,...(conventionDigest()?{conventionsDigest:conventionDigest()}:{})},authorizationSnapshot:{artifacts:files}};
           const frozenHash=hash(Object.fromEntries(Object.entries(files).filter(([name])=>name!=='grill.state.json'))),pending=existsSync(pendingPath)?read(pendingPath):null;
           if(pending&&pending.frozenHash!==frozenHash)throw new Error('pending_workflow_registration_conflict');
           const registration=pending?.registration||fresh,registrationHash=hash(registration);
